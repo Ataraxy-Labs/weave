@@ -2,8 +2,6 @@ mod server;
 mod tools;
 
 use rmcp::ServiceExt;
-use weave_core::git::find_repo_root;
-use weave_crdt::EntityStateDoc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,11 +15,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_ansi(false)
         .init();
 
-    let repo_root = find_repo_root()?;
-    let state_path = repo_root.join(".weave").join("state.automerge");
-    let state = EntityStateDoc::open(&state_path)?;
-
-    let server = server::WeaveServer::new(state, repo_root);
+    // Server starts immediately — repo discovery is deferred to first tool call.
+    // This way the MCP server works even when launched from outside a git repo.
+    let server = server::WeaveServer::new();
 
     let transport = (tokio::io::stdin(), tokio::io::stdout());
     let service = server.serve(transport).await?;
