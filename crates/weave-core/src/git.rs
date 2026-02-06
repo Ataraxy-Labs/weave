@@ -13,6 +13,27 @@ pub fn find_repo_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(PathBuf::from(root))
 }
 
+/// Find the root of the git repository that contains the given path.
+/// Uses `git -C <dir> rev-parse --show-toplevel` so it works regardless of CWD.
+pub fn find_repo_root_from_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(|p| if p.as_os_str().is_empty() { Path::new(".") } else { p })
+            .unwrap_or(Path::new("."))
+            .to_path_buf()
+    };
+    let output = Command::new("git")
+        .args(["-C", &dir.to_string_lossy(), "rev-parse", "--show-toplevel"])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!("Not inside a git repository: {}", dir.display()).into());
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(PathBuf::from(root))
+}
+
 /// Find the merge base between two refs.
 pub fn find_merge_base(head: &str, branch: &str) -> Result<String, Box<dyn std::error::Error>> {
     let output = Command::new("git")

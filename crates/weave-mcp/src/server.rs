@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -32,13 +32,69 @@ pub struct WeaveServer {
 }
 
 impl WeaveServer {
-    /// Lazily initialize and return the repo context.
-    async fn get_context(&self) -> Result<tokio::sync::MappedMutexGuard<'_, RepoContext>, String> {
+    /// Discover repo root using multiple strategies:
+    /// 1. If file_path is absolute, derive repo from that path
+    /// 2. WEAVE_REPO env var
+    /// 3. CWD-based git discovery
+    fn discover_repo_root(file_path_hint: Option<&str>) -> Result<PathBuf, String> {
+        // Strategy 1: Absolute file path -> git -C <parent> rev-parse
+        if let Some(fp) = file_path_hint {
+            let p = Path::new(fp);
+            if p.is_absolute() {
+                if let Ok(root) = git::find_repo_root_from_path(p) {
+                    return Ok(root);
+                }
+            }
+        }
+
+        // Strategy 2: WEAVE_REPO env var
+        if let Ok(repo) = std::env::var("WEAVE_REPO") {
+            let p = PathBuf::from(&repo);
+            if p.is_dir() {
+                return Ok(p);
+            }
+        }
+
+        // Strategy 3: CWD-based discovery
+        if let Ok(root) = git::find_repo_root() {
+            return Ok(root);
+        }
+
+        Err(
+            "Cannot find git repository. Either:\n\
+             - Pass an absolute file path (e.g. /Users/you/project/src/lib.ts)\n\
+             - Set WEAVE_REPO env var to the repo root\n\
+             - Run weave-mcp from within a git repo"
+                .to_string(),
+        )
+    }
+
+    /// Resolve a file path to (repo_root-relative path, absolute path).
+    /// Handles both absolute and relative paths.
+    fn resolve_file_path(repo_root: &Path, file_path: &str) -> (String, PathBuf) {
+        let p = Path::new(file_path);
+        if p.is_absolute() {
+            // Convert absolute -> relative to repo root
+            let relative = p
+                .strip_prefix(repo_root)
+                .map(|r| r.to_string_lossy().to_string())
+                .unwrap_or_else(|_| file_path.to_string());
+            (relative, p.to_path_buf())
+        } else {
+            // Already relative, resolve to absolute
+            (file_path.to_string(), repo_root.join(file_path))
+        }
+    }
+
+    /// Lazily initialize repo context, using file_path as a hint for repo discovery.
+    async fn get_context(
+        &self,
+        file_path_hint: Option<&str>,
+    ) -> Result<tokio::sync::MappedMutexGuard<'_, RepoContext>, String> {
         {
             let mut guard = self.context.lock().await;
             if guard.is_none() {
-                let repo_root = git::find_repo_root()
-                    .map_err(|_| "Not inside a git repository. Run weave-mcp from within a git repo, or cd into one first.".to_string())?;
+                let repo_root = Self::discover_repo_root(file_path_hint)?;
                 let state_path = repo_root.join(".weave").join("state.automerge");
                 let state = EntityStateDoc::open(&state_path)
                     .map_err(|e| format!("Failed to open CRDT state: {}", e))?;
@@ -54,9 +110,9 @@ impl WeaveServer {
         }))
     }
 
-    fn read_file_sync(repo_root: &PathBuf, file_path: &str) -> Result<String, String> {
-        let full = repo_root.join(file_path);
-        std::fs::read_to_string(&full).map_err(|e| format!("Failed to read {}: {}", file_path, e))
+    fn read_file_at(abs_path: &Path, display_path: &str) -> Result<String, String> {
+        std::fs::read_to_string(abs_path)
+            .map_err(|e| format!("Failed to read {}: {}", display_path, e))
     }
 
     fn resolve_entity_sync(
@@ -85,15 +141,20 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<ExtractEntitiesParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context().await.map_err(internal_err)?;
-        let content = Self::read_file_sync(&ctx.repo_root, &params.file_path).map_err(internal_err)?;
+        let ctx = self
+            .get_context(Some(&params.file_path))
+            .await
+            .map_err(internal_err)?;
+        let (rel_path, abs_path) =
+            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
 
         let plugin = self
             .registry
-            .get_plugin(&params.file_path)
-            .ok_or_else(|| internal_err(format!("No parser for file: {}", params.file_path)))?;
+            .get_plugin(&rel_path)
+            .ok_or_else(|| internal_err(format!("No parser for file: {}", rel_path)))?;
 
-        let entities = plugin.extract_entities(&content, &params.file_path);
+        let entities = plugin.extract_entities(&content, &rel_path);
         let result: Vec<serde_json::Value> = entities
             .iter()
             .map(|e| {
@@ -117,24 +178,30 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<ClaimEntityParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context().await.map_err(internal_err)?;
-        let content = Self::read_file_sync(&ctx.repo_root, &params.file_path).map_err(internal_err)?;
-        let entity_id = Self::resolve_entity_sync(&self.registry, &content, &params.file_path, &params.entity_name)
+        let ctx = self
+            .get_context(Some(&params.file_path))
+            .await
             .map_err(internal_err)?;
+        let (rel_path, abs_path) =
+            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let entity_id =
+            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
+                .map_err(internal_err)?;
 
         let mut state = ctx.state.lock().await;
         let plugin = self
             .registry
-            .get_plugin(&params.file_path)
+            .get_plugin(&rel_path)
             .ok_or_else(|| internal_err("No parser for file"))?;
-        let entities = plugin.extract_entities(&content, &params.file_path);
+        let entities = plugin.extract_entities(&content, &rel_path);
         if let Some(e) = entities.iter().find(|e| e.id == entity_id) {
             let _ = upsert_entity(
                 &mut state,
                 &e.id,
                 &e.name,
                 &e.entity_type,
-                &params.file_path,
+                &rel_path,
                 &e.content_hash,
             );
         }
@@ -154,10 +221,16 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<ReleaseEntityParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context().await.map_err(internal_err)?;
-        let content = Self::read_file_sync(&ctx.repo_root, &params.file_path).map_err(internal_err)?;
-        let entity_id = Self::resolve_entity_sync(&self.registry, &content, &params.file_path, &params.entity_name)
+        let ctx = self
+            .get_context(Some(&params.file_path))
+            .await
             .map_err(internal_err)?;
+        let (rel_path, abs_path) =
+            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let entity_id =
+            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
+                .map_err(internal_err)?;
 
         let mut state = ctx.state.lock().await;
         release_entity(&mut state, &params.agent_id, &entity_id)
@@ -174,23 +247,28 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<StatusParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context().await.map_err(internal_err)?;
-        let content = Self::read_file_sync(&ctx.repo_root, &params.file_path).map_err(internal_err)?;
+        let ctx = self
+            .get_context(Some(&params.file_path))
+            .await
+            .map_err(internal_err)?;
+        let (rel_path, abs_path) =
+            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
 
         let mut state = ctx.state.lock().await;
         let _ = sync_from_files(
             &mut state,
             &ctx.repo_root,
-            &[params.file_path.clone()],
+            &[rel_path.clone()],
             &self.registry,
         );
 
-        let entities = get_entities_for_file(&state, &params.file_path)
+        let entities = get_entities_for_file(&state, &rel_path)
             .map_err(|e| internal_err(e.to_string()))?;
 
-        let plugin = self.registry.get_plugin(&params.file_path);
+        let plugin = self.registry.get_plugin(&rel_path);
         let file_entities = plugin
-            .map(|p| p.extract_entities(&content, &params.file_path))
+            .map(|p| p.extract_entities(&content, &rel_path))
             .unwrap_or_default();
 
         let result: Vec<serde_json::Value> = file_entities
@@ -219,10 +297,16 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<WhoIsEditingParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context().await.map_err(internal_err)?;
-        let content = Self::read_file_sync(&ctx.repo_root, &params.file_path).map_err(internal_err)?;
-        let entity_id = Self::resolve_entity_sync(&self.registry, &content, &params.file_path, &params.entity_name)
+        let ctx = self
+            .get_context(Some(&params.file_path))
+            .await
             .map_err(internal_err)?;
+        let (rel_path, abs_path) =
+            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let entity_id =
+            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
+                .map_err(internal_err)?;
 
         let state = ctx.state.lock().await;
         match get_entity_status(&state, &entity_id) {
@@ -254,10 +338,10 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<PotentialConflictsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context().await.map_err(internal_err)?;
+        let ctx = self.get_context(None).await.map_err(internal_err)?;
         let state = ctx.state.lock().await;
-        let mut conflicts = detect_potential_conflicts(&state)
-            .map_err(|e| internal_err(e.to_string()))?;
+        let mut conflicts =
+            detect_potential_conflicts(&state).map_err(|e| internal_err(e.to_string()))?;
 
         if let Some(ref agent_id) = params.agent_id {
             conflicts.retain(|c| c.agents.contains(agent_id));
@@ -285,15 +369,18 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<PreviewMergeParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        // This tool needs a git repo
-        let _ = self.get_context().await.map_err(internal_err)?;
+        let ctx = self
+            .get_context(params.file_path.as_deref())
+            .await
+            .map_err(internal_err)?;
 
-        let merge_base =
-            git::find_merge_base(&params.base_branch, &params.target_branch)
-                .map_err(|e| internal_err(e.to_string()))?;
+        // Run git commands from the repo root
+        let merge_base = git::find_merge_base(&params.base_branch, &params.target_branch)
+            .map_err(|e| internal_err(e.to_string()))?;
 
         let files = if let Some(ref fp) = params.file_path {
-            vec![fp.clone()]
+            let (rel, _) = Self::resolve_file_path(&ctx.repo_root, fp);
+            vec![rel]
         } else {
             git::get_changed_files(&merge_base, &params.base_branch, &params.target_branch)
                 .map_err(|e| internal_err(e.to_string()))?
@@ -353,7 +440,7 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<AgentRegisterParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context().await.map_err(internal_err)?;
+        let ctx = self.get_context(None).await.map_err(internal_err)?;
         let mut state = ctx.state.lock().await;
         register_agent(
             &mut state,
@@ -375,7 +462,7 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<AgentHeartbeatParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context().await.map_err(internal_err)?;
+        let ctx = self.get_context(None).await.map_err(internal_err)?;
         let mut state = ctx.state.lock().await;
         weave_crdt::agent_heartbeat(&mut state, &params.agent_id, &params.working_on)
             .map_err(|e| internal_err(e.to_string()))?;
