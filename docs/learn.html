@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>weave — Learn</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <nav>
+      <a class="logo" href="index.html">weave</a>
+      <div class="links">
+        <a href="index.html">Home</a>
+        <a href="docs.html">Docs</a>
+        <a href="learn.html" class="active">Learn</a>
+        <a href="https://github.com/Ataraxy-Labs/weave">GitHub</a>
+      </div>
+    </nav>
+
+    <!-- Page header -->
+    <div style="padding: 48px 0 16px;">
+      <h1 style="font-size: 28px; font-weight: 700; color: var(--accent); letter-spacing: -1px; margin-bottom: 8px;">Learn</h1>
+      <p style="font-size: 14px; color: var(--dim); line-height: 1.7;">Deep dives into how weave works and why it exists.</p>
+    </div>
+
+    <!-- Article listing -->
+    <section style="border-top: none; padding-top: 20px;">
+      <a class="article-card" href="#git-vs-weave" style="border-color: var(--green);">
+        <h3>How weave-driver differs from git's merge driver</h3>
+        <p>Git merges lines. Weave merges entities. A deep dive into why line-level merging fails for multi-agent workflows, and how entity-level merging fixes it.</p>
+        <div class="tag-row">
+          <span class="tag" style="background: #4ade8022; color: var(--green);">merge</span>
+          <span class="tag" style="background: #60a5fa22; color: var(--blue);">fundamentals</span>
+        </div>
+      </a>
+      <a class="article-card" href="#what-is-crdt" style="border-color: var(--purple);">
+        <h3>What is a CRDT and why does weave use one?</h3>
+        <p>CRDTs let multiple agents edit shared state without coordination. How weave uses Automerge to track who's editing what, and why advisory locks beat hard locks.</p>
+        <div class="tag-row">
+          <span class="tag" style="background: #a78bfa22; color: var(--purple);">crdt</span>
+          <span class="tag" style="background: #60a5fa22; color: var(--blue);">fundamentals</span>
+        </div>
+      </a>
+    </section>
+
+    <!-- ═══ Article 1: Git vs Weave ═══ -->
+    <section id="git-vs-weave" style="padding-top: 40px;">
+      <div class="article">
+        <div class="article-header">
+          <h1>How weave-driver differs from git's merge driver</h1>
+          <div class="meta">
+            <span style="color:var(--green)">merge</span> &middot; <span style="color:var(--blue)">fundamentals</span>
+          </div>
+        </div>
+
+        <div class="article-body">
+          <h2>Git's merge driver: line-level</h2>
+
+          <p>Git's built-in merge works at the <strong>line level</strong>. When you run <code>git merge</code>, git compares the base version with both branches line by line. It uses a diff algorithm (Myers diff by default) that finds the longest common subsequence of lines, then identifies which lines were added, removed, or changed in each branch.</p>
+
+          <p>The critical concept is <strong>hunks</strong> &mdash; contiguous groups of changed lines. Git identifies hunks in each branch, then checks if any hunks from the two branches overlap or are adjacent. If they do, git declares a conflict, even if the actual changes are logically independent.</p>
+
+          <div class="highlight">
+            <strong>The problem:</strong> Git has zero understanding of what the lines <em>mean</em>. It doesn't know what a function is, what a class is, or where one logical unit ends and another begins. Two agents editing completely different functions can trigger a conflict simply because the functions happen to be near each other in the file.
+          </div>
+
+          <h2>weave-driver: entity-level</h2>
+
+          <p>weave-driver replaces git's line-level comparison with <strong>entity-level comparison</strong>. Instead of "which lines changed?", weave asks "which functions/classes/properties changed?"</p>
+
+          <p>Here's the key difference:</p>
+
+          <ol>
+            <li><strong>Parsing step:</strong> weave runs <a href="https://github.com/Ataraxy-Labs/sem" style="color:var(--green)">sem-core</a> (tree-sitter based) on all three versions of the file (base, ours, theirs) to extract named entities &mdash; functions, classes, methods, interfaces, types, properties, etc.</li>
+            <li><strong>Matching step:</strong> Entities are matched across the three versions by their stable ID (type + name + parent). <code>function::processData</code> in base is matched to <code>function::processData</code> in ours and theirs.</li>
+            <li><strong>Per-entity resolution:</strong> Each entity is resolved independently. If only one branch modified <code>processData</code>, that version wins. If only the other branch modified <code>validateInput</code>, that version wins. No conflict &mdash; they're different entities.</li>
+            <li><strong>Fallback:</strong> If both branches modified the <em>same</em> entity differently, weave falls back to <code>diffy::merge</code> (3-way line merge) on just that entity's body. So you only get a conflict when two branches genuinely changed the same function in incompatible ways.</li>
+          </ol>
+
+          <h2>Why this matters for AI agents</h2>
+
+          <p>This distinction becomes critical in multi-agent workflows. When you have two or more AI agents working on the same codebase:</p>
+
+          <ul>
+            <li><strong>Agent A</strong> is told to refactor <code>processData()</code> to use async/await</li>
+            <li><strong>Agent B</strong> is told to add validation to <code>validateInput()</code></li>
+          </ul>
+
+          <p>Both agents might work in the same file. With git, even though they're editing completely different functions, the merge will likely conflict because the changed line ranges are close together. Someone (or something) has to manually resolve the "conflict" which isn't actually a conflict at all.</p>
+
+          <p>With weave, the merge is automatic. weave sees that Agent A changed entity <code>function::processData</code> and Agent B changed entity <code>function::validateInput</code>. Different entities, no conflict, merge cleanly.</p>
+
+          <h2>A concrete example</h2>
+
+          <p>Consider this TypeScript file:</p>
+
+          <div class="terminal">
+            <div class="terminal-bar">
+              <div class="terminal-dot"></div>
+              <div class="terminal-dot"></div>
+              <div class="terminal-dot"></div>
+              <div class="terminal-title">src/lib.ts (base)</div>
+            </div>
+            <div class="terminal-body">
+<pre><span class="p">export function</span> <span class="b">processData</span>(input: string) {
+  <span class="p">return</span> input.trim();
+}
+
+<span class="p">export function</span> <span class="b">validateInput</span>(data: unknown) {
+  <span class="p">return</span> data !== null;
+}</pre>
+            </div>
+          </div>
+
+          <p>Agent A changes <code>processData</code>:</p>
+
+          <div class="terminal">
+            <div class="terminal-bar">
+              <div class="terminal-dot"></div>
+              <div class="terminal-dot"></div>
+              <div class="terminal-dot"></div>
+              <div class="terminal-title">Agent A's version (ours)</div>
+            </div>
+            <div class="terminal-body">
+<pre><span class="p">export async function</span> <span class="b">processData</span>(input: string) {
+  <span class="p">const</span> cleaned = input.trim();
+  <span class="p">const</span> result = <span class="p">await</span> transform(cleaned);
+  <span class="p">return</span> result;
+}
+
+<span class="p">export function</span> <span class="b">validateInput</span>(data: unknown) {
+  <span class="p">return</span> data !== null;
+}</pre>
+            </div>
+          </div>
+
+          <p>Agent B changes <code>validateInput</code>:</p>
+
+          <div class="terminal">
+            <div class="terminal-bar">
+              <div class="terminal-dot"></div>
+              <div class="terminal-dot"></div>
+              <div class="terminal-dot"></div>
+              <div class="terminal-title">Agent B's version (theirs)</div>
+            </div>
+            <div class="terminal-body">
+<pre><span class="p">export function</span> <span class="b">processData</span>(input: string) {
+  <span class="p">return</span> input.trim();
+}
+
+<span class="p">export function</span> <span class="b">validateInput</span>(data: unknown) {
+  <span class="p">if</span> (data === null || data === undefined) {
+    <span class="p">throw new</span> Error(<span class="g">"Input required"</span>);
+  }
+  <span class="p">return true</span>;
+}</pre>
+            </div>
+          </div>
+
+          <div class="concept-box" style="border-color: var(--red);">
+            <h4 style="color: var(--red);">Git's result</h4>
+            <p><code>CONFLICT (content): Merge conflict in src/lib.ts</code><br>The expanded <code>processData</code> pushes lines down, making the hunk ranges overlap with the changed <code>validateInput</code>. Git can't tell them apart &mdash; it just sees overlapping changed lines.</p>
+          </div>
+
+          <div class="concept-box" style="border-color: var(--green);">
+            <h4 style="color: var(--green);">Weave's result</h4>
+            <p><code>2 entities matched, 2 modified, 0 conflicts</code><br>weave sees: <code>function::processData</code> changed in ours only &rarr; use ours. <code>function::validateInput</code> changed in theirs only &rarr; use theirs. Clean merge with both changes preserved.</p>
+          </div>
+
+          <h2>The mental model</h2>
+
+          <p>Think of it this way:</p>
+
+          <ul>
+            <li><strong>Git sees a file as a list of lines.</strong> Any change is a line change. Proximity = potential conflict.</li>
+            <li><strong>Weave sees a file as a list of named entities.</strong> Each entity is resolved independently. Only same-entity, different-content changes conflict.</li>
+          </ul>
+
+          <p>This is the same conceptual leap that <code>git</code> made over raw patches &mdash; operating at a higher semantic level to make merging smarter and less painful.</p>
+
+          <div class="highlight">
+            <strong>tl;dr</strong> &mdash; Git doesn't know what a function is. Weave does. That's the entire difference, and it eliminates the vast majority of false conflicts in multi-agent workflows.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ Article 2: What is CRDT ═══ -->
+    <section id="what-is-crdt" style="padding-top: 40px;">
+      <div class="article">
+        <div class="article-header">
+          <h1>What is a CRDT and why does weave use one?</h1>
+          <div class="meta">
+            <span style="color:var(--purple)">crdt</span> &middot; <span style="color:var(--blue)">fundamentals</span>
+          </div>
+        </div>
+
+        <div class="article-body">
+          <h2>The problem: shared state without a server</h2>
+
+          <p>When multiple agents work on the same codebase, they need to coordinate. Agent A needs to know that Agent B is already editing <code>processData()</code> so it picks something else. But we don't want to run a central server &mdash; weave should work as a local tool, just like git.</p>
+
+          <p>This is the classic distributed systems problem: <strong>how do multiple writers share state without a central coordinator?</strong></p>
+
+          <h2>CRDT: Conflict-free Replicated Data Type</h2>
+
+          <p>A CRDT is a data structure designed so that <strong>any two copies can always be merged without conflicts</strong>. No matter what order the operations arrive in, no matter if some updates are missed and replayed later, the result is always consistent.</p>
+
+          <p>The simplest example: a <strong>counter</strong>. Instead of storing "the count is 5", each agent stores "I added 3" and "I added 2". When you merge, you sum them up. It doesn't matter who went first &mdash; 3 + 2 = 2 + 3 = 5. Always.</p>
+
+          <div class="highlight">
+            <strong>The key insight:</strong> CRDTs are designed so the merge function is commutative (A + B = B + A), associative ((A + B) + C = A + (B + C)), and idempotent (A + A = A). This means you can never get an inconsistent state, no matter what happens.
+          </div>
+
+          <h2>Automerge: a CRDT for JSON documents</h2>
+
+          <p>weave uses <a href="https://automerge.org" style="color:var(--purple)">Automerge</a>, which is a CRDT that behaves like a JSON document. You can have nested maps, lists, and scalar values &mdash; and any two copies can always be merged.</p>
+
+          <p>weave's state document tracks:</p>
+
+          <ul>
+            <li><strong>Entities:</strong> every code entity weave knows about &mdash; its name, type, file, who claimed it, who last modified it</li>
+            <li><strong>Agents:</strong> every registered agent &mdash; its name, branch, last heartbeat, what it's working on</li>
+            <li><strong>Operations:</strong> an audit log of claims, releases, and modifications</li>
+          </ul>
+
+          <p>This is saved as a binary file at <code>.weave/state.automerge</code> in your repo root. It's not committed to git &mdash; it's local coordination state, like <code>.git/</code> itself.</p>
+
+          <h2>Why advisory locks, not hard locks?</h2>
+
+          <p>When Agent A "claims" an entity, it's a <strong>signal</strong>, not enforcement. Agent B can still edit the claimed entity if it wants to. The merge driver will still handle it correctly.</p>
+
+          <p>Why not enforce it?</p>
+
+          <ol>
+            <li><strong>Agents crash.</strong> If Agent A holds a hard lock and crashes, the entity is stuck. Advisory locks + heartbeat timeouts handle this gracefully &mdash; stale claims are automatically released.</li>
+            <li><strong>The merge driver is the safety net.</strong> Even if two agents edit the same entity, weave-driver resolves it at merge time. Claims are an optimization to prevent conflicts, not a requirement.</li>
+            <li><strong>Optimistic concurrency works better.</strong> In practice, most agents cooperate. Penalizing the common case (no conflict) to prevent the rare case (actual conflict) is bad ergonomics.</li>
+          </ol>
+
+          <div class="highlight">
+            <strong>The philosophy:</strong> Claims are like turn signals in traffic. They communicate intent. Other drivers (agents) generally respect them. But if someone ignores a signal, the road (merge driver) still handles it &mdash; you don't crash, you just merge.
+          </div>
+
+          <h2>The coordination flow</h2>
+
+          <p>Here's how it works end to end:</p>
+
+          <ol>
+            <li>Agent registers itself: <code>weave_agent_register({agent_id: "claude-1", branch: "feature-auth"})</code></li>
+            <li>Agent checks what's in a file: <code>weave_extract_entities({file_path: "src/auth.ts"})</code></li>
+            <li>Agent checks for existing claims: <code>weave_who_is_editing({file_path: "src/auth.ts", entity_name: "validateToken"})</code></li>
+            <li>If unclaimed, agent claims it: <code>weave_claim_entity({...})</code></li>
+            <li>Agent edits the code, periodically heartbeating</li>
+            <li>Agent releases when done: <code>weave_release_entity({...})</code></li>
+          </ol>
+
+          <p>If an agent crashes mid-work, its heartbeat stops. After a configurable timeout, <code>cleanup_stale_agents</code> releases all its claims so other agents can take over.</p>
+
+          <h2>Why not just use a database?</h2>
+
+          <p>Three reasons:</p>
+
+          <ul>
+            <li><strong>No server needed.</strong> A CRDT is just a file. No PostgreSQL, no Redis, no Docker. <code>.weave/state.automerge</code> works on any machine, offline, instantly.</li>
+            <li><strong>Mergeable by design.</strong> If two agents update the state simultaneously (race condition), the Automerge merge is always correct. A regular JSON file would corrupt.</li>
+            <li><strong>Compact and fast.</strong> Automerge uses a binary format. The state file is typically a few KB. Reads and writes are sub-millisecond.</li>
+          </ul>
+
+          <div class="highlight">
+            <strong>tl;dr</strong> &mdash; A CRDT gives weave a "shared whiteboard" where agents can signal what they're working on. It's just a file, needs no server, and can never get into an inconsistent state. Claims are advisory &mdash; the merge driver is the real safety net.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <p>Built by <a href="https://ataraxy-labs.com">Ataraxy Labs</a></p>
+    </footer>
+  </div>
+</body>
+</html>
