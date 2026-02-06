@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-sem-core = { path = "../../../sem/crates/sem-core" }
+sem-core = { git = "https://github.com/Ataraxy-Labs/sem", version = "0.2" }
 diffy = "0.4"
 thiserror = "2"
 

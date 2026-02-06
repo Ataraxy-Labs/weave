@@ -10,7 +10,7 @@ path = "src/main.rs"
 [dependencies]
 weave-core = { path = "../weave-core" }
 weave-crdt = { path = "../weave-crdt" }
-sem-core = { path = "../../../sem/crates/sem-core" }
+sem-core = { git = "https://github.com/Ataraxy-Labs/sem", version = "0.2" }
 rmcp = { version = "0.14", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

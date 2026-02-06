@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 weave-core = { path = "../weave-core" }
-sem-core = { path = "../../../sem/crates/sem-core" }
+sem-core = { git = "https://github.com/Ataraxy-Labs/sem", version = "0.2" }
 weave-crdt = { path = "../weave-crdt", optional = true }
 env_logger = "0.11"
 log = "0.4"
