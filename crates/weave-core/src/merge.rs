@@ -293,6 +293,21 @@ fn resolve_entity(
                                 })
                             }
                             None => {
+                                // Before giving up, try inner entity merge for container types
+                                // (LastMerge insight: class members are unordered children)
+                                if is_container_entity_type(&ours.entity_type) {
+                                    if let Some(merged) = try_inner_entity_merge(&base_rc, &ours_rc, &theirs_rc) {
+                                        stats.entities_both_changed_merged += 1;
+                                        return ResolvedEntity::Clean(EntityRegion {
+                                            entity_id: ours.id.clone(),
+                                            entity_name: ours.name.clone(),
+                                            entity_type: ours.entity_type.clone(),
+                                            content: merged,
+                                            start_line: ours.start_line,
+                                            end_line: ours.end_line,
+                                        });
+                                    }
+                                }
                                 stats.entities_conflicted += 1;
                                 let complexity = classify_conflict(Some(&base_rc), Some(&ours_rc), Some(&theirs_rc));
                                 ResolvedEntity::Conflict(EntityConflict {
@@ -701,6 +716,357 @@ fn line_level_fallback(base: &str, ours: &str, theirs: &str) -> MergeResult {
     }
 }
 
+/// Check if an entity type is a container that may benefit from inner entity merge.
+fn is_container_entity_type(entity_type: &str) -> bool {
+    matches!(
+        entity_type,
+        "class" | "interface" | "enum" | "impl" | "trait" | "module" | "impl_item" | "trait_item"
+    )
+}
+
+/// A named member chunk extracted from a class/container body.
+#[derive(Debug, Clone)]
+struct MemberChunk {
+    /// The member name (method name, field name, etc.)
+    name: String,
+    /// Full content of the member including its body
+    content: String,
+}
+
+/// Try recursive inner entity merge for container types (classes, impls, etc.).
+///
+/// Inspired by LastMerge (arXiv:2507.19687): class members are "unordered children" —
+/// reordering them is not a conflict. We chunk the class body into members, match by
+/// name, and merge each member independently.
+///
+/// Returns Some(merged_content) if successful, None if there are unresolvable conflicts.
+fn try_inner_entity_merge(base: &str, ours: &str, theirs: &str) -> Option<String> {
+    let base_chunks = extract_member_chunks(base)?;
+    let ours_chunks = extract_member_chunks(ours)?;
+    let theirs_chunks = extract_member_chunks(theirs)?;
+
+    // Need at least 2 members to benefit from inner merge
+    if base_chunks.len() < 2 && ours_chunks.len() < 2 && theirs_chunks.len() < 2 {
+        return None;
+    }
+
+    // Build name → content maps
+    let base_map: HashMap<&str, &str> = base_chunks
+        .iter()
+        .map(|c| (c.name.as_str(), c.content.as_str()))
+        .collect();
+    let ours_map: HashMap<&str, &str> = ours_chunks
+        .iter()
+        .map(|c| (c.name.as_str(), c.content.as_str()))
+        .collect();
+    let theirs_map: HashMap<&str, &str> = theirs_chunks
+        .iter()
+        .map(|c| (c.name.as_str(), c.content.as_str()))
+        .collect();
+
+    // Collect all member names
+    let mut all_names: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    // Use ours ordering as skeleton
+    for chunk in &ours_chunks {
+        if seen.insert(chunk.name.clone()) {
+            all_names.push(chunk.name.clone());
+        }
+    }
+    // Add theirs-only members
+    for chunk in &theirs_chunks {
+        if seen.insert(chunk.name.clone()) {
+            all_names.push(chunk.name.clone());
+        }
+    }
+
+    // Extract header/footer (class declaration line and closing brace)
+    let (ours_header, ours_footer) = extract_container_wrapper(ours)?;
+
+    let mut merged_members: Vec<String> = Vec::new();
+    let mut has_conflict = false;
+
+    for name in &all_names {
+        let in_base = base_map.get(name.as_str());
+        let in_ours = ours_map.get(name.as_str());
+        let in_theirs = theirs_map.get(name.as_str());
+
+        match (in_base, in_ours, in_theirs) {
+            // In all three
+            (Some(b), Some(o), Some(t)) => {
+                if o == t {
+                    // Both same (or both unchanged)
+                    merged_members.push(o.to_string());
+                } else if b == o {
+                    // Only theirs changed
+                    merged_members.push(t.to_string());
+                } else if b == t {
+                    // Only ours changed
+                    merged_members.push(o.to_string());
+                } else {
+                    // Both changed differently — try diffy on this member
+                    match diffy_merge(b, o, t) {
+                        Some(merged) => merged_members.push(merged),
+                        None => {
+                            has_conflict = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            // Deleted by theirs, ours unchanged or not in base
+            (Some(b), Some(o), None) => {
+                if *b == *o {
+                    // Ours unchanged, theirs deleted → accept deletion
+                } else {
+                    // Ours modified, theirs deleted → conflict
+                    has_conflict = true;
+                    break;
+                }
+            }
+            // Deleted by ours, theirs unchanged or not in base
+            (Some(b), None, Some(t)) => {
+                if *b == *t {
+                    // Theirs unchanged, ours deleted → accept deletion
+                } else {
+                    // Theirs modified, ours deleted → conflict
+                    has_conflict = true;
+                    break;
+                }
+            }
+            // Added by ours only
+            (None, Some(o), None) => {
+                merged_members.push(o.to_string());
+            }
+            // Added by theirs only
+            (None, None, Some(t)) => {
+                merged_members.push(t.to_string());
+            }
+            // Added by both
+            (None, Some(o), Some(t)) => {
+                if o == t {
+                    merged_members.push(o.to_string());
+                } else {
+                    // Both added different content with same name → conflict
+                    has_conflict = true;
+                    break;
+                }
+            }
+            // Deleted by both
+            (Some(_), None, None) => {
+                // Both deleted → accept
+            }
+            (None, None, None) => {}
+        }
+    }
+
+    if has_conflict {
+        return None;
+    }
+
+    // Reconstruct: header + merged members + footer
+    let mut result = String::new();
+    result.push_str(ours_header);
+    if !ours_header.ends_with('\n') {
+        result.push('\n');
+    }
+
+    for (i, member) in merged_members.iter().enumerate() {
+        result.push_str(member);
+        if !member.ends_with('\n') {
+            result.push('\n');
+        }
+        // Add blank line between members (but not after last)
+        if i < merged_members.len() - 1 && !member.ends_with("\n\n") {
+            result.push('\n');
+        }
+    }
+
+    result.push_str(ours_footer);
+    if !ours_footer.ends_with('\n') && ours.ends_with('\n') {
+        result.push('\n');
+    }
+
+    Some(result)
+}
+
+/// Extract the header (class declaration) and footer (closing brace) from a container.
+fn extract_container_wrapper(content: &str) -> Option<(&str, &str)> {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() < 2 {
+        return None;
+    }
+
+    // Header is everything up to and including the first line with `{`
+    let header_end = lines.iter().position(|l| l.contains('{'))?;
+    let header_byte_end = lines[..=header_end]
+        .iter()
+        .map(|l| l.len() + 1) // +1 for newline
+        .sum::<usize>();
+    let header = &content[..header_byte_end.min(content.len())];
+
+    // Footer: find the last line with `}` at the container's indent level
+    // Walk backwards from the end
+    let footer_start = lines.iter().rposition(|l| {
+        let trimmed = l.trim();
+        trimmed == "}" || trimmed == "};"
+    })?;
+
+    let footer_byte_start: usize = lines[..footer_start]
+        .iter()
+        .map(|l| l.len() + 1)
+        .sum();
+    let footer = &content[footer_byte_start.min(content.len())..];
+
+    Some((header, footer))
+}
+
+/// Extract named member chunks from a container body.
+///
+/// Identifies member boundaries by indentation: members start at the first
+/// indentation level inside the container. Each member extends until the next
+/// member starts or the container closes.
+fn extract_member_chunks(content: &str) -> Option<Vec<MemberChunk>> {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() < 3 {
+        return None; // Need at least header + 1 member + footer
+    }
+
+    // Find the body range (between opening { and closing })
+    let body_start = lines.iter().position(|l| l.contains('{'))? + 1;
+    let body_end = lines.iter().rposition(|l| {
+        let trimmed = l.trim();
+        trimmed == "}" || trimmed == "};"
+    })?;
+
+    if body_start >= body_end {
+        return None;
+    }
+
+    // Determine member indentation level by looking at first non-empty body line
+    let member_indent = lines[body_start..body_end]
+        .iter()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())?;
+
+    let mut chunks: Vec<MemberChunk> = Vec::new();
+    let mut current_chunk_lines: Vec<&str> = Vec::new();
+    let mut current_name: Option<String> = None;
+
+    for line in &lines[body_start..body_end] {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            // Blank lines: if we have a current chunk, include them
+            if current_name.is_some() {
+                // Only include if not trailing blanks
+                current_chunk_lines.push(line);
+            }
+            continue;
+        }
+
+        let indent = line.len() - line.trim_start().len();
+
+        // Is this a new member declaration at the member indent level?
+        // Exclude closing braces, comments, and decorators
+        if indent == member_indent
+            && !trimmed.starts_with("//")
+            && !trimmed.starts_with("/*")
+            && !trimmed.starts_with("*")
+            && !trimmed.starts_with("#")
+            && trimmed != "}"
+            && trimmed != "};"
+            && trimmed != ","
+        {
+            // Save previous chunk
+            if let Some(name) = current_name.take() {
+                // Trim trailing blank lines
+                while current_chunk_lines.last().map_or(false, |l| l.trim().is_empty()) {
+                    current_chunk_lines.pop();
+                }
+                if !current_chunk_lines.is_empty() {
+                    chunks.push(MemberChunk {
+                        name,
+                        content: current_chunk_lines.join("\n"),
+                    });
+                }
+                current_chunk_lines.clear();
+            }
+
+            // Start new chunk — extract member name
+            let name = extract_member_name(trimmed);
+            current_name = Some(name);
+            current_chunk_lines.push(line);
+        } else if current_name.is_some() {
+            // Continuation of current member (body lines, nested blocks)
+            current_chunk_lines.push(line);
+        } else {
+            // Content before first member (decorators, comments for first member)
+            // Attach to next member
+            current_chunk_lines.push(line);
+        }
+    }
+
+    // Save last chunk
+    if let Some(name) = current_name {
+        while current_chunk_lines.last().map_or(false, |l| l.trim().is_empty()) {
+            current_chunk_lines.pop();
+        }
+        if !current_chunk_lines.is_empty() {
+            chunks.push(MemberChunk {
+                name,
+                content: current_chunk_lines.join("\n"),
+            });
+        }
+    }
+
+    if chunks.is_empty() {
+        None
+    } else {
+        Some(chunks)
+    }
+}
+
+/// Extract a member name from a declaration line.
+fn extract_member_name(line: &str) -> String {
+    let trimmed = line.trim();
+
+    // Try common patterns:
+    // method(...)  or  async method(...)  or  public method(...)
+    // fn name(...)
+    // def name(...)
+    // name: type  (field)
+    // get name() / set name()
+
+    // Remove leading keywords
+    let mut s = trimmed;
+    for keyword in &[
+        "export ", "public ", "private ", "protected ", "static ",
+        "abstract ", "async ", "override ", "readonly ",
+        "pub ", "pub(crate) ", "fn ", "def ", "get ", "set ",
+    ] {
+        if s.starts_with(keyword) {
+            s = &s[keyword.len()..];
+        }
+    }
+    // Handle `fn ` after `pub`
+    if s.starts_with("fn ") {
+        s = &s[3..];
+    }
+
+    // Extract identifier (alphanumeric + underscore until non-identifier char)
+    let name: String = s
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+
+    if name.is_empty() {
+        // Fallback: use first few chars as pseudo-name
+        trimmed.chars().take(20).collect()
+    } else {
+        name
+    }
+}
+
 /// Expand syntactic separators into separate lines for finer merge alignment.
 /// Inspired by Sesame (arXiv:2407.18888): isolating separators lets line-based
 /// merge tools see block boundaries as independent change units.
@@ -1008,6 +1374,160 @@ export function agentB() {
         let result = merge_imports_commutatively(base, ours, theirs);
         let count = result.matches("import b from 'b';").count();
         assert_eq!(count, 1, "Duplicate import should be deduplicated");
+    }
+
+    #[test]
+    fn test_inner_entity_merge_different_methods() {
+        // Two agents modify different methods in the same class
+        // This would normally conflict with diffy because the changes are adjacent
+        let base = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b;
+    }
+
+    subtract(a: number, b: number): number {
+        return a - b;
+    }
+}
+"#;
+        let ours = r#"export class Calculator {
+    add(a: number, b: number): number {
+        // Added logging
+        console.log("adding", a, b);
+        return a + b;
+    }
+
+    subtract(a: number, b: number): number {
+        return a - b;
+    }
+}
+"#;
+        let theirs = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b;
+    }
+
+    subtract(a: number, b: number): number {
+        // Added validation
+        if (b > a) throw new Error("negative");
+        return a - b;
+    }
+}
+"#;
+        let result = entity_merge(base, ours, theirs, "test.ts");
+        assert!(
+            result.is_clean(),
+            "Different methods modified should auto-merge via inner entity merge. Conflicts: {:?}",
+            result.conflicts,
+        );
+        assert!(result.content.contains("console.log"), "Should contain ours changes");
+        assert!(result.content.contains("negative"), "Should contain theirs changes");
+    }
+
+    #[test]
+    fn test_inner_entity_merge_both_add_different_methods() {
+        // Both branches add different methods to the same class
+        let base = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b;
+    }
+}
+"#;
+        let ours = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b;
+    }
+
+    multiply(a: number, b: number): number {
+        return a * b;
+    }
+}
+"#;
+        let theirs = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b;
+    }
+
+    divide(a: number, b: number): number {
+        return a / b;
+    }
+}
+"#;
+        let result = entity_merge(base, ours, theirs, "test.ts");
+        assert!(
+            result.is_clean(),
+            "Both adding different methods should auto-merge. Conflicts: {:?}",
+            result.conflicts,
+        );
+        assert!(result.content.contains("multiply"), "Should contain ours's new method");
+        assert!(result.content.contains("divide"), "Should contain theirs's new method");
+    }
+
+    #[test]
+    fn test_inner_entity_merge_same_method_modified_still_conflicts() {
+        // Both modify the same method differently → should still conflict
+        let base = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b;
+    }
+
+    subtract(a: number, b: number): number {
+        return a - b;
+    }
+}
+"#;
+        let ours = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b + 1;
+    }
+
+    subtract(a: number, b: number): number {
+        return a - b;
+    }
+}
+"#;
+        let theirs = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b + 2;
+    }
+
+    subtract(a: number, b: number): number {
+        return a - b;
+    }
+}
+"#;
+        let result = entity_merge(base, ours, theirs, "test.ts");
+        assert!(
+            !result.is_clean(),
+            "Both modifying same method differently should still conflict"
+        );
+    }
+
+    #[test]
+    fn test_extract_member_chunks() {
+        let class_body = r#"export class Foo {
+    bar() {
+        return 1;
+    }
+
+    baz() {
+        return 2;
+    }
+}
+"#;
+        let chunks = extract_member_chunks(class_body).unwrap();
+        assert_eq!(chunks.len(), 2, "Should find 2 members, found {:?}", chunks.iter().map(|c| &c.name).collect::<Vec<_>>());
+        assert_eq!(chunks[0].name, "bar");
+        assert_eq!(chunks[1].name, "baz");
+    }
+
+    #[test]
+    fn test_extract_member_name() {
+        assert_eq!(extract_member_name("add(a, b) {"), "add");
+        assert_eq!(extract_member_name("fn add(&self, a: i32) -> i32 {"), "add");
+        assert_eq!(extract_member_name("def add(self, a, b):"), "add");
+        assert_eq!(extract_member_name("public static getValue(): number {"), "getValue");
+        assert_eq!(extract_member_name("async fetchData() {"), "fetchData");
     }
 
     #[test]

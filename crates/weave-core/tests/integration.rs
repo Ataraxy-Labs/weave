@@ -345,6 +345,108 @@ def main():
 }
 
 // =============================================================================
+// Inner entity merge (LastMerge: unordered class members)
+// =============================================================================
+
+#[test]
+fn ts_class_different_methods_modified_auto_resolves() {
+    // THE key multi-agent scenario: two agents modify different methods in the same class
+    let base = r#"export class UserService {
+    getUser(id: string): User {
+        return this.db.find(id);
+    }
+
+    createUser(data: UserData): User {
+        return this.db.create(data);
+    }
+
+    deleteUser(id: string): void {
+        this.db.delete(id);
+    }
+}
+"#;
+    // Agent A adds caching to getUser
+    let ours = r#"export class UserService {
+    getUser(id: string): User {
+        const cached = this.cache.get(id);
+        if (cached) return cached;
+        return this.db.find(id);
+    }
+
+    createUser(data: UserData): User {
+        return this.db.create(data);
+    }
+
+    deleteUser(id: string): void {
+        this.db.delete(id);
+    }
+}
+"#;
+    // Agent B adds validation to createUser
+    let theirs = r#"export class UserService {
+    getUser(id: string): User {
+        return this.db.find(id);
+    }
+
+    createUser(data: UserData): User {
+        if (!data.email) throw new Error("email required");
+        return this.db.create(data);
+    }
+
+    deleteUser(id: string): void {
+        this.db.delete(id);
+    }
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "user-service.ts");
+    assert!(
+        result.is_clean(),
+        "Different class methods modified by different agents should auto-merge. Conflicts: {:?}",
+        result.conflicts,
+    );
+    assert!(result.content.contains("cache.get"), "Should contain ours's caching change");
+    assert!(result.content.contains("email required"), "Should contain theirs's validation change");
+    assert!(result.content.contains("deleteUser"), "Should preserve unchanged method");
+}
+
+#[test]
+fn ts_class_one_adds_method_other_modifies_existing() {
+    let base = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b;
+    }
+}
+"#;
+    // Agent A modifies existing method
+    let ours = r#"export class Calculator {
+    add(a: number, b: number): number {
+        console.log("add called");
+        return a + b;
+    }
+}
+"#;
+    // Agent B adds new method
+    let theirs = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b;
+    }
+
+    multiply(a: number, b: number): number {
+        return a * b;
+    }
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "calc.ts");
+    assert!(
+        result.is_clean(),
+        "One modifying, other adding should auto-merge. Conflicts: {:?}",
+        result.conflicts,
+    );
+    assert!(result.content.contains("console.log"), "Should contain modified add");
+    assert!(result.content.contains("multiply"), "Should contain new method");
+}
+
+// =============================================================================
 // Edge cases
 // =============================================================================
 
@@ -400,4 +502,27 @@ fn both_make_identical_changes() {
     let result = entity_merge(base, modified, modified, "same.ts");
     assert!(result.is_clean());
     assert!(result.content.contains("new"));
+}
+
+#[test]
+fn ts_class_entity_extraction_is_single_entity() {
+    // Verify that sem-core extracts a class as a single entity (not class + methods)
+    // This is why inner entity merge is needed — methods aren't separate entities
+    let ts_class = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b;
+    }
+
+    subtract(a: number, b: number): number {
+        return a - b;
+    }
+}
+"#;
+    let registry = sem_core::parser::plugins::create_default_registry();
+    let plugin = registry.get_plugin("test.ts").unwrap();
+    let entities = plugin.extract_entities(ts_class, "test.ts");
+
+    assert_eq!(entities.len(), 1, "Class should be a single entity");
+    assert_eq!(entities[0].entity_type, "class");
+    assert_eq!(entities[0].name, "Calculator");
 }
