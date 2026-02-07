@@ -1260,7 +1260,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 [[package]]
 name = "sem-core"
 version = "0.2.0"
-source = "git+https://github.com/Ataraxy-Labs/sem#e6dd39f826943abb0db6fe2b708f75f4da48b895"
+source = "git+https://github.com/Ataraxy-Labs/sem#da9f34f0ccc30e0cc8ef42d39ffb6403b0476baa"
 dependencies = [
  "git2",
  "regex",
