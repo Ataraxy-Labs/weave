@@ -233,6 +233,118 @@ fn json_different_keys_modified() {
 }
 
 // =============================================================================
+// Commutative import merging
+// =============================================================================
+
+#[test]
+fn ts_both_add_different_imports_no_conflict() {
+    // Classic false conflict: both branches add different imports to the same block
+    let base = r#"import { config } from './config';
+import { logger } from './logger';
+
+export function main() {
+    logger.info(config.name);
+}
+"#;
+    let ours = r#"import { config } from './config';
+import { logger } from './logger';
+import { validate } from './validate';
+
+export function main() {
+    logger.info(config.name);
+}
+"#;
+    let theirs = r#"import { config } from './config';
+import { logger } from './logger';
+import { format } from './format';
+
+export function main() {
+    logger.info(config.name);
+}
+"#;
+
+    let result = entity_merge(base, ours, theirs, "app.ts");
+    assert!(
+        result.is_clean(),
+        "Both adding different imports should auto-resolve. Conflicts: {:?}",
+        result.conflicts
+    );
+    assert!(result.content.contains("validate"), "Should contain ours import");
+    assert!(result.content.contains("format"), "Should contain theirs import");
+    assert!(result.content.contains("config"), "Should keep base imports");
+    assert!(result.content.contains("logger"), "Should keep base imports");
+}
+
+#[test]
+fn rust_both_add_different_use_statements() {
+    let base = r#"use std::io;
+use std::fs;
+
+fn main() {
+    println!("hello");
+}
+"#;
+    let ours = r#"use std::io;
+use std::fs;
+use std::path::Path;
+
+fn main() {
+    println!("hello");
+}
+"#;
+    let theirs = r#"use std::io;
+use std::fs;
+use std::collections::HashMap;
+
+fn main() {
+    println!("hello");
+}
+"#;
+
+    let result = entity_merge(base, ours, theirs, "main.rs");
+    assert!(
+        result.is_clean(),
+        "Rust: both adding different use statements should auto-resolve. Conflicts: {:?}",
+        result.conflicts
+    );
+    assert!(result.content.contains("Path"), "Should contain ours use");
+    assert!(result.content.contains("HashMap"), "Should contain theirs use");
+}
+
+#[test]
+fn py_both_add_different_imports() {
+    let base = r#"import os
+import sys
+
+def main():
+    pass
+"#;
+    let ours = r#"import os
+import sys
+import json
+
+def main():
+    pass
+"#;
+    let theirs = r#"import os
+import sys
+import pathlib
+
+def main():
+    pass
+"#;
+
+    let result = entity_merge(base, ours, theirs, "app.py");
+    assert!(
+        result.is_clean(),
+        "Python: both adding different imports should auto-resolve. Conflicts: {:?}",
+        result.conflicts
+    );
+    assert!(result.content.contains("json"), "Should contain ours import");
+    assert!(result.content.contains("pathlib"), "Should contain theirs import");
+}
+
+// =============================================================================
 // Edge cases
 // =============================================================================
 

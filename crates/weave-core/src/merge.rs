@@ -424,7 +424,10 @@ fn diffy_merge(base: &str, ours: &str, theirs: &str) -> Option<String> {
     }
 }
 
-/// Merge interstitial regions from all three versions using line-level 3-way merge.
+/// Merge interstitial regions from all three versions.
+/// Uses commutative (set-based) merge for import blocks — inspired by
+/// LastMerge/Mergiraf's "unordered children" concept.
+/// Falls back to line-level 3-way merge for non-import content.
 fn merge_interstitials(
     base_regions: &[FileRegion],
     ours_regions: &[FileRegion],
@@ -474,20 +477,150 @@ fn merge_interstitials(
         } else if base_content == theirs_content {
             merged.insert(key.to_string(), ours_content.to_string());
         } else {
-            // Both changed interstitial — try line-level merge
-            match diffy::merge(base_content, ours_content, theirs_content) {
-                Ok(m) => {
-                    merged.insert(key.to_string(), m);
-                }
-                Err(conflicted) => {
-                    // Use conflicted output (contains markers)
-                    merged.insert(key.to_string(), conflicted);
+            // Both changed — check if this is an import-heavy region
+            if is_import_region(base_content)
+                || is_import_region(ours_content)
+                || is_import_region(theirs_content)
+            {
+                // Commutative merge: treat import lines as a set
+                let result = merge_imports_commutatively(base_content, ours_content, theirs_content);
+                merged.insert(key.to_string(), result);
+            } else {
+                // Regular line-level merge
+                match diffy::merge(base_content, ours_content, theirs_content) {
+                    Ok(m) => {
+                        merged.insert(key.to_string(), m);
+                    }
+                    Err(conflicted) => {
+                        merged.insert(key.to_string(), conflicted);
+                    }
                 }
             }
         }
     }
 
     merged
+}
+
+/// Check if a region is predominantly import/use statements.
+fn is_import_region(content: &str) -> bool {
+    let lines: Vec<&str> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return false;
+    }
+    let import_count = lines.iter().filter(|l| is_import_line(l)).count();
+    // If >50% of non-empty lines are imports, treat as import region
+    import_count * 2 > lines.len()
+}
+
+/// Check if a line is an import/use/require statement.
+fn is_import_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("import ")
+        || trimmed.starts_with("from ")
+        || trimmed.starts_with("use ")
+        || trimmed.starts_with("require(")
+        || trimmed.starts_with("const ") && trimmed.contains("require(")
+        || trimmed.starts_with("package ")
+        || trimmed.starts_with("#include ")
+        || trimmed.starts_with("using ")
+}
+
+/// Merge import blocks commutatively (as unordered sets).
+///
+/// Algorithm (from Mergiraf's unordered merge):
+/// 1. Compute imports deleted by ours (in base but not ours)
+/// 2. Compute imports deleted by theirs (in base but not theirs)
+/// 3. Compute imports added by ours (in ours but not base)
+/// 4. Compute imports added by theirs (in theirs but not base)
+/// 5. Start with base imports, remove both deletions, add both additions
+/// 6. Preserve non-import lines from ours version
+fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
+    let base_imports: Vec<&str> = base.lines().filter(|l| is_import_line(l)).collect();
+    let ours_imports: Vec<&str> = ours.lines().filter(|l| is_import_line(l)).collect();
+    let theirs_imports: Vec<&str> = theirs.lines().filter(|l| is_import_line(l)).collect();
+
+    let base_set: HashSet<&str> = base_imports.iter().copied().collect();
+    let ours_set: HashSet<&str> = ours_imports.iter().copied().collect();
+    let theirs_set: HashSet<&str> = theirs_imports.iter().copied().collect();
+
+    // Deletions: in base but removed by a branch
+    let ours_deleted: HashSet<&str> = base_set.difference(&ours_set).copied().collect();
+    let theirs_deleted: HashSet<&str> = base_set.difference(&theirs_set).copied().collect();
+
+    // Additions: in branch but not in base
+    let ours_added: Vec<&str> = ours_imports
+        .iter()
+        .filter(|i| !base_set.contains(**i))
+        .copied()
+        .collect();
+    let theirs_added: Vec<&str> = theirs_imports
+        .iter()
+        .filter(|i| !base_set.contains(**i) && !ours_set.contains(**i))
+        .copied()
+        .collect();
+
+    // Build merged import list: base - deletions + additions
+    let mut merged_imports: Vec<&str> = base_imports
+        .iter()
+        .filter(|i| !ours_deleted.contains(**i) && !theirs_deleted.contains(**i))
+        .copied()
+        .collect();
+    merged_imports.extend(ours_added);
+    merged_imports.extend(theirs_added);
+
+    // Collect non-import lines from ours (preserve comments, blank lines, etc.)
+    let ours_non_imports: Vec<&str> = ours
+        .lines()
+        .filter(|l| !is_import_line(l))
+        .collect();
+
+    // Reconstruct: non-import preamble lines + merged imports
+    let mut result_lines: Vec<&str> = Vec::new();
+
+    // Add non-import lines that come before first import in ours
+    let first_import_idx = ours
+        .lines()
+        .position(|l| is_import_line(l));
+
+    if let Some(idx) = first_import_idx {
+        for (i, line) in ours.lines().enumerate() {
+            if i < idx {
+                result_lines.push(line);
+            }
+        }
+    }
+
+    // Add merged imports
+    result_lines.extend(&merged_imports);
+
+    // Add non-import lines that come after imports in ours
+    if let Some(idx) = first_import_idx {
+        for (i, line) in ours.lines().enumerate() {
+            if i <= idx {
+                continue;
+            }
+            if is_import_line(line) {
+                continue;
+            }
+            result_lines.push(line);
+        }
+    } else {
+        // No imports in ours, just add non-import lines
+        result_lines.extend(&ours_non_imports);
+    }
+
+    let mut result = result_lines.join("\n");
+    // Preserve trailing newline
+    if ours.ends_with('\n') || theirs.ends_with('\n') {
+        if !result.ends_with('\n') {
+            result.push('\n');
+        }
+    }
+    result
 }
 
 /// Fallback to line-level 3-way merge when entity extraction isn't possible.
@@ -647,5 +780,81 @@ export function agentB() {
         let result = line_level_fallback(base, ours, theirs);
         assert!(!result.is_clean());
         assert!(result.stats.used_fallback);
+    }
+
+    #[test]
+    fn test_is_import_region() {
+        assert!(is_import_region("import foo from 'foo';\nimport bar from 'bar';\n"));
+        assert!(is_import_region("use std::io;\nuse std::fs;\n"));
+        assert!(!is_import_region("let x = 1;\nlet y = 2;\n"));
+        // Mixed: 1 import + 2 non-imports → not import region
+        assert!(!is_import_region("import foo from 'foo';\nlet x = 1;\nlet y = 2;\n"));
+        // Empty → not import region
+        assert!(!is_import_region(""));
+    }
+
+    #[test]
+    fn test_is_import_line() {
+        // JS/TS
+        assert!(is_import_line("import foo from 'foo';"));
+        assert!(is_import_line("import { bar } from 'bar';"));
+        assert!(is_import_line("from typing import List"));
+        // Rust
+        assert!(is_import_line("use std::io::Read;"));
+        // C/C++
+        assert!(is_import_line("#include <stdio.h>"));
+        // Node require
+        assert!(is_import_line("const fs = require('fs');"));
+        // Not imports
+        assert!(!is_import_line("let x = 1;"));
+        assert!(!is_import_line("function foo() {}"));
+    }
+
+    #[test]
+    fn test_commutative_import_merge_both_add_different() {
+        // The key scenario: both branches add different imports
+        let base = "import a from 'a';\nimport b from 'b';\n";
+        let ours = "import a from 'a';\nimport b from 'b';\nimport c from 'c';\n";
+        let theirs = "import a from 'a';\nimport b from 'b';\nimport d from 'd';\n";
+        let result = merge_imports_commutatively(base, ours, theirs);
+        assert!(result.contains("import a from 'a';"));
+        assert!(result.contains("import b from 'b';"));
+        assert!(result.contains("import c from 'c';"));
+        assert!(result.contains("import d from 'd';"));
+    }
+
+    #[test]
+    fn test_commutative_import_merge_one_removes() {
+        // Ours removes an import, theirs keeps it → removed
+        let base = "import a from 'a';\nimport b from 'b';\nimport c from 'c';\n";
+        let ours = "import a from 'a';\nimport c from 'c';\n";
+        let theirs = "import a from 'a';\nimport b from 'b';\nimport c from 'c';\n";
+        let result = merge_imports_commutatively(base, ours, theirs);
+        assert!(result.contains("import a from 'a';"));
+        assert!(!result.contains("import b from 'b';"), "Removed import should stay removed");
+        assert!(result.contains("import c from 'c';"));
+    }
+
+    #[test]
+    fn test_commutative_import_merge_both_add_same() {
+        // Both add the same import → should appear only once
+        let base = "import a from 'a';\n";
+        let ours = "import a from 'a';\nimport b from 'b';\n";
+        let theirs = "import a from 'a';\nimport b from 'b';\n";
+        let result = merge_imports_commutatively(base, ours, theirs);
+        let count = result.matches("import b from 'b';").count();
+        assert_eq!(count, 1, "Duplicate import should be deduplicated");
+    }
+
+    #[test]
+    fn test_commutative_import_merge_rust_use() {
+        let base = "use std::io;\nuse std::fs;\n";
+        let ours = "use std::io;\nuse std::fs;\nuse std::path::Path;\n";
+        let theirs = "use std::io;\nuse std::fs;\nuse std::collections::HashMap;\n";
+        let result = merge_imports_commutatively(base, ours, theirs);
+        assert!(result.contains("use std::path::Path;"));
+        assert!(result.contains("use std::collections::HashMap;"));
+        assert!(result.contains("use std::io;"));
+        assert!(result.contains("use std::fs;"));
     }
 }
