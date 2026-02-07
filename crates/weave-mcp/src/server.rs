@@ -5,6 +5,7 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use sem_core::parser::graph::EntityGraph;
 use sem_core::parser::plugins::create_default_registry;
 use sem_core::parser::registry::ParserRegistry;
 use tokio::sync::Mutex;
@@ -108,6 +109,47 @@ impl WeaveServer {
         Ok(tokio::sync::MutexGuard::map(guard, |opt| {
             opt.as_mut().unwrap()
         }))
+    }
+
+    /// Find all files in the repo that have a supported parser.
+    fn find_supported_files(root: &Path, registry: &ParserRegistry) -> Vec<String> {
+        let mut files = Vec::new();
+        Self::walk_dir(root, root, registry, &mut files);
+        files.sort();
+        files
+    }
+
+    fn walk_dir(
+        dir: &Path,
+        root: &Path,
+        registry: &ParserRegistry,
+        files: &mut Vec<String>,
+    ) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.')
+                    || name == "node_modules"
+                    || name == "target"
+                    || name == "__pycache__"
+                    || name == "venv"
+                {
+                    continue;
+                }
+            }
+            if path.is_dir() {
+                Self::walk_dir(&path, root, registry, files);
+            } else if let Ok(rel) = path.strip_prefix(root) {
+                let rel_str = rel.to_string_lossy().to_string();
+                if registry.get_plugin(&rel_str).is_some() {
+                    files.push(rel_str);
+                }
+            }
+        }
     }
 
     fn read_file_at(abs_path: &Path, display_path: &str) -> Result<String, String> {
@@ -432,6 +474,147 @@ impl WeaveServer {
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&summary).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(description = "Get entities that the given entity depends on (calls, references, imports)")]
+    async fn weave_get_dependencies(
+        &self,
+        Parameters(params): Parameters<EntityDepsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ctx = self
+            .get_context(Some(&params.file_path))
+            .await
+            .map_err(internal_err)?;
+        let (rel_path, _abs_path) =
+            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+
+        // Build graph from all supported files in the repo
+        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
+        let graph = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+
+        // Find the entity by name in the target file
+        let entity_id = graph
+            .entities
+            .values()
+            .find(|e| e.name == params.entity_name && e.file_path == rel_path)
+            .or_else(|| graph.entities.values().find(|e| e.name == params.entity_name))
+            .map(|e| e.id.clone())
+            .ok_or_else(|| internal_err(format!("Entity '{}' not found in graph", params.entity_name)))?;
+
+        let deps = graph.get_dependencies(&entity_id);
+        let result: Vec<serde_json::Value> = deps
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "name": d.name,
+                    "type": d.entity_type,
+                    "file": d.file_path,
+                    "lines": [d.start_line, d.end_line],
+                })
+            })
+            .collect();
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&serde_json::json!({
+                "entity": params.entity_name,
+                "file": rel_path,
+                "dependencies": result,
+            }))
+            .unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(description = "Get entities that depend on the given entity (reverse dependencies — who calls/references it)")]
+    async fn weave_get_dependents(
+        &self,
+        Parameters(params): Parameters<EntityDepsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ctx = self
+            .get_context(Some(&params.file_path))
+            .await
+            .map_err(internal_err)?;
+        let (rel_path, _abs_path) =
+            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+
+        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
+        let graph = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+
+        let entity_id = graph
+            .entities
+            .values()
+            .find(|e| e.name == params.entity_name && e.file_path == rel_path)
+            .or_else(|| graph.entities.values().find(|e| e.name == params.entity_name))
+            .map(|e| e.id.clone())
+            .ok_or_else(|| internal_err(format!("Entity '{}' not found in graph", params.entity_name)))?;
+
+        let deps = graph.get_dependents(&entity_id);
+        let result: Vec<serde_json::Value> = deps
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "name": d.name,
+                    "type": d.entity_type,
+                    "file": d.file_path,
+                    "lines": [d.start_line, d.end_line],
+                })
+            })
+            .collect();
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&serde_json::json!({
+                "entity": params.entity_name,
+                "file": rel_path,
+                "dependents": result,
+            }))
+            .unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(description = "Impact analysis: if this entity changes, what else might be affected? Returns all transitive dependents.")]
+    async fn weave_impact_analysis(
+        &self,
+        Parameters(params): Parameters<ImpactAnalysisParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ctx = self
+            .get_context(Some(&params.file_path))
+            .await
+            .map_err(internal_err)?;
+        let (rel_path, _abs_path) =
+            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+
+        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
+        let graph = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+
+        let entity_id = graph
+            .entities
+            .values()
+            .find(|e| e.name == params.entity_name && e.file_path == rel_path)
+            .or_else(|| graph.entities.values().find(|e| e.name == params.entity_name))
+            .map(|e| e.id.clone())
+            .ok_or_else(|| internal_err(format!("Entity '{}' not found in graph", params.entity_name)))?;
+
+        let impact = graph.impact_analysis(&entity_id);
+        let result: Vec<serde_json::Value> = impact
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "name": d.name,
+                    "type": d.entity_type,
+                    "file": d.file_path,
+                    "lines": [d.start_line, d.end_line],
+                })
+            })
+            .collect();
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&serde_json::json!({
+                "entity": params.entity_name,
+                "file": rel_path,
+                "total_affected": result.len(),
+                "affected_entities": result,
+            }))
+            .unwrap_or_default(),
         )]))
     }
 

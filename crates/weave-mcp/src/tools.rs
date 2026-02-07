@@ -73,3 +73,19 @@ pub struct AgentHeartbeatParams {
     #[schemars(description = "List of entity IDs the agent is currently working on")]
     pub working_on: Vec<String>,
 }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct EntityDepsParams {
+    #[schemars(description = "Path to the file containing the entity")]
+    pub file_path: String,
+    #[schemars(description = "Name of the entity to analyze")]
+    pub entity_name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ImpactAnalysisParams {
+    #[schemars(description = "Path to the file containing the entity")]
+    pub file_path: String,
+    #[schemars(description = "Name of the entity to analyze impact for")]
+    pub entity_name: String,
+}
