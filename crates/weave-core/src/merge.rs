@@ -6,7 +6,7 @@ use sem_core::model::identity::match_entities;
 use sem_core::parser::plugins::create_default_registry;
 use sem_core::parser::registry::ParserRegistry;
 
-use crate::conflict::{ConflictKind, EntityConflict, MergeStats};
+use crate::conflict::{classify_conflict, ConflictKind, EntityConflict, MergeStats};
 use crate::region::{extract_regions, EntityRegion, FileRegion};
 use crate::validate::SemanticWarning;
 use crate::reconstruct::reconstruct;
@@ -294,10 +294,12 @@ fn resolve_entity(
                             }
                             None => {
                                 stats.entities_conflicted += 1;
+                                let complexity = classify_conflict(Some(&base_rc), Some(&ours_rc), Some(&theirs_rc));
                                 ResolvedEntity::Conflict(EntityConflict {
                                     entity_name: ours.name.clone(),
                                     entity_type: ours.entity_type.clone(),
                                     kind: ConflictKind::BothModified,
+                                    complexity,
                                     ours_content: Some(ours_rc),
                                     theirs_content: Some(theirs_rc),
                                     base_content: Some(base_rc),
@@ -315,15 +317,19 @@ fn resolve_entity(
             if ours_modified {
                 // Modify/delete conflict
                 stats.entities_conflicted += 1;
+                let ours_rc = region_content(ours, ours_region_content);
+                let base_rc = region_content(_base, base_region_content);
+                let complexity = classify_conflict(Some(&base_rc), Some(&ours_rc), None);
                 ResolvedEntity::Conflict(EntityConflict {
                     entity_name: ours.name.clone(),
                     entity_type: ours.entity_type.clone(),
                     kind: ConflictKind::ModifyDelete {
                         modified_in_ours: true,
                     },
-                    ours_content: Some(region_content(ours, ours_region_content)),
+                    complexity,
+                    ours_content: Some(ours_rc),
                     theirs_content: None,
-                    base_content: Some(region_content(_base, base_region_content)),
+                    base_content: Some(base_rc),
                 })
             } else {
                 // Theirs deleted, ours unchanged → accept deletion
@@ -338,15 +344,19 @@ fn resolve_entity(
             if theirs_modified {
                 // Modify/delete conflict
                 stats.entities_conflicted += 1;
+                let theirs_rc = region_content(theirs, theirs_region_content);
+                let base_rc = region_content(_base, base_region_content);
+                let complexity = classify_conflict(Some(&base_rc), None, Some(&theirs_rc));
                 ResolvedEntity::Conflict(EntityConflict {
                     entity_name: theirs.name.clone(),
                     entity_type: theirs.entity_type.clone(),
                     kind: ConflictKind::ModifyDelete {
                         modified_in_ours: false,
                     },
+                    complexity,
                     ours_content: None,
-                    theirs_content: Some(region_content(theirs, theirs_region_content)),
-                    base_content: Some(region_content(_base, base_region_content)),
+                    theirs_content: Some(theirs_rc),
+                    base_content: Some(base_rc),
                 })
             } else {
                 // Ours deleted, theirs unchanged → accept deletion
@@ -376,12 +386,16 @@ fn resolve_entity(
             } else {
                 // Different content → conflict
                 stats.entities_conflicted += 1;
+                let ours_rc = region_content(ours, ours_region_content);
+                let theirs_rc = region_content(theirs, theirs_region_content);
+                let complexity = classify_conflict(None, Some(&ours_rc), Some(&theirs_rc));
                 ResolvedEntity::Conflict(EntityConflict {
                     entity_name: ours.name.clone(),
                     entity_type: ours.entity_type.clone(),
                     kind: ConflictKind::BothAdded,
-                    ours_content: Some(region_content(ours, ours_region_content)),
-                    theirs_content: Some(region_content(theirs, theirs_region_content)),
+                    complexity,
+                    ours_content: Some(ours_rc),
+                    theirs_content: Some(theirs_rc),
                     base_content: None,
                 })
             }
@@ -673,6 +687,7 @@ fn line_level_fallback(base: &str, ours: &str, theirs: &str) -> MergeResult {
                             entity_name: "(file)".to_string(),
                             entity_type: "file".to_string(),
                             kind: ConflictKind::BothModified,
+                            complexity: classify_conflict(Some(base), Some(ours), Some(theirs)),
                             ours_content: Some(ours.to_string()),
                             theirs_content: Some(theirs.to_string()),
                             base_content: Some(base.to_string()),
