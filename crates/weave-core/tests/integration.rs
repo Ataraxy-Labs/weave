@@ -893,3 +893,186 @@ int process(Data* data) {
     assert!(result.content.contains("log_debug"), "Should contain ours change");
     assert!(result.content.contains("NULL"), "Should contain theirs change");
 }
+
+// =============================================================================
+// Method reordering
+// =============================================================================
+
+#[test]
+fn ts_method_reorder_plus_modification_auto_resolves() {
+    // Agent A reorders methods, Agent B modifies a method
+    let base = r#"class Service {
+    getUser(id: string) {
+        return db.find(id);
+    }
+
+    createUser(data: any) {
+        return db.create(data);
+    }
+
+    deleteUser(id: string) {
+        return db.delete(id);
+    }
+}
+"#;
+    let ours = r#"class Service {
+    getUser(id: string) {
+        return db.find(id);
+    }
+
+    deleteUser(id: string) {
+        return db.delete(id);
+    }
+
+    createUser(data: any) {
+        return db.create(data);
+    }
+}
+"#;
+    let theirs = r#"class Service {
+    getUser(id: string) {
+        console.log("fetching", id);
+        return db.find(id);
+    }
+
+    createUser(data: any) {
+        return db.create(data);
+    }
+
+    deleteUser(id: string) {
+        return db.delete(id);
+    }
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "service.ts");
+    assert!(
+        result.is_clean(),
+        "Method reorder + modification should auto-resolve. Conflicts: {:?}",
+        result.conflicts,
+    );
+    assert!(result.content.contains("console.log(\"fetching\""), "Should have theirs modification");
+    assert!(result.content.contains("deleteUser"), "Should have all methods");
+    assert!(result.content.contains("createUser"), "Should have all methods");
+}
+
+// =============================================================================
+// Python class inner entity merge
+// =============================================================================
+
+#[test]
+fn python_class_both_add_methods_auto_resolves() {
+    let base = "class Calculator:\n    def add(self, a, b):\n        return a + b\n";
+    let ours = "class Calculator:\n    def add(self, a, b):\n        return a + b\n\n    def multiply(self, a, b):\n        return a * b\n";
+    let theirs = "class Calculator:\n    def add(self, a, b):\n        return a + b\n\n    def divide(self, a, b):\n        return a / b\n";
+    let result = entity_merge(base, ours, theirs, "calculator.py");
+    assert!(
+        result.is_clean(),
+        "Both adding methods to Python class should auto-resolve. Conflicts: {:?}",
+        result.conflicts,
+    );
+    assert!(result.content.contains("multiply"), "Should have ours method");
+    assert!(result.content.contains("divide"), "Should have theirs method");
+}
+
+// =============================================================================
+// Rust impl block merge
+// =============================================================================
+
+#[test]
+fn rust_impl_both_add_methods_auto_resolves() {
+    let base = r#"impl Calculator {
+    fn add(&self, a: i32, b: i32) -> i32 {
+        a + b
+    }
+}
+"#;
+    let ours = r#"impl Calculator {
+    fn add(&self, a: i32, b: i32) -> i32 {
+        a + b
+    }
+
+    fn multiply(&self, a: i32, b: i32) -> i32 {
+        a * b
+    }
+}
+"#;
+    let theirs = r#"impl Calculator {
+    fn add(&self, a: i32, b: i32) -> i32 {
+        a + b
+    }
+
+    fn divide(&self, a: i32, b: i32) -> i32 {
+        a / b
+    }
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "calc.rs");
+    assert!(
+        result.is_clean(),
+        "Both adding methods to Rust impl should auto-resolve. Conflicts: {:?}",
+        result.conflicts,
+    );
+    assert!(result.content.contains("multiply"), "Should have ours method");
+    assert!(result.content.contains("divide"), "Should have theirs method");
+}
+
+// =============================================================================
+// Go: both add functions
+// =============================================================================
+
+#[test]
+fn go_both_add_different_functions_auto_resolves() {
+    let base = r#"package handlers
+
+func HandleGet(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusOK)
+}
+"#;
+    let ours = r#"package handlers
+
+func HandleGet(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusOK)
+}
+
+func HandlePost(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusCreated)
+}
+"#;
+    let theirs = r#"package handlers
+
+func HandleGet(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusOK)
+}
+
+func HandleDelete(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusNoContent)
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "handlers.go");
+    assert!(
+        result.is_clean(),
+        "Both adding Go functions should auto-resolve. Conflicts: {:?}",
+        result.conflicts,
+    );
+    assert!(result.content.contains("HandlePost"), "Should have ours function");
+    assert!(result.content.contains("HandleDelete"), "Should have theirs function");
+}
+
+// =============================================================================
+// Enum variant modify + add
+// =============================================================================
+
+#[test]
+fn ts_enum_modify_variant_plus_add_variant_auto_resolves() {
+    let base = "enum Status {\n    Active = \"active\",\n    Inactive = \"inactive\",\n    Pending = \"pending\",\n}\n";
+    let ours = "enum Status {\n    Active = \"active\",\n    Inactive = \"disabled\",\n    Pending = \"pending\",\n}\n";
+    let theirs = "enum Status {\n    Active = \"active\",\n    Inactive = \"inactive\",\n    Pending = \"pending\",\n    Deleted = \"deleted\",\n}\n";
+    let result = entity_merge(base, ours, theirs, "status.ts");
+    assert!(
+        result.is_clean(),
+        "Enum modify + add should auto-resolve. Conflicts: {:?}",
+        result.conflicts,
+    );
+    assert!(result.content.contains("\"disabled\""), "Should have modified variant");
+    assert!(result.content.contains("Deleted"), "Should have new variant");
+}

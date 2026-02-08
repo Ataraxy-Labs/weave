@@ -72,9 +72,14 @@ pub fn extract_regions(content: &str, entities: &[SemanticEntity]) -> Vec<FileRe
         let entity_start = entity.start_line.saturating_sub(1); // convert to 0-based
         let entity_end = entity.end_line; // end_line is inclusive, so this is exclusive in 0-based
 
-        // Interstitial before this entity
-        if current_line < entity_start {
-            let interstitial_content = join_lines(&lines[current_line..entity_start]);
+        // Comment bundling: scan backwards from entity_start to find leading doc comments.
+        // These comments (JSDoc, Rust ///, Python docstrings, Java /** */) should be part
+        // of the entity region, not the interstitial gap.
+        let bundled_start = find_leading_comment_start(&lines, entity_start, current_line);
+
+        // Interstitial before this entity (excluding bundled comments)
+        if current_line < bundled_start {
+            let interstitial_content = join_lines(&lines[current_line..bundled_start]);
             let position_key = if i == 0 {
                 "file_header".to_string()
             } else {
@@ -86,11 +91,10 @@ pub fn extract_regions(content: &str, entities: &[SemanticEntity]) -> Vec<FileRe
             }));
         }
 
-        // Entity region — use the entity's own content (which sem-core extracts accurately)
-        // but also compute from lines for consistency
+        // Entity region — includes bundled leading comments
         let entity_end_clamped = entity_end.min(total_lines);
-        let entity_content = if entity_start < entity_end_clamped {
-            join_lines(&lines[entity_start..entity_end_clamped])
+        let entity_content = if bundled_start < entity_end_clamped {
+            join_lines(&lines[bundled_start..entity_end_clamped])
         } else {
             entity.content.clone()
         };
@@ -130,6 +134,95 @@ pub fn extract_regions(content: &str, entities: &[SemanticEntity]) -> Vec<FileRe
     }
 
     regions
+}
+
+/// Find the start of leading doc comments before an entity.
+///
+/// Walks backwards from `entity_start` to find contiguous doc comment lines.
+/// Stops at `min_line` (the end of the previous entity/region).
+///
+/// Recognizes:
+/// - `///` and `//!` (Rust doc comments)
+/// - `/** ... */` (JSDoc, JavaDoc block comments)
+/// - `# comment` above Python defs (not always doc, but commonly associated)
+/// - Decorators/annotations (already handled by entity extraction, but defensive)
+fn find_leading_comment_start(lines: &[&str], entity_start: usize, min_line: usize) -> usize {
+    if entity_start == 0 || entity_start <= min_line {
+        return entity_start;
+    }
+
+    let mut comment_start = entity_start;
+    let mut in_block_comment = false;
+
+    // Walk backwards
+    let mut line_idx = entity_start.saturating_sub(1);
+    loop {
+        if line_idx < min_line {
+            break;
+        }
+
+        let trimmed = lines[line_idx].trim();
+
+        if trimmed.is_empty() {
+            // Allow one blank line between comment and entity
+            // But don't extend past it
+            if comment_start == entity_start && line_idx + 1 == entity_start {
+                // Blank line immediately before entity — skip it, check further up
+                line_idx = line_idx.saturating_sub(1);
+                if line_idx < min_line {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+
+        // Check for end of block comment (scanning backwards, so */ means start of block)
+        if trimmed.ends_with("*/") && !trimmed.starts_with("/*") {
+            // This is the end of a block comment — scan backwards for /*
+            in_block_comment = true;
+            comment_start = line_idx;
+            if line_idx == min_line {
+                break;
+            }
+            line_idx -= 1;
+            continue;
+        }
+
+        if in_block_comment {
+            if trimmed.starts_with("/*") || trimmed.starts_with("/**") {
+                comment_start = line_idx;
+                in_block_comment = false;
+            }
+            // Continue scanning backwards through block comment
+            if line_idx == min_line {
+                break;
+            }
+            line_idx -= 1;
+            continue;
+        }
+
+        // Single-line doc comment patterns
+        if trimmed.starts_with("///")    // Rust doc comment
+            || trimmed.starts_with("//!") // Rust inner doc comment
+            || trimmed.starts_with("/**") // JSDoc/JavaDoc one-liner
+            || trimmed.starts_with("* ")  // JSDoc/JavaDoc continuation
+            || trimmed == "*"             // Empty JSDoc line
+            || trimmed == "*/"            // End of JSDoc block
+        {
+            comment_start = line_idx;
+            if line_idx == min_line {
+                break;
+            }
+            line_idx -= 1;
+            continue;
+        }
+
+        // Not a comment line — stop
+        break;
+    }
+
+    comment_start
 }
 
 fn join_lines(lines: &[&str]) -> String {
@@ -182,6 +275,96 @@ export function world() {
         let entity_names: Vec<&str> = entity_regions.iter().map(|e| e.entity_name.as_str()).collect();
         assert!(entity_names.contains(&"hello"), "Should find hello function, got {:?}", entity_names);
         assert!(entity_names.contains(&"world"), "Should find world function, got {:?}", entity_names);
+    }
+
+    #[test]
+    fn test_comment_bundling_jsdoc() {
+        // JSDoc comment should be bundled with the following function entity
+        let content = r#"import { foo } from 'bar';
+
+/**
+ * Greets a person by name.
+ * @param name - The person's name
+ */
+export function hello(name: string) {
+    return `Hello, ${name}!`;
+}
+
+export function world() {
+    return "world";
+}
+"#;
+
+        let registry = create_default_registry();
+        let plugin = registry.get_plugin("test.ts").unwrap();
+        let entities = plugin.extract_entities(content, "test.ts");
+
+        let _hello = entities.iter().find(|e| e.name == "hello").expect("Should find hello");
+        let regions = extract_regions(content, &entities);
+
+        // Find the hello entity region
+        let hello_region = regions.iter().find(|r| match r {
+            FileRegion::Entity(e) => e.entity_name == "hello",
+            _ => false,
+        }).expect("Should find hello region");
+
+        // The entity region should include the JSDoc comment
+        assert!(
+            hello_region.content().contains("/**"),
+            "hello region should include JSDoc comment. Content: {:?}",
+            hello_region.content(),
+        );
+        assert!(
+            hello_region.content().contains("@param name"),
+            "hello region should include JSDoc @param. Content: {:?}",
+            hello_region.content(),
+        );
+
+        // The interstitial before hello should NOT contain the JSDoc
+        let interstitials: Vec<_> = regions.iter().filter(|r| !r.is_entity()).collect();
+        for inter in &interstitials {
+            assert!(
+                !inter.content().contains("/**") || inter.content().contains("@param") == false,
+                "Interstitial should not contain the bundled JSDoc. Key: {:?}, Content: {:?}",
+                inter.key(), inter.content(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_comment_bundling_rust_doc() {
+        let content = r#"use std::io;
+
+/// Adds two numbers together.
+///
+/// # Examples
+/// ```
+/// assert_eq!(add(1, 2), 3);
+/// ```
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn subtract(a: i32, b: i32) -> i32 {
+    a - b
+}
+"#;
+
+        let registry = create_default_registry();
+        let plugin = registry.get_plugin("test.rs").unwrap();
+        let entities = plugin.extract_entities(content, "test.rs");
+
+        let regions = extract_regions(content, &entities);
+        let add_region = regions.iter().find(|r| match r {
+            FileRegion::Entity(e) => e.entity_name == "add",
+            _ => false,
+        }).expect("Should find add region");
+
+        assert!(
+            add_region.content().contains("/// Adds two numbers"),
+            "add region should include Rust doc comment. Content: {:?}",
+            add_region.content(),
+        );
     }
 
     #[test]

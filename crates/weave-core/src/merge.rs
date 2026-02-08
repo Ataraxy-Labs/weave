@@ -307,8 +307,17 @@ fn resolve_entity(
     match (in_base, in_ours, in_theirs) {
         // Entity exists in all three versions
         (Some(base), Some(ours), Some(theirs)) => {
-            let ours_modified = ours.content_hash != base.content_hash;
-            let theirs_modified = theirs.content_hash != base.content_hash;
+            // Check modification status via structural hash AND region content.
+            // Region content may differ even when structural hash is the same
+            // (e.g., doc comment added/changed but function body unchanged).
+            let base_rc_lazy = || region_content(base, base_region_content);
+            let ours_rc_lazy = || region_content(ours, ours_region_content);
+            let theirs_rc_lazy = || region_content(theirs, theirs_region_content);
+
+            let ours_modified = ours.content_hash != base.content_hash
+                || ours_rc_lazy() != base_rc_lazy();
+            let theirs_modified = theirs.content_hash != base.content_hash
+                || theirs_rc_lazy() != base_rc_lazy();
 
             match (ours_modified, theirs_modified) {
                 (false, false) => {
@@ -1189,34 +1198,53 @@ fn try_inner_entity_merge(base: &str, ours: &str, theirs: &str) -> Option<String
 }
 
 /// Extract the header (class declaration) and footer (closing brace) from a container.
+/// Supports both brace-delimited (JS/TS/Java/Rust/C) and indentation-based (Python) containers.
 fn extract_container_wrapper(content: &str) -> Option<(&str, &str)> {
     let lines: Vec<&str> = content.lines().collect();
     if lines.len() < 2 {
         return None;
     }
 
-    // Header is everything up to and including the first line with `{`
-    let header_end = lines.iter().position(|l| l.contains('{'))?;
-    let header_byte_end = lines[..=header_end]
-        .iter()
-        .map(|l| l.len() + 1) // +1 for newline
-        .sum::<usize>();
-    let header = &content[..header_byte_end.min(content.len())];
-
-    // Footer: find the last line with `}` at the container's indent level
-    // Walk backwards from the end
-    let footer_start = lines.iter().rposition(|l| {
+    // Check if this is a Python-style container (ends with `:` instead of `{`)
+    let is_python_style = lines.iter().any(|l| {
         let trimmed = l.trim();
-        trimmed == "}" || trimmed == "};"
-    })?;
+        (trimmed.starts_with("class ") || trimmed.starts_with("def "))
+            && trimmed.ends_with(':')
+    }) && !lines.iter().any(|l| l.contains('{'));
 
-    let footer_byte_start: usize = lines[..footer_start]
-        .iter()
-        .map(|l| l.len() + 1)
-        .sum();
-    let footer = &content[footer_byte_start.min(content.len())..];
+    if is_python_style {
+        // Python: header is the `class Foo:` line, no footer
+        let header_end = lines.iter().position(|l| l.trim().ends_with(':'))?;
+        let header_byte_end: usize = lines[..=header_end]
+            .iter()
+            .map(|l| l.len() + 1)
+            .sum();
+        let header = &content[..header_byte_end.min(content.len())];
+        // No closing brace in Python — footer is empty
+        let footer = &content[content.len()..];
+        Some((header, footer))
+    } else {
+        // Brace-delimited: header up to `{`, footer from last `}`
+        let header_end = lines.iter().position(|l| l.contains('{'))?;
+        let header_byte_end = lines[..=header_end]
+            .iter()
+            .map(|l| l.len() + 1)
+            .sum::<usize>();
+        let header = &content[..header_byte_end.min(content.len())];
 
-    Some((header, footer))
+        let footer_start = lines.iter().rposition(|l| {
+            let trimmed = l.trim();
+            trimmed == "}" || trimmed == "};"
+        })?;
+
+        let footer_byte_start: usize = lines[..footer_start]
+            .iter()
+            .map(|l| l.len() + 1)
+            .sum();
+        let footer = &content[footer_byte_start.min(content.len())..];
+
+        Some((header, footer))
+    }
 }
 
 /// Extract named member chunks from a container body.
@@ -1226,16 +1254,32 @@ fn extract_container_wrapper(content: &str) -> Option<(&str, &str)> {
 /// member starts or the container closes.
 fn extract_member_chunks(content: &str) -> Option<Vec<MemberChunk>> {
     let lines: Vec<&str> = content.lines().collect();
-    if lines.len() < 3 {
-        return None; // Need at least header + 1 member + footer
+    if lines.len() < 2 {
+        return None;
     }
 
-    // Find the body range (between opening { and closing })
-    let body_start = lines.iter().position(|l| l.contains('{'))? + 1;
-    let body_end = lines.iter().rposition(|l| {
+    // Check if Python-style (indentation-based)
+    let is_python_style = lines.iter().any(|l| {
         let trimmed = l.trim();
-        trimmed == "}" || trimmed == "};"
-    })?;
+        (trimmed.starts_with("class ") || trimmed.starts_with("def "))
+            && trimmed.ends_with(':')
+    }) && !lines.iter().any(|l| l.contains('{'));
+
+    // Find the body range
+    let body_start = if is_python_style {
+        lines.iter().position(|l| l.trim().ends_with(':'))? + 1
+    } else {
+        lines.iter().position(|l| l.contains('{'))? + 1
+    };
+    let body_end = if is_python_style {
+        // Python: body extends to end of content
+        lines.len()
+    } else {
+        lines.iter().rposition(|l| {
+            let trimmed = l.trim();
+            trimmed == "}" || trimmed == "};"
+        })?
+    };
 
     if body_start >= body_end {
         return None;
@@ -1986,5 +2030,332 @@ export function agentB() {
         );
         assert!(result.content.contains("console.log(\"saved\""));
         assert!(result.content.contains("console.log(\"input\""));
+    }
+
+    #[test]
+    fn test_method_reordering_with_modification() {
+        // Agent A reorders methods in class, Agent B modifies one method
+        // Inner entity merge matches by name, so reordering should be transparent
+        let base = r#"class Service {
+    getUser(id: string) {
+        return db.find(id);
+    }
+
+    createUser(data: any) {
+        return db.create(data);
+    }
+
+    deleteUser(id: string) {
+        return db.delete(id);
+    }
+}
+"#;
+        // Ours: reorder methods (move deleteUser before createUser)
+        let ours = r#"class Service {
+    getUser(id: string) {
+        return db.find(id);
+    }
+
+    deleteUser(id: string) {
+        return db.delete(id);
+    }
+
+    createUser(data: any) {
+        return db.create(data);
+    }
+}
+"#;
+        // Theirs: modify getUser
+        let theirs = r#"class Service {
+    getUser(id: string) {
+        console.log("fetching", id);
+        return db.find(id);
+    }
+
+    createUser(data: any) {
+        return db.create(data);
+    }
+
+    deleteUser(id: string) {
+        return db.delete(id);
+    }
+}
+"#;
+        let result = entity_merge(base, ours, theirs, "test.ts");
+        eprintln!("Method reorder: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!("Content:\n{}", result.content);
+        assert!(
+            result.is_clean(),
+            "Method reordering + modification should merge. Conflicts: {:?}",
+            result.conflicts,
+        );
+        assert!(result.content.contains("console.log(\"fetching\""), "Should contain theirs modification");
+        assert!(result.content.contains("deleteUser"), "Should have deleteUser");
+        assert!(result.content.contains("createUser"), "Should have createUser");
+    }
+
+    #[test]
+    fn test_doc_comment_plus_body_change() {
+        // One side adds JSDoc comment, other modifies function body
+        // Doc comments are part of the entity region — they should merge with body changes
+        let base = r#"export function calculate(a: number, b: number): number {
+    return a + b;
+}
+"#;
+        let ours = r#"/**
+ * Calculate the sum of two numbers.
+ * @param a - First number
+ * @param b - Second number
+ */
+export function calculate(a: number, b: number): number {
+    return a + b;
+}
+"#;
+        let theirs = r#"export function calculate(a: number, b: number): number {
+    const result = a + b;
+    console.log("result:", result);
+    return result;
+}
+"#;
+        let result = entity_merge(base, ours, theirs, "test.ts");
+        eprintln!("Doc comment + body: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!("Content:\n{}", result.content);
+        // This tests whether weave can merge doc comment additions with body changes
+    }
+
+    #[test]
+    fn test_both_add_different_guard_clauses() {
+        // Both add different guard clauses at the start of a function
+        let base = r#"export function processOrder(order: Order): Result {
+    const total = calculateTotal(order);
+    return { success: true, total };
+}
+"#;
+        let ours = r#"export function processOrder(order: Order): Result {
+    if (!order) throw new Error("Order required");
+    const total = calculateTotal(order);
+    return { success: true, total };
+}
+"#;
+        let theirs = r#"export function processOrder(order: Order): Result {
+    if (order.items.length === 0) throw new Error("Empty order");
+    const total = calculateTotal(order);
+    return { success: true, total };
+}
+"#;
+        let result = entity_merge(base, ours, theirs, "test.ts");
+        eprintln!("Guard clauses: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!("Content:\n{}", result.content);
+        // Both add at same position — diffy may struggle since they're at the same insertion point
+    }
+
+    #[test]
+    fn test_both_modify_different_enum_variants() {
+        // One modifies a variant's value, other adds new variants
+        let base = r#"enum Status {
+    Active = "active",
+    Inactive = "inactive",
+    Pending = "pending",
+}
+"#;
+        let ours = r#"enum Status {
+    Active = "active",
+    Inactive = "disabled",
+    Pending = "pending",
+}
+"#;
+        let theirs = r#"enum Status {
+    Active = "active",
+    Inactive = "inactive",
+    Pending = "pending",
+    Deleted = "deleted",
+}
+"#;
+        let result = entity_merge(base, ours, theirs, "test.ts");
+        eprintln!("Enum modify+add: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!("Content:\n{}", result.content);
+        assert!(
+            result.is_clean(),
+            "Modify variant + add new variant should merge. Conflicts: {:?}",
+            result.conflicts,
+        );
+        assert!(result.content.contains("\"disabled\""), "Should have modified Inactive");
+        assert!(result.content.contains("Deleted"), "Should have new Deleted variant");
+    }
+
+    #[test]
+    fn test_config_object_field_additions() {
+        // Both add different fields to a config object (exported const)
+        let base = r#"export const config = {
+    timeout: 5000,
+    retries: 3,
+};
+"#;
+        let ours = r#"export const config = {
+    timeout: 5000,
+    retries: 3,
+    maxConnections: 10,
+};
+"#;
+        let theirs = r#"export const config = {
+    timeout: 5000,
+    retries: 3,
+    logLevel: "info",
+};
+"#;
+        let result = entity_merge(base, ours, theirs, "test.ts");
+        eprintln!("Config fields: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!("Content:\n{}", result.content);
+        // This tests whether inner entity merge handles object literals
+        // (it probably won't since object fields aren't extracted as members the same way)
+    }
+
+    #[test]
+    fn test_rust_impl_block_both_add_methods() {
+        // Both add different methods to a Rust impl block
+        let base = r#"impl Calculator {
+    fn add(&self, a: i32, b: i32) -> i32 {
+        a + b
+    }
+}
+"#;
+        let ours = r#"impl Calculator {
+    fn add(&self, a: i32, b: i32) -> i32 {
+        a + b
+    }
+
+    fn multiply(&self, a: i32, b: i32) -> i32 {
+        a * b
+    }
+}
+"#;
+        let theirs = r#"impl Calculator {
+    fn add(&self, a: i32, b: i32) -> i32 {
+        a + b
+    }
+
+    fn divide(&self, a: i32, b: i32) -> i32 {
+        a / b
+    }
+}
+"#;
+        let result = entity_merge(base, ours, theirs, "test.rs");
+        eprintln!("Rust impl: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!("Content:\n{}", result.content);
+        assert!(
+            result.is_clean(),
+            "Both adding methods to Rust impl should merge. Conflicts: {:?}",
+            result.conflicts,
+        );
+        assert!(result.content.contains("multiply"), "Should have multiply");
+        assert!(result.content.contains("divide"), "Should have divide");
+    }
+
+    #[test]
+    fn test_rust_doc_comment_plus_body_change() {
+        // One side adds Rust doc comment, other modifies body
+        // Comment bundling ensures the doc comment is part of the entity
+        let base = r#"fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn subtract(a: i32, b: i32) -> i32 {
+    a - b
+}
+"#;
+        let ours = r#"/// Adds two numbers together.
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn subtract(a: i32, b: i32) -> i32 {
+    a - b
+}
+"#;
+        let theirs = r#"fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn subtract(a: i32, b: i32) -> i32 {
+    a - b - 1
+}
+"#;
+        let result = entity_merge(base, ours, theirs, "test.rs");
+        assert!(
+            result.is_clean(),
+            "Rust doc comment + body change should merge. Conflicts: {:?}",
+            result.conflicts,
+        );
+        assert!(result.content.contains("/// Adds two numbers"), "Should have ours doc comment");
+        assert!(result.content.contains("a - b - 1"), "Should have theirs body change");
+    }
+
+    #[test]
+    fn test_both_add_different_doc_comments() {
+        // Both add doc comments to different functions — should merge cleanly
+        let base = r#"fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn subtract(a: i32, b: i32) -> i32 {
+    a - b
+}
+"#;
+        let ours = r#"/// Adds two numbers.
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn subtract(a: i32, b: i32) -> i32 {
+    a - b
+}
+"#;
+        let theirs = r#"fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+/// Subtracts b from a.
+fn subtract(a: i32, b: i32) -> i32 {
+    a - b
+}
+"#;
+        let result = entity_merge(base, ours, theirs, "test.rs");
+        assert!(
+            result.is_clean(),
+            "Both adding doc comments to different functions should merge. Conflicts: {:?}",
+            result.conflicts,
+        );
+        assert!(result.content.contains("/// Adds two numbers"), "Should have add's doc comment");
+        assert!(result.content.contains("/// Subtracts b from a"), "Should have subtract's doc comment");
+    }
+
+    #[test]
+    fn test_go_import_block_both_add_different() {
+        // Go uses import (...) blocks — both add different imports
+        let base = "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n";
+        let ours = "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"strings\"\n)\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n";
+        let theirs = "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"io\"\n)\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n";
+        let result = entity_merge(base, ours, theirs, "main.go");
+        eprintln!("Go import block: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!("Content:\n{}", result.content);
+        // This tests whether Go import blocks (a single entity) get inner-merged
+    }
+
+    #[test]
+    fn test_python_class_both_add_methods() {
+        // Python class — both add different methods
+        let base = "class Calculator:\n    def add(self, a, b):\n        return a + b\n";
+        let ours = "class Calculator:\n    def add(self, a, b):\n        return a + b\n\n    def multiply(self, a, b):\n        return a * b\n";
+        let theirs = "class Calculator:\n    def add(self, a, b):\n        return a + b\n\n    def divide(self, a, b):\n        return a / b\n";
+        let result = entity_merge(base, ours, theirs, "test.py");
+        eprintln!("Python class: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!("Content:\n{}", result.content);
+        assert!(
+            result.is_clean(),
+            "Both adding methods to Python class should merge. Conflicts: {:?}",
+            result.conflicts,
+        );
+        assert!(result.content.contains("multiply"), "Should have multiply");
+        assert!(result.content.contains("divide"), "Should have divide");
     }
 }

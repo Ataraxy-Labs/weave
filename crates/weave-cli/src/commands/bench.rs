@@ -921,6 +921,171 @@ void cleanup(Config* cfg) {
 }
 "#,
         },
+        // === Method reordering ===
+        Scenario {
+            name: "TS: method reorder + modification",
+            description: "One reorders methods in class, other modifies a method",
+            file_path: "service.ts",
+            base: r#"class Service {
+    getUser(id: string) {
+        return db.find(id);
+    }
+
+    createUser(data: any) {
+        return db.create(data);
+    }
+
+    deleteUser(id: string) {
+        return db.delete(id);
+    }
+}
+"#,
+            ours: r#"class Service {
+    getUser(id: string) {
+        return db.find(id);
+    }
+
+    deleteUser(id: string) {
+        return db.delete(id);
+    }
+
+    createUser(data: any) {
+        return db.create(data);
+    }
+}
+"#,
+            theirs: r#"class Service {
+    getUser(id: string) {
+        console.log("fetching", id);
+        return db.find(id);
+    }
+
+    createUser(data: any) {
+        return db.create(data);
+    }
+
+    deleteUser(id: string) {
+        return db.delete(id);
+    }
+}
+"#,
+        },
+        // === Python class methods ===
+        Scenario {
+            name: "Python: both add class methods",
+            description: "Both add different methods to same Python class",
+            file_path: "calculator.py",
+            base: "class Calculator:\n    def add(self, a, b):\n        return a + b\n",
+            ours: "class Calculator:\n    def add(self, a, b):\n        return a + b\n\n    def multiply(self, a, b):\n        return a * b\n",
+            theirs: "class Calculator:\n    def add(self, a, b):\n        return a + b\n\n    def divide(self, a, b):\n        return a / b\n",
+        },
+        // === Rust impl methods ===
+        Scenario {
+            name: "Rust: both add impl methods",
+            description: "Both add different methods to same Rust impl block",
+            file_path: "calc.rs",
+            base: r#"impl Calculator {
+    fn add(&self, a: i32, b: i32) -> i32 {
+        a + b
+    }
+}
+"#,
+            ours: r#"impl Calculator {
+    fn add(&self, a: i32, b: i32) -> i32 {
+        a + b
+    }
+
+    fn multiply(&self, a: i32, b: i32) -> i32 {
+        a * b
+    }
+}
+"#,
+            theirs: r#"impl Calculator {
+    fn add(&self, a: i32, b: i32) -> i32 {
+        a + b
+    }
+
+    fn divide(&self, a: i32, b: i32) -> i32 {
+        a / b
+    }
+}
+"#,
+        },
+        // === Enum modify + add ===
+        Scenario {
+            name: "TS: enum modify variant + add variant",
+            description: "One modifies existing variant value, other adds new variant",
+            file_path: "status.ts",
+            base: "enum Status {\n    Active = \"active\",\n    Inactive = \"inactive\",\n    Pending = \"pending\",\n}\n",
+            ours: "enum Status {\n    Active = \"active\",\n    Inactive = \"disabled\",\n    Pending = \"pending\",\n}\n",
+            theirs: "enum Status {\n    Active = \"active\",\n    Inactive = \"inactive\",\n    Pending = \"pending\",\n    Deleted = \"deleted\",\n}\n",
+        },
+        // === Doc comment + body ===
+        Scenario {
+            name: "TS: add JSDoc + modify function body",
+            description: "One adds JSDoc comment, other modifies function body",
+            file_path: "math.ts",
+            base: r#"export function calculate(a: number, b: number): number {
+    return a + b;
+}
+"#,
+            ours: r#"/**
+ * Calculate the sum of two numbers.
+ * @param a - First number
+ * @param b - Second number
+ */
+export function calculate(a: number, b: number): number {
+    return a + b;
+}
+"#,
+            theirs: r#"export function calculate(a: number, b: number): number {
+    const result = a + b;
+    console.log("result:", result);
+    return result;
+}
+"#,
+        },
+        // === Doc comment bundling ===
+        Scenario {
+            name: "Rust: both add doc comments to different fns",
+            description: "Both add doc comments to different functions via comment bundling",
+            file_path: "math.rs",
+            base: "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\nfn subtract(a: i32, b: i32) -> i32 {\n    a - b\n}\n",
+            ours: "/// Adds two numbers.\nfn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\nfn subtract(a: i32, b: i32) -> i32 {\n    a - b\n}\n",
+            theirs: "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n/// Subtracts b from a.\nfn subtract(a: i32, b: i32) -> i32 {\n    a - b\n}\n",
+        },
+        // === Go: both add different functions ===
+        Scenario {
+            name: "Go: both add different functions",
+            description: "Both add different functions to same Go file",
+            file_path: "handlers.go",
+            base: r#"package handlers
+
+func HandleGet(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusOK)
+}
+"#,
+            ours: r#"package handlers
+
+func HandleGet(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusOK)
+}
+
+func HandlePost(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusCreated)
+}
+"#,
+            theirs: r#"package handlers
+
+func HandleGet(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusOK)
+}
+
+func HandleDelete(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusNoContent)
+}
+"#,
+        },
     ];
 
     let mut total_weave_clean = 0;
