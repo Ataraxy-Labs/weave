@@ -1920,6 +1920,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "colored",
+ "diffy",
  "sem-core",
  "weave-core",
  "weave-crdt",

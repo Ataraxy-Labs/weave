@@ -86,6 +86,316 @@
 
     <section style="border-top: none; padding-top: 12px;">
 
+      <!-- Commit: Nested entity filter + bench command -->
+      <div class="commit">
+        <div class="commit-header">
+          <a class="commit-hash" href="https://github.com/Ataraxy-Labs/weave/commit/10e2e7e">10e2e7e</a>
+          <span class="commit-date">Feb 7, 2026</span>
+        </div>
+        <div class="commit-title">Add merge benchmark suite and nested entity filter</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #4ade8022; color: var(--green);">feature</span>
+          <span class="commit-tag" style="background: #fb923c22; color: var(--orange);">perf</span>
+          <span class="commit-tag" style="background: #f8717122; color: var(--red);">bugfix</span>
+        </div>
+        <div class="commit-body">
+          <p>New <code>weave bench</code> command runs 7 merge scenarios comparing weave's entity-level merge against git's line-level merge (via diffy). Results in release mode:</p>
+          <ul>
+            <li><strong>weave: 7/7 clean merges (100%)</strong> vs <strong>git: 6/7 (86%)</strong></li>
+            <li>Weave resolves import conflicts that git cannot (commutative set-based merge)</li>
+            <li>Weave handles class method merges via inner entity merge (methods matched by name, not position)</li>
+            <li>Weave timing: 85&ndash;2041us per scenario (AST parsing cost) vs git: 5&ndash;14us (raw text diff)</li>
+          </ul>
+          <p><strong>Bug fixed:</strong> sem-core was extracting local variables inside class methods (<code>const user</code>) as top-level entities. When two agents' methods both declared <code>const user</code>, this produced a false <code>BothAdded</code> conflict. Added <code>filter_nested_entities()</code> &mdash; strips entities whose line range is fully contained within another entity.</p>
+        </div>
+        <div class="lesson">
+          <div class="lesson-label">Lesson learned</div>
+          <p>When composing AST-level tools, watch for over-extraction: parsers that extract variables/assignments from <em>inside</em> functions produce nested entities that create false conflicts during merge. The fix is simple &mdash; O(n&sup2;) containment check on line ranges &mdash; but the symptom is subtle: a class merge that works with 3 methods but fails with 4 because the 4th method introduces a variable name collision.</p>
+        </div>
+        <div class="stats">
+          <span class="files">6 files</span>
+          <span class="added">+420</span>
+          <span class="removed">-5</span>
+        </div>
+      </div>
+
+      <!-- Commit: Rename detection -->
+      <div class="commit">
+        <div class="commit-header">
+          <a class="commit-hash" href="https://github.com/Ataraxy-Labs/weave/commit/05a7a32">05a7a32</a>
+          <span class="commit-date">Feb 7, 2026</span>
+        </div>
+        <div class="commit-title">Add rename detection via structural_hash matching</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #4ade8022; color: var(--green);">feature</span>
+          <span class="commit-tag" style="background: #a78bfa22; color: var(--purple);">research</span>
+        </div>
+        <div class="commit-body">
+          <p>Inspired by RefFilter and IntelliMerge: when one branch renames an entity and the other modifies a different entity, detect the rename via sem-core's AST-normalized <code>structural_hash</code> and merge cleanly. Previously this produced false delete+add conflicts.</p>
+          <p>Builds a rename map (<code>new_id &rarr; base_id</code>) before the main merge loop. The merge treats renamed entities as the same entity with a name change &mdash; modifications from the other branch apply correctly.</p>
+          <ul>
+            <li>Uses <code>structural_hash</code> (AST-normalized, strips comments + whitespace) for matching</li>
+            <li>Guards against false matches: requires the base ID to be absent in the branch</li>
+            <li>Stores resolved entities under both base and renamed IDs for correct reconstruction</li>
+          </ul>
+        </div>
+        <div class="lesson">
+          <div class="lesson-label">Lesson learned</div>
+          <p>Rename detection in merge is a graph matching problem. <code>structural_hash</code> gives us content-based matching for free &mdash; if two entities have the same normalized AST structure but different IDs (names), one was likely renamed. The key guard: only match if the old ID doesn't exist in the branch (otherwise it's a copy, not a rename).</p>
+        </div>
+        <div class="stats">
+          <span class="files">2 files</span>
+          <span class="added">+136</span>
+          <span class="removed">-3</span>
+        </div>
+      </div>
+
+      <!-- Commit: Inner entity merge (LastMerge) -->
+      <div class="commit">
+        <div class="commit-header">
+          <a class="commit-hash" href="https://github.com/Ataraxy-Labs/weave/commit/8e0a437">8e0a437</a>
+          <span class="commit-date">Feb 7, 2026</span>
+        </div>
+        <div class="commit-title">Add recursive inner entity merge for class members (LastMerge)</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #4ade8022; color: var(--green);">feature</span>
+          <span class="commit-tag" style="background: #a78bfa22; color: var(--purple);">research</span>
+        </div>
+        <div class="commit-body">
+          <p>Implements the key insight from LastMerge (<a href="https://arxiv.org/abs/2507.19687" style="color: var(--cyan);">arXiv:2507.19687</a>): class members are <em>unordered children</em>. When diffy fails on a container entity (class, impl, trait), chunk the body into method-level blocks, match by name, and merge each independently.</p>
+          <p><strong>The core multi-agent scenario this resolves:</strong> two agents modify different methods in the same class. Git produces a conflict because the changes are in adjacent hunks. Weave now resolves this cleanly.</p>
+          <ul>
+            <li><code>extract_member_chunks()</code>: splits class body by indentation level, names each chunk by method/field signature</li>
+            <li><code>try_inner_entity_merge()</code>: match-by-name three-way merge on member chunks</li>
+            <li>Handles: both modify different members, one adds + other modifies, member deletion</li>
+          </ul>
+        </div>
+        <div class="lesson">
+          <div class="lesson-label">Lesson learned</div>
+          <p>sem-core extracts classes as single entities (methods are NOT separate &mdash; <code>method_definition</code> isn't in TypeScript's <code>entity_node_types</code>). This means class merges needed a secondary decomposition layer. The indent-based chunking is language-agnostic and works for TS classes, Python classes, Rust impls, and Go structs without extra parser work.</p>
+        </div>
+        <div class="stats">
+          <span class="files">2 files</span>
+          <span class="added">+645</span>
+          <span class="removed">-0</span>
+        </div>
+      </div>
+
+      <!-- Commit: ConGra taxonomy -->
+      <div class="commit">
+        <div class="commit-header">
+          <a class="commit-hash" href="https://github.com/Ataraxy-Labs/weave/commit/dcdf0ac">dcdf0ac</a>
+          <span class="commit-date">Feb 7, 2026</span>
+        </div>
+        <div class="commit-title">Add ConGra conflict taxonomy classification</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #4ade8022; color: var(--green);">feature</span>
+          <span class="commit-tag" style="background: #a78bfa22; color: var(--purple);">research</span>
+        </div>
+        <div class="commit-body">
+          <p>Implements the ConGra taxonomy from <a href="https://arxiv.org/abs/2409.14121" style="color: var(--cyan);">arXiv:2409.14121</a>: classifies conflicts as Text (T), Syntax (S), Functional (F), or composites (T+S, T+F, S+F, T+S+F).</p>
+          <p>The classification appears on every <code>EntityConflict</code>, helping agents choose resolution strategies: text-only conflicts are trivially auto-resolvable, syntax conflicts may need type-checking, functional conflicts need careful review.</p>
+          <ul>
+            <li><code>classify_change()</code>: compares two versions, detects text (whitespace/comment), syntax (signature), functional (body) changes</li>
+            <li><code>classify_conflict()</code>: combines ours+theirs classifications into composite type</li>
+            <li>8 unit tests covering all taxonomy levels</li>
+          </ul>
+        </div>
+        <div class="stats">
+          <span class="files">2 files</span>
+          <span class="added">+270</span>
+          <span class="removed">-8</span>
+        </div>
+      </div>
+
+      <!-- Commit: Predictive conflict warnings -->
+      <div class="commit">
+        <div class="commit-header">
+          <a class="commit-hash" href="https://github.com/Ataraxy-Labs/weave/commit/24f8136">24f8136</a>
+          <span class="commit-date">Feb 6, 2026</span>
+        </div>
+        <div class="commit-title">Add predictive conflict warnings to weave_claim_entity</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #4ade8022; color: var(--green);">feature</span>
+          <span class="commit-tag" style="background: #22d3ee22; color: var(--cyan);">weave-mcp</span>
+        </div>
+        <div class="commit-body">
+          <p>When an agent claims an entity, the tool now checks the entity dependency graph for related entities claimed by other agents. Returns warnings like: <em>"processData depends on validateInput which is claimed by agent-2"</em>.</p>
+          <p>This predicts merge conflicts <strong>before they happen</strong> &mdash; the first step from reactive conflict resolution to proactive conflict prevention.</p>
+        </div>
+        <div class="stats">
+          <span class="files">1 file</span>
+          <span class="added">+64</span>
+          <span class="removed">-2</span>
+        </div>
+      </div>
+
+      <!-- Commit: Validate merge MCP tool -->
+      <div class="commit">
+        <div class="commit-header">
+          <a class="commit-hash" href="https://github.com/Ataraxy-Labs/weave/commit/da91aea">da91aea</a>
+          <span class="commit-date">Feb 6, 2026</span>
+        </div>
+        <div class="commit-title">Add weave_validate_merge MCP tool for semantic risk detection</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #4ade8022; color: var(--green);">feature</span>
+          <span class="commit-tag" style="background: #22d3ee22; color: var(--cyan);">weave-mcp</span>
+        </div>
+        <div class="commit-body">
+          <p>New tool validates a merge for semantic risks. Finds entities modified in both branches, then uses the entity dependency graph to detect cross-references between them.</p>
+          <p>Returns warnings like: <em>"processData was modified and references validateInput which was also modified"</em> &mdash; cases where the merge is syntactically clean but semantically risky. Weave MCP server now exposes <strong>13 tools</strong> total.</p>
+        </div>
+        <div class="stats">
+          <span class="files">2 files</span>
+          <span class="added">+99</span>
+          <span class="removed">-0</span>
+        </div>
+      </div>
+
+      <!-- Commit: Sesame separator preprocessing -->
+      <div class="commit">
+        <div class="commit-header">
+          <a class="commit-hash" href="https://github.com/Ataraxy-Labs/weave/commit/c26d043">c26d043</a>
+          <span class="commit-date">Feb 6, 2026</span>
+        </div>
+        <div class="commit-title">Add Sesame-inspired separator preprocessing to fallback merge</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #4ade8022; color: var(--green);">feature</span>
+          <span class="commit-tag" style="background: #a78bfa22; color: var(--purple);">research</span>
+        </div>
+        <div class="commit-body">
+          <p>Based on Sesame (<a href="https://arxiv.org/abs/2407.18888" style="color: var(--cyan);">arXiv:2407.18888</a>) which achieved 91% spurious conflict reduction. When entity-level merge isn't possible, the line-level fallback now expands syntactic separators (<code>{ } ;</code>) onto separate lines before merging. This gives diffy finer-grained alignment across block boundaries.</p>
+          <p>String contents are preserved during expansion. Falls back to plain merge if separator-expanded merge still conflicts (for cleaner markers).</p>
+        </div>
+        <div class="lesson">
+          <div class="lesson-label">Lesson learned</div>
+          <p>Sesame's insight: line-based merge tools fail when syntactic boundaries don't align with line boundaries. Expanding <code>{</code> and <code>}</code> onto their own lines is a zero-cost preprocessing step that dramatically improves diffy's alignment. Works as a graceful degradation path when AST parsing isn't available.</p>
+        </div>
+        <div class="stats">
+          <span class="files">1 file</span>
+          <span class="added">+159</span>
+          <span class="removed">-18</span>
+        </div>
+      </div>
+
+      <!-- Commit: Post-merge semantic validation -->
+      <div class="commit">
+        <div class="commit-header">
+          <a class="commit-hash" href="https://github.com/Ataraxy-Labs/weave/commit/e786012">e786012</a>
+          <span class="commit-date">Feb 6, 2026</span>
+        </div>
+        <div class="commit-title">Add post-merge semantic validation</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #4ade8022; color: var(--green);">feature</span>
+          <span class="commit-tag" style="background: #22d3ee22; color: var(--cyan);">weave-core</span>
+        </div>
+        <div class="commit-body">
+          <p>New <code>validate</code> module detects when auto-merged entities reference other entities that were also modified &mdash; a semantic risk even when the merge is syntactically clean. Uses sem-core's entity dependency graph.</p>
+          <p>Two warning types: <code>DependencyAlsoModified</code> (you call something that changed) and <code>DependentAlsoModified</code> (something that calls you changed). <code>MergeResult</code> now carries a <code>warnings</code> field alongside conflicts.</p>
+        </div>
+        <div class="stats">
+          <span class="files">6 files</span>
+          <span class="added">+340</span>
+          <span class="removed">-0</span>
+        </div>
+      </div>
+
+      <!-- Commit: Entity graph MCP tools -->
+      <div class="commit">
+        <div class="commit-header">
+          <a class="commit-hash" href="https://github.com/Ataraxy-Labs/weave/commit/d4e09f3">d4e09f3</a>
+          <span class="commit-date">Feb 6, 2026</span>
+        </div>
+        <div class="commit-title">Add entity graph MCP tools: dependencies, dependents, impact analysis</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #4ade8022; color: var(--green);">feature</span>
+          <span class="commit-tag" style="background: #22d3ee22; color: var(--cyan);">weave-mcp</span>
+        </div>
+        <div class="commit-body">
+          <p>Three new tools expose sem-core's cross-file entity dependency graph:</p>
+          <ul>
+            <li><code>weave_get_dependencies</code>: what does this entity call/reference?</li>
+            <li><code>weave_get_dependents</code>: who calls/references this entity?</li>
+            <li><code>weave_impact_analysis</code>: transitive blast radius if an entity changes</li>
+          </ul>
+          <p>Builds the full repo graph on each call using sem-core's two-pass extraction (entities &rarr; symbol table &rarr; reference edges).</p>
+        </div>
+        <div class="stats">
+          <span class="files">2 files</span>
+          <span class="added">+199</span>
+          <span class="removed">-0</span>
+        </div>
+      </div>
+
+      <!-- Commit: Commutative import merge -->
+      <div class="commit">
+        <div class="commit-header">
+          <a class="commit-hash" href="https://github.com/Ataraxy-Labs/weave/commit/63b3a37">63b3a37</a>
+          <span class="commit-date">Feb 6, 2026</span>
+        </div>
+        <div class="commit-title">Add commutative merge for import/use blocks</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #4ade8022; color: var(--green);">feature</span>
+          <span class="commit-tag" style="background: #a78bfa22; color: var(--purple);">research</span>
+        </div>
+        <div class="commit-body">
+          <p>Inspired by Mergiraf: treats import-heavy regions as unordered sets instead of ordered sequences. Eliminates the most common false conflict in multi-agent workflows (both agents adding different imports).</p>
+          <p>Algorithm: compute set differences from base for each branch, merge additions, remove deletions, deduplicate. Supports JS/TS <code>import</code>, Rust <code>use</code>, Python <code>import</code>, C/C++ <code>#include</code>, and <code>require()</code>.</p>
+        </div>
+        <div class="stats">
+          <span class="files">3 files</span>
+          <span class="added">+331</span>
+          <span class="removed">-10</span>
+        </div>
+      </div>
+
+      <!-- Commit: MCP repo discovery fix -->
+      <div class="commit">
+        <div class="commit-header">
+          <a class="commit-hash" href="https://github.com/Ataraxy-Labs/weave/commit/0b3a17c">0b3a17c</a>
+          <span class="commit-date">Feb 6, 2026</span>
+        </div>
+        <div class="commit-title">Fix MCP server: discover repo from absolute file paths</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #f8717122; color: var(--red);">bugfix</span>
+          <span class="commit-tag" style="background: #22d3ee22; color: var(--cyan);">weave-mcp</span>
+        </div>
+        <div class="commit-body">
+          <p>MCP server failed when launched from outside a git repo. Now uses 3-strategy discovery:</p>
+          <ul>
+            <li>Absolute file path &rarr; <code>git -C &lt;parent&gt; rev-parse --show-toplevel</code></li>
+            <li><code>WEAVE_REPO</code> env var</li>
+            <li>CWD-based discovery (original)</li>
+          </ul>
+          <p>Converts absolute paths to repo-relative internally so tools work with both.</p>
+        </div>
+        <div class="stats">
+          <span class="files">2 files</span>
+          <span class="added">+150</span>
+          <span class="removed">-42</span>
+        </div>
+      </div>
+
+      <!-- Commit: Changelog page -->
+      <div class="commit">
+        <div class="commit-header">
+          <a class="commit-hash" href="https://github.com/Ataraxy-Labs/weave/commit/3282c19">3282c19</a>
+          <span class="commit-date">Feb 6, 2026</span>
+        </div>
+        <div class="commit-title">Add changelog page with technical learnings from every commit</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #60a5fa22; color: var(--blue);">docs</span>
+        </div>
+        <div class="commit-body">
+          <p>Each entry includes commit context, what changed, what broke, and a "lesson learned" box. Covers: lazy MCP init, automerge Transactable, rmcp schemars, cargo install syntax, entity.content vs raw regions, diffy behavior, and Claude Code MCP scoping.</p>
+        </div>
+        <div class="stats">
+          <span class="files">4 files</span>
+          <span class="added">+333</span>
+          <span class="removed">-0</span>
+        </div>
+      </div>
+
       <!-- Commit: Lazy MCP init -->
       <div class="commit">
         <div class="commit-header">

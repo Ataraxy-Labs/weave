@@ -43,6 +43,8 @@ enum Commands {
         /// Entity name to claim
         entity_name: String,
     },
+    /// Run merge benchmarks comparing weave vs git line-level merge
+    Bench,
     /// Release a previously claimed entity
     Release {
         /// Agent identifier
@@ -67,6 +69,7 @@ fn main() {
         Commands::Status { ref file, ref agent } => {
             commands::status::run(file.as_deref(), agent.as_deref())
         }
+        Commands::Bench => commands::bench::run(),
         Commands::Claim {
             ref agent_id,
             ref file_path,

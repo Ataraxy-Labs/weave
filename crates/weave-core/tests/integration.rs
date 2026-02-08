@@ -572,3 +572,85 @@ fn ts_class_entity_extraction_is_single_entity() {
     assert_eq!(entities[0].entity_type, "class");
     assert_eq!(entities[0].name, "Calculator");
 }
+
+#[test]
+fn ts_class_4methods_different_agents_modify_different_methods() {
+    // Reproducing exact bench scenario #2 — 4-method class
+    let base = r#"export class UserService {
+    getUser(id: string): User {
+        return this.db.find(id);
+    }
+
+    createUser(data: UserData): User {
+        return this.db.create(data);
+    }
+
+    deleteUser(id: string): void {
+        this.db.delete(id);
+    }
+
+    listUsers(): User[] {
+        return this.db.findAll();
+    }
+}
+"#;
+    let ours = r#"export class UserService {
+    getUser(id: string): User {
+        const cached = this.cache.get(id);
+        if (cached) return cached;
+        const user = this.db.find(id);
+        this.cache.set(id, user);
+        return user;
+    }
+
+    createUser(data: UserData): User {
+        return this.db.create(data);
+    }
+
+    deleteUser(id: string): void {
+        this.db.delete(id);
+    }
+
+    listUsers(): User[] {
+        return this.db.findAll();
+    }
+}
+"#;
+    let theirs = r#"export class UserService {
+    getUser(id: string): User {
+        return this.db.find(id);
+    }
+
+    createUser(data: UserData): User {
+        if (!data.email) throw new Error("email required");
+        if (!data.name) throw new Error("name required");
+        const user = this.db.create(data);
+        this.events.emit("user.created", user);
+        return user;
+    }
+
+    deleteUser(id: string): void {
+        this.db.delete(id);
+    }
+
+    listUsers(): User[] {
+        return this.db.findAll();
+    }
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "service.ts");
+    eprintln!("Stats: {:?}", result.stats);
+    if !result.is_clean() {
+        eprintln!("Conflicts: {:?}", result.conflicts);
+        eprintln!("Content:\n{}", result.content);
+    }
+    assert!(
+        result.is_clean(),
+        "4-method class: different methods modified should auto-merge. Conflicts: {:?}",
+        result.conflicts,
+    );
+    assert!(result.content.contains("cache.get"));
+    assert!(result.content.contains("email required"));
+    assert!(result.content.contains("deleteUser"));
+    assert!(result.content.contains("listUsers"));
+}

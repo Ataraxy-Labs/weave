@@ -72,7 +72,10 @@
               <span style="color:var(--green)">Only ours changed?</span> Use ours.
               <span style="color:var(--green)">Only theirs?</span> Use theirs.
               <span style="color:var(--yellow)">Both changed identically?</span> Use either.
-              <span style="color:var(--red)">Both changed differently?</span> Attempt 3-way merge on the entity body via <code style="color:var(--cyan)">diffy</code>.
+              <span style="color:var(--red)">Both changed differently?</span> Try 3-way merge via <code style="color:var(--cyan)">diffy</code>.
+              If that fails on a container (class/impl/trait), try <strong>inner entity merge</strong>: decompose into method-level chunks, match by name, merge each independently.
+              Renames are detected via <code style="color:var(--cyan)">structural_hash</code> (AST-normalized).
+              Conflicts are classified using the <a href="https://arxiv.org/abs/2409.14121" style="color:var(--cyan)">ConGra taxonomy</a> (Text/Syntax/Functional).
             </div>
           </div>
         </div>
@@ -315,6 +318,22 @@
           <div class="tool-name">weave_agent_heartbeat</div>
           <div class="tool-desc">Keep-alive + update working state. Input: <code>{agent_id, working_on}</code></div>
         </div>
+        <div class="tool-card" style="border-color: var(--yellow);">
+          <div class="tool-name">weave_validate_merge</div>
+          <div class="tool-desc">Detect semantic risks in a merge &mdash; entities that reference each other and were both modified. Input: <code>{base_branch, target_branch, file_path?}</code></div>
+        </div>
+        <div class="tool-card" style="border-color: var(--cyan);">
+          <div class="tool-name">weave_get_dependencies</div>
+          <div class="tool-desc">What does this entity call or reference? Uses cross-file dependency graph. Input: <code>{file_path, entity_name}</code></div>
+        </div>
+        <div class="tool-card" style="border-color: var(--cyan);">
+          <div class="tool-name">weave_get_dependents</div>
+          <div class="tool-desc">Who calls or references this entity? Reverse dependency lookup. Input: <code>{file_path, entity_name}</code></div>
+        </div>
+        <div class="tool-card" style="border-color: var(--cyan);">
+          <div class="tool-name">weave_impact_analysis</div>
+          <div class="tool-desc">Transitive blast radius if an entity changes. BFS through dependency graph. Input: <code>{file_path, entity_name}</code></div>
+        </div>
       </div>
 
       <h3 style="font-size: 16px; color: var(--accent); margin: 32px 0 16px;">Example: agent workflow</h3>
@@ -394,6 +413,13 @@
         <div class="cmd-doc-header">
           <span class="cmd-doc-name">weave release &lt;agent&gt; &lt;file&gt; &lt;entity&gt;</span>
           <span class="cmd-doc-desc">Release a previously claimed entity</span>
+        </div>
+      </div>
+
+      <div class="cmd-doc">
+        <div class="cmd-doc-header">
+          <span class="cmd-doc-name">weave bench</span>
+          <span class="cmd-doc-desc">Run merge benchmarks comparing weave vs git line-level merge</span>
         </div>
       </div>
     </section>

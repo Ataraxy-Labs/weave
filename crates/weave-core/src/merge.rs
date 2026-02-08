@@ -107,10 +107,11 @@ pub fn entity_merge_with_registry(
         None => return line_level_fallback(base, ours, theirs),
     };
 
-    // Extract entities from all three versions
-    let base_entities = plugin.extract_entities(base, file_path);
-    let ours_entities = plugin.extract_entities(ours, file_path);
-    let theirs_entities = plugin.extract_entities(theirs, file_path);
+    // Extract entities from all three versions, filtering out nested entities
+    // (e.g. variables inside class methods — handled as part of the parent entity)
+    let base_entities = filter_nested_entities(plugin.extract_entities(base, file_path));
+    let ours_entities = filter_nested_entities(plugin.extract_entities(ours, file_path));
+    let theirs_entities = filter_nested_entities(plugin.extract_entities(theirs, file_path));
 
     // Fallback if parser returns nothing for non-empty content
     if base_entities.is_empty() && !base.trim().is_empty() {
@@ -754,6 +755,47 @@ fn line_level_fallback(base: &str, ours: &str, theirs: &str) -> MergeResult {
             }
         }
     }
+}
+
+/// Filter out entities that are nested inside other entities.
+///
+/// When a class contains methods which contain local variables, sem-core may extract
+/// all of them as entities. But for merge purposes, nested entities are part of their
+/// parent — we handle them via inner entity merge. Keeping them causes false conflicts
+/// (e.g. two methods both declaring `const user` would appear as BothAdded).
+fn filter_nested_entities(entities: Vec<SemanticEntity>) -> Vec<SemanticEntity> {
+    if entities.len() <= 1 {
+        return entities;
+    }
+
+    let mut keep: Vec<bool> = vec![true; entities.len()];
+
+    for (i, entity) in entities.iter().enumerate() {
+        if !keep[i] {
+            continue;
+        }
+        // Check if this entity is fully contained within another entity
+        for (j, other) in entities.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            if entity.start_line >= other.start_line
+                && entity.end_line <= other.end_line
+                && !(entity.start_line == other.start_line && entity.end_line == other.end_line)
+            {
+                // entity is strictly nested inside other
+                keep[i] = false;
+                break;
+            }
+        }
+    }
+
+    entities
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| keep[*i])
+        .map(|(_, e)| e)
+        .collect()
 }
 
 /// Build a rename map from new_id → base_id using structural_hash matching.

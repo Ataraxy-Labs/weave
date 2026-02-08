@@ -9,3 +9,4 @@ weave-crdt = { path = "../weave-crdt" }
 sem-core = { git = "https://github.com/Ataraxy-Labs/sem", version = "0.2" }
 clap = { version = "4", features = ["derive"] }
 colored = "2"
+diffy = "0.4"
