@@ -86,6 +86,38 @@
 
     <section style="border-top: none; padding-top: 12px;">
 
+      <!-- Commit: Comment bundling, Python class merge, method reordering, 31-scenario benchmark -->
+      <div class="commit">
+        <div class="commit-header">
+          <span class="commit-date">Feb 7, 2026</span>
+        </div>
+        <div class="commit-title">Add comment bundling, Python class merge, method reordering — v0.1.0 release</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #4ade8022; color: var(--green);">feature</span>
+          <span class="commit-tag" style="background: #fb923c22; color: var(--orange);">release</span>
+          <span class="commit-tag" style="background: #a78bfa22; color: var(--purple);">research</span>
+        </div>
+        <div class="commit-body">
+          <p>Three new features, expanded benchmark to 31 scenarios, and first public release:</p>
+          <ul>
+            <li><strong>Comment bundling</strong> (Mergiraf-inspired): doc comments (JSDoc <code>/** */</code>, Rust <code>///</code>, JavaDoc) are now bundled with their associated entity during region extraction. Comments travel with their function during merge, and region content comparison supplements structural hash to detect comment-only changes.</li>
+            <li><strong>Python class inner merge</strong>: <code>extract_container_wrapper</code> and <code>extract_member_chunks</code> now handle indentation-based containers (<code>class Foo:</code>) alongside brace-delimited ones. Both adding methods to a Python class auto-resolves.</li>
+            <li><strong>Method reordering support</strong>: inner entity merge matches members by name, making method reordering within a class transparent to the merge — one agent can reorder while another modifies.</li>
+          </ul>
+          <p><strong>Benchmark: weave 31/31 (100%) vs git 15/31 (48%)</strong>. 7 new scenarios: method reorder, Python class methods, Rust impl methods, enum modify+add, JSDoc+body, Rust doc comments, Go functions.</p>
+          <p><strong>v0.1.0 released</strong> on Homebrew: <code>brew install ataraxy-labs/tap/weave</code></p>
+          <div class="stats">
+            <span class="added">+939</span>
+            <span class="removed">-37</span>
+            <span class="files">4 files (merge.rs, region.rs, bench.rs, integration.rs)</span>
+          </div>
+        </div>
+        <div class="lesson">
+          <span class="lesson-tag">lesson</span>
+          Comment bundling is a simple heuristic (scan backwards for doc comment patterns) but architecturally significant — it prevents doc comments from becoming orphaned "interstitial" content during entity-level merge. The ASE 2024 evaluation paper found that plume-lib's approach of fixing semantic issues post-merge outperformed more complex approaches — keeping it simple works.
+        </div>
+      </div>
+
       <!-- Commit: Decorator-aware merge, Java/C support, 24-scenario benchmark -->
       <div class="commit">
         <div class="commit-header">

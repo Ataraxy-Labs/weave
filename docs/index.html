@@ -25,9 +25,9 @@
       <p style="font-size: 14px; color: var(--dim); margin-bottom: 24px; line-height: 1.7; max-width: 540px; margin-left: auto; margin-right: auto;">
         Entity-level semantic merge driver for Git. Understands functions, classes, and properties &mdash; so two agents editing different functions in the same file merge cleanly.
       </p>
-      <div class="install-box" onclick="copyCmd(this, 'cargo install --git https://github.com/Ataraxy-Labs/weave weave-cli')" style="display: inline-block; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 20px; font-size: 14px; color: var(--fg); cursor: pointer; position: relative;">
+      <div class="install-box" onclick="copyCmd(this, 'brew install ataraxy-labs/tap/weave')" style="display: inline-block; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 20px; font-size: 14px; color: var(--fg); cursor: pointer; position: relative;">
         <span class="copied" style="position: absolute; top: -28px; left: 50%; transform: translateX(-50%); font-size: 12px; color: var(--green); opacity: 0; transition: opacity 0.2s;">copied</span>
-        <span style="color: var(--dim);">$</span> cargo install --git https://github.com/Ataraxy-Labs/weave weave-cli
+        <span style="color: var(--dim);">$</span> brew install ataraxy-labs/tap/weave
       </div>
     </div>
 
@@ -309,12 +309,54 @@
               <td class="win">clean (24us)</td>
               <td>both clean</td>
             </tr>
+            <tr>
+              <td>TS: method reorder + modification</td>
+              <td class="win">clean (1070us)</td>
+              <td class="win">clean (39us)</td>
+              <td>both clean</td>
+            </tr>
+            <tr>
+              <td>Python: both add class methods</td>
+              <td class="win">clean (857us)</td>
+              <td class="lose">CONFLICT</td>
+              <td class="weave-wins">WEAVE WINS</td>
+            </tr>
+            <tr>
+              <td>Rust: both add impl methods</td>
+              <td class="win">clean (1116us)</td>
+              <td class="lose">CONFLICT</td>
+              <td class="weave-wins">WEAVE WINS</td>
+            </tr>
+            <tr>
+              <td>TS: enum modify + add variant</td>
+              <td class="win">clean (492us)</td>
+              <td class="win">clean (18us)</td>
+              <td>both clean</td>
+            </tr>
+            <tr>
+              <td>TS: add JSDoc + modify body</td>
+              <td class="win">clean (344us)</td>
+              <td class="win">clean (22us)</td>
+              <td>both clean</td>
+            </tr>
+            <tr>
+              <td>Rust: both add doc comments to different fns</td>
+              <td class="win">clean (429us)</td>
+              <td class="win">clean (21us)</td>
+              <td>both clean</td>
+            </tr>
+            <tr>
+              <td>Go: both add different functions</td>
+              <td class="win">clean (676us)</td>
+              <td class="lose">CONFLICT</td>
+              <td class="weave-wins">WEAVE WINS</td>
+            </tr>
           </tbody>
         </table>
       </div>
       <p style="font-size:13px;color:var(--dim);margin-top:16px;line-height:1.7;">
-        <strong style="color:var(--accent)">weave: 24/24 clean (100%)</strong> vs <strong style="color:var(--dim)">git: 11/24 clean (46%)</strong>.
-        Git cannot resolve 13 of the 24 scenarios. Weave resolves all of them using entity-level merging,
+        <strong style="color:var(--accent)">weave: 31/31 clean (100%)</strong> vs <strong style="color:var(--dim)">git: 15/31 clean (48%)</strong>.
+        Git cannot resolve 16 of the 31 scenarios. Weave resolves all of them using entity-level merging,
         commutative import merge, inner entity decomposition, decorator-aware merge, and whitespace-aware conflict avoidance.
         Every false conflict that git reports, weave handles automatically.
       </p>
