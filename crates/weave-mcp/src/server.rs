@@ -516,21 +516,55 @@ impl WeaveServer {
                         "entity_type": c.entity_type,
                         "entity_name": c.entity_name,
                         "kind": format!("{}", c.kind),
+                        "complexity": format!("{}", c.complexity),
                     })
                 })
+                .collect();
+
+            let warnings: Vec<String> = merge_result
+                .warnings
+                .iter()
+                .map(|w| format!("{}", w))
                 .collect();
 
             results.push(serde_json::json!({
                 "file": file,
                 "clean": merge_result.is_clean(),
-                "stats": format!("{}", merge_result.stats),
+                "confidence": merge_result.stats.confidence(),
+                "stats": {
+                    "unchanged": merge_result.stats.entities_unchanged,
+                    "ours_only": merge_result.stats.entities_ours_only,
+                    "theirs_only": merge_result.stats.entities_theirs_only,
+                    "auto_merged": merge_result.stats.entities_both_changed_merged,
+                    "added_ours": merge_result.stats.entities_added_ours,
+                    "added_theirs": merge_result.stats.entities_added_theirs,
+                    "deleted": merge_result.stats.entities_deleted,
+                    "conflicted": merge_result.stats.entities_conflicted,
+                    "resolved_via_diffy": merge_result.stats.resolved_via_diffy,
+                    "resolved_via_inner_merge": merge_result.stats.resolved_via_inner_merge,
+                },
                 "conflicts": conflicts,
+                "warnings": warnings,
             }));
         }
 
+        let clean_count = results.iter().filter(|r| r["clean"].as_bool().unwrap_or(true)).count();
+        let conflict_count = results.len() - clean_count;
+        let overall_confidence = if conflict_count > 0 {
+            "conflict"
+        } else if results.iter().any(|r| r["confidence"].as_str() == Some("medium")) {
+            "medium"
+        } else if results.iter().any(|r| r["confidence"].as_str() == Some("high")) {
+            "high"
+        } else {
+            "very_high"
+        };
+
         let summary = serde_json::json!({
             "files_analyzed": results.len(),
-            "files_with_conflicts": results.iter().filter(|r| !r["clean"].as_bool().unwrap_or(true)).count(),
+            "files_clean": clean_count,
+            "files_with_conflicts": conflict_count,
+            "overall_confidence": overall_confidence,
             "results": results,
         });
 
