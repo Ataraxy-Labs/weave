@@ -1944,6 +1944,7 @@ dependencies = [
  "colored",
  "diffy",
  "sem-core",
+ "serde_json",
  "weave-core",
  "weave-crdt",
 ]

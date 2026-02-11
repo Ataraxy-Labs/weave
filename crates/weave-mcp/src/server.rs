@@ -824,6 +824,45 @@ impl WeaveServer {
         )]))
     }
 
+    #[tool(description = "Parse weave conflict markers in a file and return a structured summary with entity names, conflict types, confidence levels, and resolution hints")]
+    async fn weave_merge_summary(
+        &self,
+        Parameters(params): Parameters<MergeSummaryParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ctx = self
+            .get_context(Some(&params.file_path))
+            .await
+            .map_err(internal_err)?;
+        let (_rel_path, abs_path) =
+            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+
+        let content = Self::read_file_at(&abs_path, &params.file_path).map_err(internal_err)?;
+        let conflicts = weave_core::parse_weave_conflicts(&content);
+
+        let json_conflicts: Vec<serde_json::Value> = conflicts
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "entity": c.entity_name,
+                    "kind": c.entity_kind,
+                    "complexity": format!("{}", c.complexity),
+                    "confidence": c.confidence,
+                    "hint": c.hint,
+                })
+            })
+            .collect();
+
+        let output = serde_json::json!({
+            "file": params.file_path,
+            "conflict_count": conflicts.len(),
+            "conflicts": json_conflicts,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_default(),
+        )]))
+    }
+
     #[tool(description = "Validate a merge for semantic risks: detect when auto-merged entities reference other entities that were also modified")]
     async fn weave_validate_merge(
         &self,

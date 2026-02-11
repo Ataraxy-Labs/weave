@@ -45,6 +45,14 @@ enum Commands {
     },
     /// Run merge benchmarks comparing weave vs git line-level merge
     Bench,
+    /// Parse weave conflict markers and show a structured summary
+    Summary {
+        /// Path to a file containing weave conflict markers
+        file: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Release a previously claimed entity
     Release {
         /// Agent identifier
@@ -70,6 +78,9 @@ fn main() {
             commands::status::run(file.as_deref(), agent.as_deref())
         }
         Commands::Bench => commands::bench::run(),
+        Commands::Summary { ref file, json } => {
+            commands::summary::run(file, json)
+        }
         Commands::Claim {
             ref agent_id,
             ref file_path,

@@ -101,6 +101,12 @@ pub struct ValidateMergeParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MergeSummaryParams {
+    #[schemars(description = "Path to a file containing weave conflict markers")]
+    pub file_path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DiffParams {
     #[schemars(description = "Base ref to compare from (branch, tag, or commit hash, e.g. 'main')")]
     pub base_ref: String,

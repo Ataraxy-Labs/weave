@@ -156,7 +156,7 @@ export default function Home() {
             MCP Server for Multi-Agent Coordination
           </h2>
           <p className="text-gray-400 mb-8 max-w-3xl">
-            Weave includes an MCP server with 9 tools for AI agent integration. Agents can claim entities before editing, detect conflicts, and preview merges. Works with Claude, GPT, Cursor, Windsurf, Zed, and any MCP-compatible tool.
+            Weave includes an MCP server with 15 tools for AI agent integration. Agents can claim entities before editing, detect conflicts, preview merges, analyze dependencies, and get structured conflict summaries. Works with Claude, GPT, Cursor, Windsurf, Zed, and any MCP-compatible tool.
           </p>
           <div className="grid md:grid-cols-3 gap-4 text-sm">
             <div className="border border-white/10 rounded-lg p-4">
@@ -194,6 +194,30 @@ export default function Home() {
             <div className="border border-white/10 rounded-lg p-4">
               <code className="text-white">weave_agent_heartbeat</code>
               <p className="text-gray-500 mt-1">Keep-alive with work state</p>
+            </div>
+            <div className="border border-white/10 rounded-lg p-4">
+              <code className="text-white">weave_get_dependencies</code>
+              <p className="text-gray-500 mt-1">What this entity calls</p>
+            </div>
+            <div className="border border-white/10 rounded-lg p-4">
+              <code className="text-white">weave_get_dependents</code>
+              <p className="text-gray-500 mt-1">Who calls this entity</p>
+            </div>
+            <div className="border border-white/10 rounded-lg p-4">
+              <code className="text-white">weave_impact_analysis</code>
+              <p className="text-gray-500 mt-1">Transitive blast radius</p>
+            </div>
+            <div className="border border-white/10 rounded-lg p-4">
+              <code className="text-white">weave_diff</code>
+              <p className="text-gray-500 mt-1">Entity-level diff between refs</p>
+            </div>
+            <div className="border border-white/10 rounded-lg p-4">
+              <code className="text-white">weave_validate_merge</code>
+              <p className="text-gray-500 mt-1">Semantic risk detection</p>
+            </div>
+            <div className="border border-white/10 rounded-lg p-4">
+              <code className="text-white">weave_merge_summary</code>
+              <p className="text-gray-500 mt-1">Structured conflict summary</p>
             </div>
           </div>
         </div>
@@ -237,7 +261,7 @@ export default function Home() {
   weave-driver/   Git merge driver binary
   weave-cli/      Setup, preview, status commands
   weave-crdt/     Automerge-backed coordination state
-  weave-mcp/      MCP server (9 tools)`}</code></pre>
+  weave-mcp/      MCP server (15 tools)`}</code></pre>
           <p className="text-gray-400 mt-4 text-sm">
             Built in Rust. Entity extraction powered by <a href="https://github.com/Ataraxy-Labs/sem" className="text-white underline hover:text-gray-300">sem-core</a> with tree-sitter. CRDT state backed by Automerge. MCP server via rmcp.
           </p>

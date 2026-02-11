@@ -86,6 +86,33 @@
 
     <section style="border-top: none; padding-top: 12px;">
 
+      <!-- Commit: Resolution hints, summary command, merge summary MCP tool -->
+      <div class="commit">
+        <div class="commit-header">
+          <span class="commit-date">Feb 10, 2026</span>
+        </div>
+        <div class="commit-title">Add resolution hints, weave summary command, and merge summary MCP tool</div>
+        <div class="commit-tags">
+          <span class="commit-tag" style="background: #4ade8022; color: var(--green);">feature</span>
+          <span class="commit-tag" style="background: #22d3ee22; color: var(--cyan);">weave-mcp</span>
+          <span class="commit-tag" style="background: #60a5fa22; color: var(--blue);">docs</span>
+        </div>
+        <div class="commit-body">
+          <p>Structured post-merge output for agents. Three connected improvements:</p>
+          <ul>
+            <li><strong>Resolution hints</strong>: each ConGra conflict type now carries a human-readable hint (e.g. "Logic changed on both sides. Requires understanding intent of each change."). Hints appear as comment lines inside conflict markers and help agents choose resolution strategies.</li>
+            <li><strong><code>weave summary</code> CLI command</strong>: reads a file with weave conflict markers, parses them into structured data, and outputs a summary with entity names, complexity classifications, confidence levels, and hints. Supports <code>--json</code> for machine-readable output.</li>
+            <li><strong><code>weave_merge_summary</code> MCP tool</strong>: 15th MCP tool. Returns the same structured JSON as <code>weave summary --json</code>, letting agents query merge results from their MCP session without regex parsing.</li>
+            <li><strong><code>parse_weave_conflicts()</code></strong>: new public function in weave-core that parses weave-enhanced conflict markers back into structured <code>ParsedConflict</code> data.</li>
+          </ul>
+          <p>Also fixed the website: updated MCP tool count from 9 to 15 and added the 6 missing tools to the grid.</p>
+        </div>
+        <div class="lesson">
+          <div class="lesson-label">Key insight</div>
+          <p>Agents need structured post-merge output, not just conflict markers. A recurring theme from GitHub discussions (claude-code, gitbutler, goose, aider): agents can act on conflicts much faster when they get machine-readable summaries with classification, confidence, and actionable hints. The ConGra taxonomy maps directly to resolution strategies: Text conflicts are auto-resolvable, Syntax conflicts need caller checks, Functional conflicts need intent understanding.</p>
+        </div>
+      </div>
+
       <!-- Commit: Comment bundling, Python class merge, method reordering, 31-scenario benchmark -->
       <div class="commit">
         <div class="commit-header">
