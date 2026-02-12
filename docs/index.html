@@ -210,8 +210,7 @@
       </div>
       <p style="font-size:13px;color:var(--dim);margin-top:16px;line-height:1.7;">
         <strong style="color:var(--accent)">weave: 31/31 clean (100%)</strong> vs <strong style="color:var(--dim)">mergiraf: 26/31 (83%)</strong> vs <strong style="color:var(--dim)">git: 15/31 (48%)</strong>.
-        Mergiraf (v0.16.3) resolves most structural conflicts but fails on both-add-at-same-position, insert-in-middle, and decorator conflicts.
-        Weave resolves all 31 using entity-level merging, unordered member sets, commutative imports, decorator bundling, and inner entity decomposition.
+        Full benchmark suite runs in <strong style="color:var(--green)">11ms</strong>. Individual merges take 65-374&micro;s. Entity extraction powered by <a href="https://github.com/Ataraxy-Labs/sem" style="color:var(--green)">sem-core</a> with xxHash64 structural hashing and parallel tree-sitter parsing.
       </p>
     </section>
 

@@ -22,6 +22,9 @@ weave setup
 - mergiraf: 26/31 clean (83%)
 - git: 15/31 clean (48%)
 
+Full benchmark suite: 11ms. Individual merges: 65-374μs.
+Entity extraction via sem-core with xxHash64 structural hashing, parallel tree-sitter parsing, and LTO-optimized release builds.
+
 ## How It Works
 
 1. Parse all three versions with tree-sitter into entity lists
