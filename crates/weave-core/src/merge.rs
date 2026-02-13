@@ -1047,19 +1047,33 @@ fn replace_at_word_boundaries(content: &str, needle: &str, replacement: &str) ->
     let bytes = content.as_bytes();
     let mut result = String::with_capacity(content.len());
     let mut i = 0;
-    while i < bytes.len() {
-        if content[i..].starts_with(needle) {
-            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+    while i < content.len() {
+        if content.is_char_boundary(i) && content[i..].starts_with(needle) {
+            let before_ok = i == 0 || {
+                let prev_idx = content[..i]
+                    .char_indices()
+                    .next_back()
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0);
+                !is_ident_char(bytes[prev_idx])
+            };
             let after_idx = i + needle.len();
-            let after_ok = after_idx >= bytes.len() || !is_ident_char(bytes[after_idx]);
+            let after_ok = after_idx >= content.len()
+                || (content.is_char_boundary(after_idx)
+                    && !is_ident_char(bytes[after_idx]));
             if before_ok && after_ok {
                 result.push_str(replacement);
                 i += needle.len();
                 continue;
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        if content.is_char_boundary(i) {
+            let ch = content[i..].chars().next().unwrap();
+            result.push(ch);
+            i += ch.len_utf8();
+        } else {
+            i += 1;
+        }
     }
     result
 }
@@ -1635,6 +1649,20 @@ mod tests {
         assert_eq!(
             replace_at_word_boundaries("SourceManager isSource", "Source", "__E__"),
             "SourceManager isSource"
+        );
+        // Should handle multi-byte UTF-8 characters (emojis) without panicking
+        assert_eq!(
+            replace_at_word_boundaries("❌ get ✅", "get", "__E__"),
+            "❌ __E__ ✅"
+        );
+        assert_eq!(
+            replace_at_word_boundaries("fn 名前() { get }", "get", "__E__"),
+            "fn 名前() { __E__ }"
+        );
+        // Emoji-only content with no needle match should pass through unchanged
+        assert_eq!(
+            replace_at_word_boundaries("🎉🚀✨", "get", "__E__"),
+            "🎉🚀✨"
         );
     }
 
