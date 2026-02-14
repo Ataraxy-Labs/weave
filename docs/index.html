@@ -62,7 +62,7 @@
         <div class="terminal-title">the solution</div>
       </div>
       <div class="terminal-body">
-<pre><span class="cmd">$ weave setup</span>
+<pre><span class="cmd">$ weave-cli setup</span>
 <span class="g">&#10003;</span> Merge driver configured for *.ts, *.js, *.py, *.go, *.rs, ...
 
 <span class="cmd">$ git merge feature-b</span>
@@ -328,12 +328,12 @@
 
 <span class="d"># Configure your repo</span>
 <span class="cmd">$ cd my-project</span>
-<span class="cmd">$ weave setup</span>
+<span class="cmd">$ weave-cli setup</span>
 <span class="g">&#10003;</span> Created .gitattributes with weave merge driver rules
 <span class="g">&#10003;</span> Configured git merge driver 'weave'
 
 <span class="d"># Preview a merge before doing it</span>
-<span class="cmd">$ weave preview feature-branch</span>
+<span class="cmd">$ weave-cli preview feature-branch</span>
   src/auth.ts &mdash; <span class="g">auto-resolved</span>
     2 entities matched, 2 modified, 0 conflicts
   src/config.json &mdash; <span class="g">auto-resolved</span>

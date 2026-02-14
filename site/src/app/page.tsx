@@ -248,7 +248,7 @@ export default function Home() {
             </div>
             <div>
               <p className="text-sm text-gray-500 mb-2">Set up in your repository</p>
-              <pre><code>weave setup</code></pre>
+              <pre><code>weave-cli setup</code></pre>
             </div>
             <div>
               <p className="text-sm text-gray-500 mb-2">That&apos;s it. Git merges now use Weave automatically.</p>
@@ -256,7 +256,7 @@ export default function Home() {
             </div>
             <div>
               <p className="text-sm text-gray-500 mb-2">Preview a merge before running it</p>
-              <pre><code>weave preview main feature-branch</code></pre>
+              <pre><code>weave-cli preview main feature-branch</code></pre>
             </div>
           </div>
         </div>

@@ -16,7 +16,7 @@ pub fn run(driver_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> 
     // Verify we're in a git repo
     let git_dir = Path::new(".git");
     if !git_dir.exists() {
-        return Err("Not in a git repository. Run `weave setup` from the repo root.".into());
+        return Err("Not in a git repository. Run `weave-cli setup` from the repo root.".into());
     }
 
     // Resolve driver binary path

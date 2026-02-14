@@ -12,7 +12,7 @@ Two developers editing different functions in the same file? No conflict. Git wo
 
 ```
 brew install ataraxy-labs/tap/weave
-weave setup
+weave-cli setup
 ```
 
 ## Benchmark
@@ -88,7 +88,7 @@ claude mcp add --scope user weave -- weave-mcp
 weave plugs into git as a merge driver. Works with merge, rebase, and cherry-pick.
 
 ```
-# .gitattributes (created by weave setup)
+# .gitattributes (created by weave-cli setup)
 *.ts merge=weave
 *.py merge=weave
 *.rs merge=weave

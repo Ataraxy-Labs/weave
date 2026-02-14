@@ -740,8 +740,8 @@
           </ul>
           <p><strong>weave-cli</strong> (user interface):</p>
           <ul>
-            <li><code>weave setup</code> &mdash; configures <code>.gitattributes</code> and git merge driver</li>
-            <li><code>weave preview &lt;branch&gt;</code> &mdash; dry-run merge analysis</li>
+            <li><code>weave-cli setup</code> &mdash; configures <code>.gitattributes</code> and git merge driver</li>
+            <li><code>weave-cli preview &lt;branch&gt;</code> &mdash; dry-run merge analysis</li>
           </ul>
           <p><strong>Key design decision:</strong> <code>sem-core</code>'s <code>entity.content</code> strips syntax like <code>export</code>, so we use region content (raw file lines by byte range) for merge output instead of entity content. This preserves the original source exactly.</p>
         </div>
