@@ -37,6 +37,12 @@ pub enum ResolvedEntity {
     Clean(EntityRegion),
     /// Conflict — render conflict markers.
     Conflict(EntityConflict),
+    /// Inner merge with per-member scoped conflicts.
+    /// Content already contains per-member conflict markers; emit as-is.
+    ScopedConflict {
+        content: String,
+        conflict: EntityConflict,
+    },
     /// Entity was deleted.
     Deleted,
 }
@@ -331,8 +337,10 @@ pub fn entity_merge_with_registry(
             &mut stats,
         );
 
-        if let ResolvedEntity::Conflict(ref c) = resolution {
-            conflicts.push(c.clone());
+        match &resolution {
+            ResolvedEntity::Conflict(ref c) => conflicts.push(c.clone()),
+            ResolvedEntity::ScopedConflict { conflict, .. } => conflicts.push(conflict.clone()),
+            _ => {}
         }
 
         resolved_entities.insert(entity_id.clone(), resolution.clone());
@@ -504,17 +512,38 @@ fn resolve_entity(
                                 // Strategy 2: inner entity merge for container types
                                 // (LastMerge insight: class members are unordered children)
                                 if is_container_entity_type(&ours.entity_type) {
-                                    if let Some(merged) = try_inner_entity_merge(&base_rc, &ours_rc, &theirs_rc) {
-                                        stats.entities_both_changed_merged += 1;
-                                        stats.resolved_via_inner_merge += 1;
-                                        return ResolvedEntity::Clean(EntityRegion {
-                                            entity_id: ours.id.clone(),
-                                            entity_name: ours.name.clone(),
-                                            entity_type: ours.entity_type.clone(),
-                                            content: merged,
-                                            start_line: ours.start_line,
-                                            end_line: ours.end_line,
-                                        });
+                                    if let Some(inner) = try_inner_entity_merge(&base_rc, &ours_rc, &theirs_rc) {
+                                        if inner.has_conflicts {
+                                            // Inner merge produced per-member conflicts:
+                                            // content has scoped markers for just the conflicted
+                                            // members; clean members are merged normally.
+                                            stats.entities_conflicted += 1;
+                                            stats.resolved_via_inner_merge += 1;
+                                            let complexity = classify_conflict(Some(&base_rc), Some(&ours_rc), Some(&theirs_rc));
+                                            return ResolvedEntity::ScopedConflict {
+                                                content: inner.content,
+                                                conflict: EntityConflict {
+                                                    entity_name: ours.name.clone(),
+                                                    entity_type: ours.entity_type.clone(),
+                                                    kind: ConflictKind::BothModified,
+                                                    complexity,
+                                                    ours_content: Some(ours_rc),
+                                                    theirs_content: Some(theirs_rc),
+                                                    base_content: Some(base_rc),
+                                                },
+                                            };
+                                        } else {
+                                            stats.entities_both_changed_merged += 1;
+                                            stats.resolved_via_inner_merge += 1;
+                                            return ResolvedEntity::Clean(EntityRegion {
+                                                entity_id: ours.id.clone(),
+                                                entity_name: ours.name.clone(),
+                                                entity_type: ours.entity_type.clone(),
+                                                content: inner.content,
+                                                start_line: ours.start_line,
+                                                end_line: ours.end_line,
+                                            });
+                                        }
                                     }
                                 }
                                 stats.entities_conflicted += 1;
@@ -995,10 +1024,13 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
     }
 
     let mut result = result_lines.join("\n");
-    if ours.ends_with('\n') || theirs.ends_with('\n') {
-        if !result.ends_with('\n') {
-            result.push('\n');
-        }
+    // .lines() + .join("\n") drops trailing empty lines. Preserve trailing
+    // newlines from ours (our skeleton) — these serve as separators between
+    // the import block and the first entity.
+    let ours_trailing = ours.len() - ours.trim_end_matches('\n').len();
+    let result_trailing = result.len() - result.trim_end_matches('\n').len();
+    for _ in result_trailing..ours_trailing {
+        result.push('\n');
     }
     result
 }
@@ -1387,14 +1419,23 @@ struct MemberChunk {
     content: String,
 }
 
+/// Result of an inner entity merge attempt.
+struct InnerMergeResult {
+    /// Merged content (may contain per-member conflict markers)
+    content: String,
+    /// Whether any members had conflicts
+    has_conflicts: bool,
+}
+
 /// Try recursive inner entity merge for container types (classes, impls, etc.).
 ///
 /// Inspired by LastMerge (arXiv:2507.19687): class members are "unordered children" —
 /// reordering them is not a conflict. We chunk the class body into members, match by
 /// name, and merge each member independently.
 ///
-/// Returns Some(merged_content) if successful, None if there are unresolvable conflicts.
-fn try_inner_entity_merge(base: &str, ours: &str, theirs: &str) -> Option<String> {
+/// Returns Some(result) if chunking succeeded, None if we can't parse the container.
+/// The result may contain per-member conflict markers (scoped conflicts).
+fn try_inner_entity_merge(base: &str, ours: &str, theirs: &str) -> Option<InnerMergeResult> {
     let base_chunks = extract_member_chunks(base)?;
     let ours_chunks = extract_member_chunks(ours)?;
     let theirs_chunks = extract_member_chunks(theirs)?;
@@ -1450,24 +1491,33 @@ fn try_inner_entity_merge(base: &str, ours: &str, theirs: &str) -> Option<String
             // In all three
             (Some(b), Some(o), Some(t)) => {
                 if o == t {
-                    // Both same (or both unchanged)
                     merged_members.push(o.to_string());
                 } else if b == o {
-                    // Only theirs changed
                     merged_members.push(t.to_string());
                 } else if b == t {
-                    // Only ours changed
                     merged_members.push(o.to_string());
                 } else {
-                    // Both changed differently — try diffy on this member
+                    // Both changed differently: try diffy, then decorator merge
                     if let Some(merged) = diffy_merge(b, o, t) {
                         merged_members.push(merged);
                     } else if let Some(merged) = try_decorator_aware_merge(b, o, t) {
-                        // Try decorator-aware merge on the member
                         merged_members.push(merged);
                     } else {
+                        // Emit per-member conflict markers
                         has_conflict = true;
-                        break;
+                        let mut conflict = String::new();
+                        conflict.push_str(&format!("<<<<<<< ours ({})\n", name));
+                        conflict.push_str(o);
+                        if !o.ends_with('\n') {
+                            conflict.push('\n');
+                        }
+                        conflict.push_str("=======\n");
+                        conflict.push_str(t);
+                        if !t.ends_with('\n') {
+                            conflict.push('\n');
+                        }
+                        conflict.push_str(&format!(">>>>>>> theirs ({})", name));
+                        merged_members.push(conflict);
                     }
                 }
             }
@@ -1476,9 +1526,17 @@ fn try_inner_entity_merge(base: &str, ours: &str, theirs: &str) -> Option<String
                 if *b == *o {
                     // Ours unchanged, theirs deleted → accept deletion
                 } else {
-                    // Ours modified, theirs deleted → conflict
+                    // Ours modified, theirs deleted → per-member conflict
                     has_conflict = true;
-                    break;
+                    let mut conflict = String::new();
+                    conflict.push_str(&format!("<<<<<<< ours ({})\n", name));
+                    conflict.push_str(o);
+                    if !o.ends_with('\n') {
+                        conflict.push('\n');
+                    }
+                    conflict.push_str("=======\n");
+                    conflict.push_str(&format!(">>>>>>> theirs ({} deleted)", name));
+                    merged_members.push(conflict);
                 }
             }
             // Deleted by ours, theirs unchanged or not in base
@@ -1486,9 +1544,17 @@ fn try_inner_entity_merge(base: &str, ours: &str, theirs: &str) -> Option<String
                 if *b == *t {
                     // Theirs unchanged, ours deleted → accept deletion
                 } else {
-                    // Theirs modified, ours deleted → conflict
+                    // Theirs modified, ours deleted → per-member conflict
                     has_conflict = true;
-                    break;
+                    let mut conflict = String::new();
+                    conflict.push_str(&format!("<<<<<<< ours ({} deleted)\n", name));
+                    conflict.push_str("=======\n");
+                    conflict.push_str(t);
+                    if !t.ends_with('\n') {
+                        conflict.push('\n');
+                    }
+                    conflict.push_str(&format!(">>>>>>> theirs ({})", name));
+                    merged_members.push(conflict);
                 }
             }
             // Added by ours only
@@ -1499,26 +1565,31 @@ fn try_inner_entity_merge(base: &str, ours: &str, theirs: &str) -> Option<String
             (None, None, Some(t)) => {
                 merged_members.push(t.to_string());
             }
-            // Added by both
+            // Added by both with different content
             (None, Some(o), Some(t)) => {
                 if o == t {
                     merged_members.push(o.to_string());
                 } else {
-                    // Both added different content with same name → conflict
                     has_conflict = true;
-                    break;
+                    let mut conflict = String::new();
+                    conflict.push_str(&format!("<<<<<<< ours ({})\n", name));
+                    conflict.push_str(o);
+                    if !o.ends_with('\n') {
+                        conflict.push('\n');
+                    }
+                    conflict.push_str("=======\n");
+                    conflict.push_str(t);
+                    if !t.ends_with('\n') {
+                        conflict.push('\n');
+                    }
+                    conflict.push_str(&format!(">>>>>>> theirs ({})", name));
+                    merged_members.push(conflict);
                 }
             }
             // Deleted by both
-            (Some(_), None, None) => {
-                // Both deleted → accept
-            }
+            (Some(_), None, None) => {}
             (None, None, None) => {}
         }
-    }
-
-    if has_conflict {
-        return None;
     }
 
     // Reconstruct: header + merged members + footer
@@ -1547,7 +1618,10 @@ fn try_inner_entity_merge(base: &str, ours: &str, theirs: &str) -> Option<String
         result.push('\n');
     }
 
-    Some(result)
+    Some(InnerMergeResult {
+        content: result,
+        has_conflicts: has_conflict,
+    })
 }
 
 /// Extract the header (class declaration) and footer (closing brace) from a container.
@@ -1726,14 +1800,27 @@ fn extract_member_chunks(content: &str) -> Option<Vec<MemberChunk>> {
 fn extract_member_name(line: &str) -> String {
     let trimmed = line.trim();
 
-    // Try common patterns:
-    // method(...)  or  async method(...)  or  public method(...)
-    // fn name(...)
-    // def name(...)
-    // name: type  (field)
-    // get name() / set name()
+    // Strategy 1: For method/function declarations with parentheses,
+    // the name is the identifier immediately before `(`.
+    // This handles all languages: Java `public int add(`, Rust `pub fn add(`,
+    // Python `def add(`, TS `async getUser(`, Go `func add(`, etc.
+    if let Some(paren_pos) = trimmed.find('(') {
+        let before = trimmed[..paren_pos].trim_end();
+        let name: String = before
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if !name.is_empty() {
+            return name;
+        }
+    }
 
-    // Remove leading keywords
+    // Strategy 2: For fields/properties/variants without parens,
+    // strip keywords and take the first identifier.
     let mut s = trimmed;
     for keyword in &[
         "export ", "public ", "private ", "protected ", "static ",
@@ -1744,19 +1831,16 @@ fn extract_member_name(line: &str) -> String {
             s = &s[keyword.len()..];
         }
     }
-    // Handle `fn ` after `pub`
     if s.starts_with("fn ") {
         s = &s[3..];
     }
 
-    // Extract identifier (alphanumeric + underscore until non-identifier char)
     let name: String = s
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
         .collect();
 
     if name.is_empty() {
-        // Fallback: use first few chars as pseudo-name
         trimmed.chars().take(20).collect()
     } else {
         name

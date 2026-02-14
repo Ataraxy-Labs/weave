@@ -45,6 +45,17 @@ enum Commands {
     },
     /// Run merge benchmarks comparing weave vs git line-level merge
     Bench,
+    /// Benchmark against real merge commits in an existing repo
+    BenchRepo {
+        /// Path to a git repository
+        repo: String,
+        /// Max merge commits to scan
+        #[arg(long, default_value_t = 500)]
+        limit: usize,
+        /// Show line-level diff for weave vs human mismatches
+        #[arg(long)]
+        show_diff: bool,
+    },
     /// Parse weave conflict markers and show a structured summary
     Summary {
         /// Path to a file containing weave conflict markers
@@ -78,6 +89,7 @@ fn main() {
             commands::status::run(file.as_deref(), agent.as_deref())
         }
         Commands::Bench => commands::bench::run(),
+        Commands::BenchRepo { ref repo, limit, show_diff } => commands::bench_repo::run(repo, limit, show_diff),
         Commands::Summary { ref file, json } => {
             commands::summary::run(file, json)
         }

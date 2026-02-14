@@ -1117,3 +1117,138 @@ pub enum BSource {
         conflict.kind
     );
 }
+
+#[test]
+fn rust_rename_rename_multi_entity_file() {
+    let base = r#"use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum Source {
+    Api,
+    File,
+    Manual,
+}
+
+pub fn process() -> String {
+    "hello".to_string()
+}
+
+pub struct Config {
+    pub name: String,
+}
+"#;
+    let ours = r#"use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum Source1 {
+    Api,
+    File,
+    Manual,
+}
+
+pub fn process() -> String {
+    "hello".to_string()
+}
+
+pub struct Config {
+    pub name: String,
+}
+"#;
+    let theirs = r#"use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum BSource {
+    Api,
+    File,
+    Manual,
+}
+
+pub fn process() -> String {
+    "hello".to_string()
+}
+
+pub struct Config {
+    pub name: String,
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "types.rs");
+    eprintln!("content:\n{}", result.content);
+    eprintln!("conflicts: {:?}", result.conflicts.len());
+    for c in &result.conflicts {
+        eprintln!("  conflict: {} - {}", c.entity_name, c.kind);
+    }
+    assert!(
+        !result.is_clean(),
+        "Rename-rename in multi-entity file should conflict, got clean merge:\n{}",
+        result.content
+    );
+}
+
+// Slarse bug: inner entity merge should scope conflicts to the individual method,
+// not wrap the entire class in conflict markers.
+#[test]
+fn java_class_conflict_scoped_to_method() {
+    let base = r#"public class Main {
+    public int add(int a, int b) {
+        return a + b;
+    }
+
+    public int subtract(int a, int b) {
+        return a - b;
+    }
+}
+"#;
+    let ours = r#"public class Main {
+    public int add(int a, int b) throws IllegalArgumentException {
+        return a + b;
+    }
+
+    public int subtract(int a, int b) {
+        return a - b;
+    }
+}
+"#;
+    let theirs = r#"public class Main {
+    public int add(int a, int b, int c) {
+        return a + b + c;
+    }
+
+    public int subtract(int a, int b) {
+        return a - b;
+    }
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "Main.java");
+    eprintln!("content:\n{}", result.content);
+    eprintln!("conflicts: {}", result.conflicts.len());
+    for c in &result.conflicts {
+        eprintln!("  conflict: {} - {}", c.entity_name, c.kind);
+    }
+
+    // The conflict should exist (both modified same method)
+    assert!(!result.is_clean(), "Should have a conflict on the add method");
+
+    // The subtract method should NOT be inside conflict markers
+    // (it was not modified by either branch)
+    let content = &result.content;
+    assert!(
+        !content.contains("subtract")
+            || !is_inside_conflict_markers(content, "subtract"),
+        "subtract() should not be inside conflict markers - conflict should be scoped to add() only"
+    );
+}
+
+/// Check if a needle appears only inside conflict marker blocks
+fn is_inside_conflict_markers(content: &str, needle: &str) -> bool {
+    let mut in_conflict = false;
+    for line in content.lines() {
+        if line.starts_with("<<<<<<<") {
+            in_conflict = true;
+        } else if line.starts_with(">>>>>>>") {
+            in_conflict = false;
+        } else if in_conflict && line.contains(needle) {
+            return true;
+        }
+    }
+    false
+}

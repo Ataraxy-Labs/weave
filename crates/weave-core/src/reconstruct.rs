@@ -65,6 +65,12 @@ pub fn reconstruct(
                         ResolvedEntity::Conflict(conflict) => {
                             output.push_str(&conflict.to_conflict_markers());
                         }
+                        ResolvedEntity::ScopedConflict { content, .. } => {
+                            output.push_str(content);
+                            if !content.is_empty() && !content.ends_with('\n') {
+                                output.push('\n');
+                            }
+                        }
                         ResolvedEntity::Deleted => {
                             // Skip deleted entities
                         }
@@ -99,6 +105,13 @@ pub fn reconstruct(
                                     output.push('\n');
                                     output.push_str(&conflict.to_conflict_markers());
                                 }
+                                ResolvedEntity::ScopedConflict { content, .. } => {
+                                    output.push('\n');
+                                    output.push_str(content);
+                                    if !content.is_empty() && !content.ends_with('\n') {
+                                        output.push('\n');
+                                    }
+                                }
                                 ResolvedEntity::Deleted => {}
                             }
                         }
@@ -115,26 +128,7 @@ pub fn reconstruct(
         for theirs_entity in insertions {
             if !emitted_entities.contains(&theirs_entity.id) {
                 if let Some(resolved) = resolved_entities.get(&theirs_entity.id) {
-                    match resolved {
-                        ResolvedEntity::Clean(region) => {
-                            if !output.is_empty() && !output.ends_with('\n') {
-                                output.push('\n');
-                            }
-                            output.push('\n');
-                            output.push_str(&region.content);
-                            if !region.content.is_empty() && !region.content.ends_with('\n') {
-                                output.push('\n');
-                            }
-                        }
-                        ResolvedEntity::Conflict(conflict) => {
-                            if !output.is_empty() && !output.ends_with('\n') {
-                                output.push('\n');
-                            }
-                            output.push('\n');
-                            output.push_str(&conflict.to_conflict_markers());
-                        }
-                        ResolvedEntity::Deleted => {}
-                    }
+                    emit_resolved(&mut output, resolved);
                 }
                 emitted_entities.insert(theirs_entity.id.clone());
             }
@@ -149,26 +143,7 @@ pub fn reconstruct(
         for theirs_entity in insertions {
             if !emitted_entities.contains(&theirs_entity.id) {
                 if let Some(resolved) = resolved_entities.get(&theirs_entity.id) {
-                    match resolved {
-                        ResolvedEntity::Clean(region) => {
-                            if !output.is_empty() && !output.ends_with('\n') {
-                                output.push('\n');
-                            }
-                            output.push('\n');
-                            output.push_str(&region.content);
-                            if !region.content.is_empty() && !region.content.ends_with('\n') {
-                                output.push('\n');
-                            }
-                        }
-                        ResolvedEntity::Conflict(conflict) => {
-                            if !output.is_empty() && !output.ends_with('\n') {
-                                output.push('\n');
-                            }
-                            output.push('\n');
-                            output.push_str(&conflict.to_conflict_markers());
-                        }
-                        ResolvedEntity::Deleted => {}
-                    }
+                    emit_resolved(&mut output, resolved);
                 }
                 emitted_entities.insert(theirs_entity.id.clone());
             }
@@ -176,6 +151,40 @@ pub fn reconstruct(
     }
 
     output
+}
+
+/// Emit a resolved entity into the output (for theirs-only insertions).
+fn emit_resolved(output: &mut String, resolved: &ResolvedEntity) {
+    match resolved {
+        ResolvedEntity::Clean(region) => {
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push('\n');
+            output.push_str(&region.content);
+            if !region.content.is_empty() && !region.content.ends_with('\n') {
+                output.push('\n');
+            }
+        }
+        ResolvedEntity::Conflict(conflict) => {
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push('\n');
+            output.push_str(&conflict.to_conflict_markers());
+        }
+        ResolvedEntity::ScopedConflict { content, .. } => {
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push('\n');
+            output.push_str(content);
+            if !content.is_empty() && !content.ends_with('\n') {
+                output.push('\n');
+            }
+        }
+        ResolvedEntity::Deleted => {}
+    }
 }
 
 /// Find the entity ID that precedes the given entity in a region list.
