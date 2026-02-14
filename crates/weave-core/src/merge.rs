@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::process::Command;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use sem_core::model::change::ChangeType;
 use sem_core::model::entity::SemanticEntity;
@@ -52,7 +54,30 @@ pub fn entity_merge(
     file_path: &str,
 ) -> MergeResult {
     let registry = create_default_registry();
-    entity_merge_with_registry(base, ours, theirs, file_path, &registry)
+
+    // Timeout: if entity merge takes > 5 seconds, diffy is likely hitting
+    // pathological input. Fall back to git merge-file which always terminates.
+    let base_owned = base.to_string();
+    let ours_owned = ours.to_string();
+    let theirs_owned = theirs.to_string();
+    let path_owned = file_path.to_string();
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let reg = create_default_registry();
+        let result = entity_merge_with_registry(&base_owned, &ours_owned, &theirs_owned, &path_owned, &reg);
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(result) => result,
+        Err(_) => {
+            // Timed out, fall back to git merge-file
+            let mut stats = MergeStats::default();
+            stats.used_fallback = true;
+            git_merge_file(base, ours, theirs, &mut stats)
+        }
+    }
 }
 
 pub fn entity_merge_with_registry(
@@ -98,6 +123,13 @@ pub fn entity_merge_with_registry(
         };
     }
 
+    // Binary file detection: if any version has null bytes, use git merge-file directly
+    if is_binary(base) || is_binary(ours) || is_binary(theirs) {
+        let mut stats = MergeStats::default();
+        stats.used_fallback = true;
+        return git_merge_file(base, ours, theirs, &mut stats);
+    }
+
     // Large file fallback
     if base.len() > 1_000_000 || ours.len() > 1_000_000 || theirs.len() > 1_000_000 {
         return line_level_fallback(base, ours, theirs, file_path);
@@ -125,6 +157,12 @@ pub fn entity_merge_with_registry(
     }
     // Allow empty entities if content is actually empty
     if ours_entities.is_empty() && !ours.trim().is_empty() && theirs_entities.is_empty() && !theirs.trim().is_empty() {
+        return line_level_fallback(base, ours, theirs, file_path);
+    }
+
+    // Fallback if too many duplicate entity names. Entity matching is O(n*m) on
+    // same-named entities which can hang on files with many `var app = ...` etc.
+    if has_excessive_duplicates(&base_entities) || has_excessive_duplicates(&ours_entities) || has_excessive_duplicates(&theirs_entities) {
         return line_level_fallback(base, ours, theirs, file_path);
     }
 
@@ -339,12 +377,26 @@ pub fn entity_merge_with_registry(
         }
     }
 
-    MergeResult {
+    let entity_result = MergeResult {
         content,
         conflicts,
         warnings,
-        stats,
+        stats: stats.clone(),
+    };
+
+    // Floor: never produce more conflict markers than git merge-file.
+    // Entity merge can split one git conflict into multiple per-entity conflicts,
+    // or interstitial merges can produce conflicts not tracked in the conflicts vec.
+    let entity_markers = entity_result.content.lines().filter(|l| l.starts_with("<<<<<<<")).count();
+    if entity_markers > 0 {
+        let git_result = git_merge_file(base, ours, theirs, &mut stats);
+        let git_markers = git_result.content.lines().filter(|l| l.starts_with("<<<<<<<")).count();
+        if entity_markers > git_markers {
+            return git_result;
+        }
     }
+
+    entity_result
 }
 
 fn resolve_entity(
@@ -976,36 +1028,37 @@ fn line_level_fallback(base: &str, ours: &str, theirs: &str, file_path: &str) ->
         return git_merge_file(base, ours, theirs, &mut stats);
     }
 
-    // Preprocess: expand separators into separate lines for finer alignment
+    // Try Sesame expansion + diffy first, then compare against git merge-file.
+    // Use whichever produces fewer conflict markers so we're never worse than git.
     let base_expanded = expand_separators(base);
     let ours_expanded = expand_separators(ours);
     let theirs_expanded = expand_separators(theirs);
 
-    match diffy::merge(&base_expanded, &ours_expanded, &theirs_expanded) {
+    let sesame_result = match diffy::merge(&base_expanded, &ours_expanded, &theirs_expanded) {
         Ok(merged) => {
-            // Collapse back: remove the newlines we inserted
             let content = collapse_separators(&merged, base);
-            MergeResult {
-                content,
+            Some(MergeResult {
+                content: post_merge_cleanup(&content),
                 conflicts: vec![],
                 warnings: vec![],
-                stats,
-            }
+                stats: stats.clone(),
+            })
         }
         Err(_) => {
-            // If separator-expanded merge still conflicts, try plain merge
-            // for cleaner conflict markers
+            // Sesame expansion conflicted, try plain diffy
             match diffy::merge(base, ours, theirs) {
-                Ok(merged) => MergeResult {
+                Ok(merged) => Some(MergeResult {
                     content: merged,
                     conflicts: vec![],
                     warnings: vec![],
-                    stats,
-                },
-                Err(conflicted_plain) => {
-                    stats.entities_conflicted = 1;
-                    MergeResult {
-                        content: conflicted_plain,
+                    stats: stats.clone(),
+                }),
+                Err(conflicted) => {
+                    let _markers = conflicted.lines().filter(|l| l.starts_with("<<<<<<<")).count();
+                    let mut s = stats.clone();
+                    s.entities_conflicted = 1;
+                    Some(MergeResult {
+                        content: conflicted,
                         conflicts: vec![EntityConflict {
                             entity_name: "(file)".to_string(),
                             entity_type: "file".to_string(),
@@ -1016,11 +1069,29 @@ fn line_level_fallback(base: &str, ours: &str, theirs: &str, file_path: &str) ->
                             base_content: Some(base.to_string()),
                         }],
                         warnings: vec![],
-                        stats,
-                    }
+                        stats: s,
+                    })
                 }
             }
         }
+    };
+
+    // Get git merge-file result as our floor
+    let git_result = git_merge_file(base, ours, theirs, &mut stats);
+
+    // Compare: use sesame result only if it has fewer or equal markers
+    match sesame_result {
+        Some(sesame) if sesame.conflicts.is_empty() && !git_result.conflicts.is_empty() => {
+            // Sesame resolved cleanly, git didn't: use sesame
+            sesame
+        }
+        Some(sesame) if !sesame.conflicts.is_empty() && !git_result.conflicts.is_empty() => {
+            // Both conflicted: use whichever has fewer markers
+            let sesame_markers = sesame.content.lines().filter(|l| l.starts_with("<<<<<<<")).count();
+            let git_markers = git_result.content.lines().filter(|l| l.starts_with("<<<<<<<")).count();
+            if sesame_markers <= git_markers { sesame } else { git_result }
+        }
+        _ => git_result,
     }
 }
 
@@ -1132,6 +1203,16 @@ fn diffy_fallback(base: &str, ours: &str, theirs: &str, stats: &mut MergeStats) 
 /// all of them as entities. But for merge purposes, nested entities are part of their
 /// parent — we handle them via inner entity merge. Keeping them causes false conflicts
 /// (e.g. two methods both declaring `const user` would appear as BothAdded).
+/// Check if entity list has too many duplicate names, which causes matching to hang.
+fn has_excessive_duplicates(entities: &[SemanticEntity]) -> bool {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for e in entities {
+        *counts.entry(&e.name).or_default() += 1;
+    }
+    // If any name appears 5+ times, matching becomes too expensive
+    counts.values().any(|&c| c >= 5)
+}
+
 fn filter_nested_entities(entities: Vec<SemanticEntity>) -> Vec<SemanticEntity> {
     if entities.len() <= 1 {
         return entities;
@@ -1688,6 +1769,11 @@ fn extract_member_name(line: &str) -> String {
 ///
 /// Note: template files like .svelte/.vue are NOT included here because their
 /// embedded `<script>` sections contain real code where Sesame helps.
+/// Check if content looks binary (contains null bytes in first 8KB).
+fn is_binary(content: &str) -> bool {
+    content.as_bytes().iter().take(8192).any(|&b| b == 0)
+}
+
 fn skip_sesame(file_path: &str) -> bool {
     let path_lower = file_path.to_lowercase();
     let extensions = [
