@@ -245,6 +245,15 @@ td.lose { color: var(--dim); }
   font-size: 10px; padding: 2px 8px; border-radius: 4px; font-weight: 600;
 }
 
+/* Stat cards */
+.stat-row { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; }
+.stat-card {
+  padding: 20px; border: 1px solid var(--border); border-radius: 8px;
+  text-align: center;
+}
+.stat-card .stat-value { font-size: 28px; font-weight: 700; letter-spacing: -1px; }
+.stat-card .stat-label { font-size: 11px; color: var(--dim); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+
 /* Footer */
 footer {
   padding: 40px 0; border-top: 1px solid var(--border);
@@ -257,4 +266,5 @@ footer {
   nav .links { gap: 12px; font-size: 12px; }
   .arch-layer { flex-direction: column; gap: 8px; }
   .arch-layer .label { min-width: auto; }
+  .stat-row { grid-template-columns: 1fr 1fr; }
 }

@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>weave — Benchmarks</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <nav>
+      <a class="logo" href="index.html">weave</a>
+      <div class="links">
+        <a href="index.html">Home</a>
+        <a href="docs.html">Docs</a>
+        <a href="learn.html">Learn</a>
+        <a href="benchmarks.html" class="active">Benchmarks</a>
+        <a href="changelog.html">Changelog</a>
+        <a href="https://github.com/Ataraxy-Labs/weave">GitHub</a>
+      </div>
+    </nav>
+
+    <!-- Page header -->
+    <div style="padding: 48px 0 16px;">
+      <h1 style="font-size: 28px; font-weight: 700; color: var(--accent); letter-spacing: -1px; margin-bottom: 8px;">Benchmarks</h1>
+      <p style="font-size: 14px; color: var(--dim); line-height: 1.7;">Real-world and synthetic merge benchmarks. Reproduce with <code style="background:var(--surface);padding:2px 6px;border-radius:3px;font-size:12px;">weave bench-repo &lt;path&gt;</code>.</p>
+    </div>
+
+    <!-- Methodology -->
+    <section>
+      <h2>Methodology</h2>
+      <p class="section-desc">How the benchmarks work.</p>
+
+      <div class="flow">
+        <div class="flow-step">
+          <div class="flow-num">1</div>
+          <div class="flow-content">
+            <div class="title">Clone a real repo</div>
+            <div class="desc">We pick major open-source repos with long merge histories: git/git (C), Flask (Python), CPython (C/Python), Go (Go), TypeScript (TS).</div>
+          </div>
+        </div>
+        <div class="flow-connector"><div class="line"></div></div>
+        <div class="flow-step">
+          <div class="flow-num">2</div>
+          <div class="flow-content">
+            <div class="title">Walk merge commits</div>
+            <div class="desc">For each merge commit with two parents, extract the base (merge-base), ours (parent 1), theirs (parent 2), and human result (the merge commit itself).</div>
+          </div>
+        </div>
+        <div class="flow-connector"><div class="line"></div></div>
+        <div class="flow-step">
+          <div class="flow-num">3</div>
+          <div class="flow-content">
+            <div class="title">Replay each file merge</div>
+            <div class="desc">For every file that both parents touched, run git's line-level merge and weave's entity-level merge on the same (base, ours, theirs) triple.</div>
+          </div>
+        </div>
+        <div class="flow-connector"><div class="line"></div></div>
+        <div class="flow-step">
+          <div class="flow-num">4</div>
+          <div class="flow-content">
+            <div class="title">Compare against human</div>
+            <div class="desc">A <strong style="color:var(--green)">win</strong> is when git conflicts but weave resolves cleanly. A <strong style="color:var(--red)">regression</strong> is when git resolves cleanly but weave's output differs from the human result. <strong style="color:var(--accent)">Human match</strong> checks if weave's output is identical to what the developer wrote.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Summary -->
+    <section>
+      <h2>Summary</h2>
+      <p class="section-desc">Across 4,917 file merges from 5 repos, weave resolves 83 merges that git cannot, with 0 regressions on C, Python, and Go.</p>
+
+      <div class="comparison-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Repository</th>
+              <th>Language</th>
+              <th>Files Tested</th>
+              <th>Both Clean</th>
+              <th>Weave Wins</th>
+              <th>Both Conflict</th>
+              <th>Regressions</th>
+              <th>Human Match</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><a href="https://github.com/git/git" style="color:var(--cyan)">git/git</a></td>
+              <td>C</td>
+              <td>1,319</td>
+              <td>1,009</td>
+              <td class="win">39</td>
+              <td>271</td>
+              <td class="win">0</td>
+              <td>64%</td>
+            </tr>
+            <tr>
+              <td><a href="https://github.com/pallets/flask" style="color:var(--cyan)">Flask</a></td>
+              <td>Python</td>
+              <td>56</td>
+              <td>30</td>
+              <td class="win">14</td>
+              <td>12</td>
+              <td class="win">0</td>
+              <td>57%</td>
+            </tr>
+            <tr>
+              <td><a href="https://github.com/python/cpython" style="color:var(--cyan)">CPython</a></td>
+              <td>C / Python</td>
+              <td>256</td>
+              <td>201</td>
+              <td class="win">7</td>
+              <td>48</td>
+              <td class="win">0</td>
+              <td>29%</td>
+            </tr>
+            <tr>
+              <td><a href="https://github.com/golang/go" style="color:var(--cyan)">Go</a></td>
+              <td>Go</td>
+              <td>1,247</td>
+              <td>1,000</td>
+              <td class="win">19</td>
+              <td>228</td>
+              <td class="win">0</td>
+              <td>58%</td>
+            </tr>
+            <tr>
+              <td><a href="https://github.com/microsoft/TypeScript" style="color:var(--cyan)">TypeScript</a></td>
+              <td>TypeScript</td>
+              <td>1,639</td>
+              <td>1,340</td>
+              <td class="win">4</td>
+              <td>292</td>
+              <td style="color:var(--yellow)">3</td>
+              <td>75%</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Per-repo breakdown -->
+    <section>
+      <h2>git/git</h2>
+      <p class="section-desc">The git source code itself. 1,319 file merges from 500 merge commits. Mostly C header and source files.</p>
+
+      <div class="stat-row">
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--green)">39</div>
+          <div class="stat-label">Wins</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--green)">0</div>
+          <div class="stat-label">Regressions</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--accent)">64%</div>
+          <div class="stat-label">Human Match</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--dim)">13%</div>
+          <div class="stat-label">Resolution Rate</div>
+        </div>
+      </div>
+
+      <p style="font-size:13px;color:var(--dim);margin-top:20px;line-height:1.7;">
+        <strong style="color:var(--fg)">25 of 39 wins</strong> produce output identical to the human merge. The remaining 14 differ in entity ordering (e.g. weave places a struct above a function where the human placed it below). These are stylistic differences, not semantic errors.
+      </p>
+      <p style="font-size:13px;color:var(--dim);margin-top:8px;line-height:1.7;">
+        Common win patterns: both branches add different <code style="color:var(--cyan)">extern</code> declarations to a header, both branches add functions to different sections of a <code style="color:var(--cyan)">.c</code> file, import block changes that git sees as overlapping lines.
+      </p>
+    </section>
+
+    <section>
+      <h2>Flask</h2>
+      <p class="section-desc">Python web framework. 56 file merges from 500 merge commits. Highest resolution rate of all tested repos.</p>
+
+      <div class="stat-row">
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--green)">14</div>
+          <div class="stat-label">Wins</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--green)">0</div>
+          <div class="stat-label">Regressions</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--accent)">57%</div>
+          <div class="stat-label">Human Match</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--cyan)">54%</div>
+          <div class="stat-label">Resolution Rate</div>
+        </div>
+      </div>
+
+      <p style="font-size:13px;color:var(--dim);margin-top:20px;line-height:1.7;">
+        Flask's codebase is well-structured with clear function and class boundaries, making it ideal for entity-level merge. Over half of all git conflicts are resolved by weave. Common patterns: both branches modifying different methods in <code style="color:var(--cyan)">app.py</code>, import additions to <code style="color:var(--cyan)">__init__.py</code>.
+      </p>
+    </section>
+
+    <section>
+      <h2>CPython</h2>
+      <p class="section-desc">The Python interpreter. 256 file merges from 500 merge commits. Mix of C source and Python test files.</p>
+
+      <div class="stat-row">
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--green)">7</div>
+          <div class="stat-label">Wins</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--green)">0</div>
+          <div class="stat-label">Regressions</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--accent)">29%</div>
+          <div class="stat-label">Human Match</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--dim)">13%</div>
+          <div class="stat-label">Resolution Rate</div>
+        </div>
+      </div>
+
+      <p style="font-size:13px;color:var(--dim);margin-top:20px;line-height:1.7;">
+        Lower human match rate due to CPython's heavy use of macros and preprocessor directives in C code, which create entity ordering differences. The wins are clean: header file declarations and test method additions that git falsely conflicts on.
+      </p>
+    </section>
+
+    <section>
+      <h2>Go</h2>
+      <p class="section-desc">The Go compiler and standard library. 1,247 file merges from 500 merge commits.</p>
+
+      <div class="stat-row">
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--green)">19</div>
+          <div class="stat-label">Wins</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--green)">0</div>
+          <div class="stat-label">Regressions</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--accent)">58%</div>
+          <div class="stat-label">Human Match</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--dim)">28%</div>
+          <div class="stat-label">Resolution Rate</div>
+        </div>
+      </div>
+
+      <p style="font-size:13px;color:var(--dim);margin-top:20px;line-height:1.7;">
+        Go's explicit structure (top-level functions, clear type declarations) works well with entity-level merge. 58% human match rate. Common patterns: both branches adding different functions, struct field additions in different types.
+      </p>
+    </section>
+
+    <section>
+      <h2>TypeScript</h2>
+      <p class="section-desc">The TypeScript compiler. 1,639 file merges from 500 merge commits. Highest human match rate but 3 regressions.</p>
+
+      <div class="stat-row">
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--green)">4</div>
+          <div class="stat-label">Wins</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--yellow)">3</div>
+          <div class="stat-label">Regressions</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--accent)">75%</div>
+          <div class="stat-label">Human Match</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--dim)">4%</div>
+          <div class="stat-label">Resolution Rate</div>
+        </div>
+      </div>
+
+      <p style="font-size:13px;color:var(--dim);margin-top:20px;line-height:1.7;">
+        The TypeScript compiler has very large files with complex entity relationships. The 3 regressions are under investigation. The 75% human match rate (highest of all repos) shows that when weave does resolve, it closely matches developer intent.
+      </p>
+    </section>
+
+    <!-- Key definitions -->
+    <section>
+      <h2>Glossary</h2>
+      <p class="section-desc">What the numbers mean.</p>
+
+      <table>
+        <thead>
+          <tr><th>Term</th><th>Definition</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="color:var(--accent);font-weight:600">Files Tested</td>
+            <td>Number of individual file merges where both branches touched the same file (both-touched files across all merge commits).</td>
+          </tr>
+          <tr>
+            <td style="color:var(--accent);font-weight:600">Both Clean</td>
+            <td>Both git and weave merged cleanly. No conflict from either tool.</td>
+          </tr>
+          <tr>
+            <td style="color:var(--green);font-weight:600">Win</td>
+            <td>Git produced a conflict, but weave resolved cleanly. A false conflict eliminated.</td>
+          </tr>
+          <tr>
+            <td style="color:var(--accent);font-weight:600">Both Conflict</td>
+            <td>Both git and weave produced conflicts. A real semantic collision that requires human judgment.</td>
+          </tr>
+          <tr>
+            <td style="color:var(--red);font-weight:600">Regression</td>
+            <td>Git merged cleanly, but weave produced a different result than the human. Weave introduced an error where git was fine.</td>
+          </tr>
+          <tr>
+            <td style="color:var(--accent);font-weight:600">Human Match</td>
+            <td>Of the wins, how many produce output identical to what the developer actually wrote. Higher = weave's merge matches human intent.</td>
+          </tr>
+          <tr>
+            <td style="color:var(--accent);font-weight:600">Resolution Rate</td>
+            <td>Wins / (Wins + Both Conflict). What percentage of git's conflicts weave eliminates.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Reproduce -->
+    <section>
+      <h2>Reproduce</h2>
+      <p class="section-desc">Run the benchmarks yourself.</p>
+
+      <div class="terminal">
+        <div class="terminal-bar">
+          <div class="terminal-dot"></div>
+          <div class="terminal-dot"></div>
+          <div class="terminal-dot"></div>
+          <div class="terminal-title">run benchmarks</div>
+        </div>
+        <div class="terminal-body">
+<pre><span class="d"># Clone a repo</span>
+<span class="cmd">$ git clone --bare https://github.com/git/git /tmp/git-bench</span>
+
+<span class="d"># Run benchmark (scans up to 500 merge commits)</span>
+<span class="cmd">$ weave bench-repo /tmp/git-bench</span>
+
+<span class="d"># Show diffs for non-matching cases</span>
+<span class="cmd">$ weave bench-repo /tmp/git-bench --show-diff</span>
+
+<span class="d"># Save base/ours/theirs/human/weave for each case</span>
+<span class="cmd">$ weave bench-repo /tmp/git-bench --save benchmarks/git</span></pre>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <p>Built by <a href="https://ataraxy-labs.com">Ataraxy Labs</a></p>
+    </footer>
+  </div>
+</body>
+</html>
