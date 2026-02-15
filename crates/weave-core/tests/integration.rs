@@ -1253,7 +1253,7 @@ fn java_class_conflict_scoped_to_method() {
 // =============================================================================
 
 #[test]
-fn slarse_java_throws_vs_param_change() {
+fn java_throws_vs_param_change() {
     // Slarse's exact scenario: one adds throws, other changes params+body
     let base = r#"public class Main {
     public int add(int a, int b) {
@@ -1297,7 +1297,7 @@ fn slarse_java_throws_vs_param_change() {
 }
 
 #[test]
-fn slarse_java_param_vs_annotation() {
+fn java_param_vs_annotation() {
     // One adds param, other adds annotation
     let base = r#"public class Service {
     public User getUser(String id) {
@@ -1340,7 +1340,7 @@ fn slarse_java_param_vs_annotation() {
 }
 
 #[test]
-fn slarse_large_class_one_conflict() {
+fn java_large_class_one_conflict() {
     // Large class, only one method conflicted, rest should be clean
     let base = r#"public class BigService {
     public void methodA() {
@@ -1409,7 +1409,7 @@ fn slarse_large_class_one_conflict() {
 }
 
 #[test]
-fn slarse_ts_class_scoped_conflict() {
+fn ts_class_scoped_conflict() {
     // TS version: same member scoping
     let base = r#"export class UserService {
     getUser(id: string): User {
@@ -1465,7 +1465,7 @@ fn slarse_ts_class_scoped_conflict() {
 }
 
 #[test]
-fn slarse_python_class_scoped_conflict() {
+fn python_class_scoped_conflict() {
     let base = r#"class Service:
     def create(self, data):
         return self.db.insert(data)
@@ -1513,7 +1513,7 @@ fn slarse_python_class_scoped_conflict() {
 }
 
 #[test]
-fn slarse_rust_impl_scoped_conflict() {
+fn rust_impl_scoped_conflict() {
     let base = r#"impl Server {
     fn handle_get(&self, req: Request) -> Response {
         Response::ok()
