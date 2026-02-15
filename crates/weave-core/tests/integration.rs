@@ -1248,6 +1248,326 @@ fn java_class_conflict_scoped_to_method() {
     );
 }
 
+// =============================================================================
+// Slarse scenarios: verify scoped conflicts across languages
+// =============================================================================
+
+#[test]
+fn slarse_java_throws_vs_param_change() {
+    // Slarse's exact scenario: one adds throws, other changes params+body
+    let base = r#"public class Main {
+    public int add(int a, int b) {
+        return a + b;
+    }
+
+    public int subtract(int a, int b) {
+        return a - b;
+    }
+}"#;
+    let ours = r#"public class Main {
+    public int add(int a, int b) throws IllegalArgumentException {
+        return a + b;
+    }
+
+    public int subtract(int a, int b) {
+        return a - b;
+    }
+}"#;
+    let theirs = r#"public class Main {
+    public int add(int a, int b, int c) {
+        return a + b + c;
+    }
+
+    public int subtract(int a, int b) {
+        return a - b;
+    }
+}"#;
+    let result = entity_merge(base, ours, theirs, "Main.java");
+    eprintln!("--- slarse java throws vs param ---");
+    eprintln!("content:\n{}", result.content);
+    eprintln!("conflicts: {}", result.conflicts.len());
+
+    assert!(!result.is_clean(), "Should conflict on add()");
+    assert!(
+        !is_inside_conflict_markers(&result.content, "subtract"),
+        "subtract should NOT be inside conflict markers"
+    );
+    // Verify subtract appears cleanly
+    assert!(result.content.contains("public int subtract"), "subtract should be in output");
+}
+
+#[test]
+fn slarse_java_param_vs_annotation() {
+    // One adds param, other adds annotation
+    let base = r#"public class Service {
+    public User getUser(String id) {
+        return db.find(id);
+    }
+
+    public void deleteUser(String id) {
+        db.remove(id);
+    }
+}"#;
+    let ours = r#"public class Service {
+    public User getUser(String id, boolean includeDeleted) {
+        return db.find(id);
+    }
+
+    public void deleteUser(String id) {
+        db.remove(id);
+    }
+}"#;
+    let theirs = r#"public class Service {
+    @Cacheable
+    public User getUser(String id) {
+        return db.find(id);
+    }
+
+    public void deleteUser(String id) {
+        db.remove(id);
+    }
+}"#;
+    let result = entity_merge(base, ours, theirs, "Service.java");
+    eprintln!("--- java param vs annotation ---");
+    eprintln!("content:\n{}", result.content);
+    eprintln!("clean: {}, conflicts: {}", result.is_clean(), result.conflicts.len());
+
+    // deleteUser should never be in conflict
+    assert!(
+        !is_inside_conflict_markers(&result.content, "deleteUser"),
+        "deleteUser should NOT be inside conflict markers"
+    );
+}
+
+#[test]
+fn slarse_large_class_one_conflict() {
+    // Large class, only one method conflicted, rest should be clean
+    let base = r#"public class BigService {
+    public void methodA() {
+        System.out.println("A");
+    }
+
+    public void methodB() {
+        System.out.println("B");
+    }
+
+    public void methodC() {
+        System.out.println("C");
+    }
+
+    public void target() {
+        System.out.println("original");
+    }
+}"#;
+    let ours = r#"public class BigService {
+    public void methodA() {
+        System.out.println("A");
+    }
+
+    public void methodB() {
+        System.out.println("B");
+    }
+
+    public void methodC() {
+        System.out.println("C");
+    }
+
+    public void target() {
+        System.out.println("ours version");
+    }
+}"#;
+    let theirs = r#"public class BigService {
+    public void methodA() {
+        System.out.println("A");
+    }
+
+    public void methodB() {
+        System.out.println("B");
+    }
+
+    public void methodC() {
+        System.out.println("C");
+    }
+
+    public void target() {
+        System.out.println("theirs version");
+    }
+}"#;
+    let result = entity_merge(base, ours, theirs, "BigService.java");
+    eprintln!("--- large class one conflict ---");
+    eprintln!("content:\n{}", result.content);
+
+    assert!(!result.is_clean(), "Should conflict on target()");
+    assert_eq!(result.conflicts.len(), 1, "Should be exactly 1 conflict");
+    for method in &["methodA", "methodB", "methodC"] {
+        assert!(
+            !is_inside_conflict_markers(&result.content, method),
+            "{} should NOT be inside conflict markers", method
+        );
+        assert!(result.content.contains(method), "{} should be in output", method);
+    }
+}
+
+#[test]
+fn slarse_ts_class_scoped_conflict() {
+    // TS version: same member scoping
+    let base = r#"export class UserService {
+    getUser(id: string): User {
+        return this.db.find(id);
+    }
+
+    createUser(data: UserData): User {
+        return this.db.create(data);
+    }
+
+    deleteUser(id: string): void {
+        this.db.delete(id);
+    }
+}"#;
+    let ours = r#"export class UserService {
+    getUser(id: string): User {
+        return this.db.findOne(id);
+    }
+
+    createUser(data: UserData): User {
+        return this.db.create(data);
+    }
+
+    deleteUser(id: string): void {
+        this.db.delete(id);
+    }
+}"#;
+    let theirs = r#"export class UserService {
+    getUser(id: string): User {
+        const cached = this.cache.get(id);
+        return cached || this.db.find(id);
+    }
+
+    createUser(data: UserData): User {
+        return this.db.create(data);
+    }
+
+    deleteUser(id: string): void {
+        this.db.delete(id);
+    }
+}"#;
+    let result = entity_merge(base, ours, theirs, "UserService.ts");
+    eprintln!("--- ts class scoped conflict ---");
+    eprintln!("content:\n{}", result.content);
+
+    assert!(!result.is_clean(), "Should conflict on getUser");
+    for method in &["createUser", "deleteUser"] {
+        assert!(
+            !is_inside_conflict_markers(&result.content, method),
+            "{} should NOT be inside conflict markers", method
+        );
+    }
+}
+
+#[test]
+fn slarse_python_class_scoped_conflict() {
+    let base = r#"class Service:
+    def create(self, data):
+        return self.db.insert(data)
+
+    def read(self, id):
+        return self.db.find(id)
+
+    def delete(self, id):
+        self.db.remove(id)
+"#;
+    let ours = r#"class Service:
+    def create(self, data):
+        return self.db.insert(data)
+
+    def read(self, id):
+        return self.db.find_one(id)
+
+    def delete(self, id):
+        self.db.remove(id)
+"#;
+    let theirs = r#"class Service:
+    def create(self, data):
+        return self.db.insert(data)
+
+    def read(self, id):
+        cached = self.cache.get(id)
+        if cached:
+            return cached
+        return self.db.find(id)
+
+    def delete(self, id):
+        self.db.remove(id)
+"#;
+    let result = entity_merge(base, ours, theirs, "service.py");
+    eprintln!("--- python class scoped conflict ---");
+    eprintln!("content:\n{}", result.content);
+
+    assert!(!result.is_clean(), "Should conflict on read");
+    for method in &["def create", "def delete"] {
+        assert!(
+            !is_inside_conflict_markers(&result.content, method),
+            "{} should NOT be inside conflict markers", method
+        );
+    }
+}
+
+#[test]
+fn slarse_rust_impl_scoped_conflict() {
+    let base = r#"impl Server {
+    fn handle_get(&self, req: Request) -> Response {
+        Response::ok()
+    }
+
+    fn handle_post(&self, req: Request) -> Response {
+        Response::created()
+    }
+
+    fn handle_delete(&self, req: Request) -> Response {
+        Response::no_content()
+    }
+}"#;
+    let ours = r#"impl Server {
+    fn handle_get(&self, req: Request) -> Response {
+        let data = self.db.get(req.id);
+        Response::ok_with(data)
+    }
+
+    fn handle_post(&self, req: Request) -> Response {
+        Response::created()
+    }
+
+    fn handle_delete(&self, req: Request) -> Response {
+        Response::no_content()
+    }
+}"#;
+    let theirs = r#"impl Server {
+    fn handle_get(&self, req: Request) -> Response {
+        self.auth.check(&req)?;
+        Response::ok()
+    }
+
+    fn handle_post(&self, req: Request) -> Response {
+        Response::created()
+    }
+
+    fn handle_delete(&self, req: Request) -> Response {
+        Response::no_content()
+    }
+}"#;
+    let result = entity_merge(base, ours, theirs, "server.rs");
+    eprintln!("--- rust impl scoped conflict ---");
+    eprintln!("content:\n{}", result.content);
+
+    assert!(!result.is_clean(), "Should conflict on handle_get");
+    for method in &["handle_post", "handle_delete"] {
+        assert!(
+            !is_inside_conflict_markers(&result.content, method),
+            "{} should NOT be inside conflict markers", method
+        );
+    }
+}
+
 /// Check if a needle appears only inside conflict marker blocks
 fn is_inside_conflict_markers(content: &str, needle: &str) -> bool {
     let mut in_conflict = false;

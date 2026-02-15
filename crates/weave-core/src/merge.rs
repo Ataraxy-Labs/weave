@@ -1484,9 +1484,10 @@ fn children_to_chunks(
 
     for (i, child) in children.iter().enumerate() {
         let child_start_idx = child.start_line.saturating_sub(container_start_line);
-        let child_end_idx = child.end_line.saturating_sub(container_start_line);
+        // +1 because end_line is inclusive but we need an exclusive upper bound for slicing
+        let child_end_idx = child.end_line.saturating_sub(container_start_line) + 1;
 
-        if child_end_idx > lines.len() || child_start_idx >= lines.len() {
+        if child_end_idx > lines.len() + 1 || child_start_idx >= lines.len() {
             // Position out of range, fall back to entity content
             chunks.push(MemberChunk {
                 name: child.name.clone(),
@@ -1494,10 +1495,11 @@ fn children_to_chunks(
             });
             continue;
         }
+        let child_end_idx = child_end_idx.min(lines.len());
 
-        // Determine the earliest line we can claim (previous child's end, or body start)
+        // Determine the earliest line we can claim (after previous child's end, or body start)
         let floor = if i > 0 {
-            children[i - 1].end_line.saturating_sub(container_start_line)
+            children[i - 1].end_line.saturating_sub(container_start_line) + 1
         } else {
             // First child: start after the container header line (the `{` or `:` line)
             // Find the line containing `{` or ending with `:`
