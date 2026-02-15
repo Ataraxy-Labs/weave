@@ -1,0 +1,57 @@
+{
+  "repo": "cpython-bench",
+  "merge_commits": 500,
+  "files_tested": 256,
+  "both_clean": 201,
+  "weave_wins": 7,
+  "both_conflict": 48,
+  "regressions": 0,
+  "matches_human": 2,
+  "differs_from_human": 5,
+  "resolution_rate": 12.727272727272727,
+  "human_match_rate": 28.57142857142857,
+  "cases": [
+    {
+      "commit": "5644729aa6ead0408113f49150c543f4cef32143",
+      "file": "Lib/test/test_sysconfig.py",
+      "category": "diff",
+      "dir": "5644729a_Lib_test_test_sysconfig.py"
+    },
+    {
+      "commit": "9d83b96ce1ada3a9ef0489d51426f2626d5bad38",
+      "file": "Lib/test/test_functools.py",
+      "category": "match",
+      "dir": "9d83b96c_Lib_test_test_functools.py"
+    },
+    {
+      "commit": "9d83b96ce1ada3a9ef0489d51426f2626d5bad38",
+      "file": "Include/dictobject.h",
+      "category": "match",
+      "dir": "9d83b96c_Include_dictobject.h"
+    },
+    {
+      "commit": "42e1ea9a10aa6c3df40af3b7561d6251c8e2ac9c",
+      "file": "Include/dictobject.h",
+      "category": "diff",
+      "dir": "42e1ea9a_Include_dictobject.h"
+    },
+    {
+      "commit": "9bb6fe52742340f6c92f0dda18599a4577a94e18",
+      "file": "Lib/test/test_shutil.py",
+      "category": "diff",
+      "dir": "9bb6fe52_Lib_test_test_shutil.py"
+    },
+    {
+      "commit": "520348e5c0284668738e0ba98b86e7d1a5fd8600",
+      "file": "Lib/test/test_dbm_dumb.py",
+      "category": "diff",
+      "dir": "520348e5_Lib_test_test_dbm_dumb.py"
+    },
+    {
+      "commit": "b0f75c520ee882295b0d2884469056ebf0d0568b",
+      "file": "Include/abstract.h",
+      "category": "diff",
+      "dir": "b0f75c52_Include_abstract.h"
+    }
+  ]
+}

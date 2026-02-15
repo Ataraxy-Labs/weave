@@ -1,0 +1,99 @@
+{
+  "repo": "flask-bench",
+  "merge_commits": 500,
+  "files_tested": 56,
+  "both_clean": 30,
+  "weave_wins": 14,
+  "both_conflict": 12,
+  "regressions": 0,
+  "matches_human": 8,
+  "differs_from_human": 6,
+  "resolution_rate": 53.84615384615385,
+  "human_match_rate": 57.14285714285714,
+  "cases": [
+    {
+      "commit": "5880befcd22490c40f3c63d6178427f7753672c1",
+      "file": "src/flask/app.py",
+      "category": "diff",
+      "dir": "5880befc_src_flask_app.py"
+    },
+    {
+      "commit": "153433f612585409f3494a3c44160d888c02612d",
+      "file": "src/flask/__init__.py",
+      "category": "match",
+      "dir": "153433f6_src_flask___init__.py"
+    },
+    {
+      "commit": "97c830190ff839b89b85c93781f3603f95365384",
+      "file": "src/flask/__init__.py",
+      "category": "match",
+      "dir": "97c83019_src_flask___init__.py"
+    },
+    {
+      "commit": "97c830190ff839b89b85c93781f3603f95365384",
+      "file": "src/flask/testing.py",
+      "category": "match",
+      "dir": "97c83019_src_flask_testing.py"
+    },
+    {
+      "commit": "73739a29f4c16cf539b57e711a4ea2a686cd707a",
+      "file": "src/flask/__init__.py",
+      "category": "match",
+      "dir": "73739a29_src_flask___init__.py"
+    },
+    {
+      "commit": "7ee9ceb71e868944a46e1ff00b506772a53a4f1d",
+      "file": "src/flask/app.py",
+      "category": "diff",
+      "dir": "7ee9ceb7_src_flask_app.py"
+    },
+    {
+      "commit": "ed5b240417414cbd0322efa95c91f759928ba154",
+      "file": "src/flask/__init__.py",
+      "category": "match",
+      "dir": "ed5b2404_src_flask___init__.py"
+    },
+    {
+      "commit": "00be8d24ac3a2a68f35011001e3b0b0550501afd",
+      "file": "src/flask/__init__.py",
+      "category": "match",
+      "dir": "00be8d24_src_flask___init__.py"
+    },
+    {
+      "commit": "73b9bacbf7e7440e5a8a65e61fecfe3d0ce75579",
+      "file": "src/flask/__init__.py",
+      "category": "match",
+      "dir": "73b9bacb_src_flask___init__.py"
+    },
+    {
+      "commit": "36af821edf741562cdcb6c60d63f23fa9a1d8776",
+      "file": "src/flask/__init__.py",
+      "category": "match",
+      "dir": "36af821e_src_flask___init__.py"
+    },
+    {
+      "commit": "7a2d5fb6df1f2c066b94dd88686137353ada9cc6",
+      "file": "src/flask/blueprints.py",
+      "category": "diff",
+      "dir": "7a2d5fb6_src_flask_blueprints.py"
+    },
+    {
+      "commit": "9e2e1de2fcf185ee9ebe9a546f830792403c9160",
+      "file": "src/flask/blueprints.py",
+      "category": "diff",
+      "dir": "9e2e1de2_src_flask_blueprints.py"
+    },
+    {
+      "commit": "9e2e1de2fcf185ee9ebe9a546f830792403c9160",
+      "file": "src/flask/scaffold.py",
+      "category": "diff",
+      "dir": "9e2e1de2_src_flask_scaffold.py"
+    },
+    {
+      "commit": "9e2e1de2fcf185ee9ebe9a546f830792403c9160",
+      "file": "src/flask/app.py",
+      "category": "diff",
+      "dir": "9e2e1de2_src_flask_app.py"
+    }
+  ]
+}

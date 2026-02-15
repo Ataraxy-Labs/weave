@@ -1,0 +1,14 @@
+{
+  "repo": "express-bench",
+  "merge_commits": 10,
+  "files_tested": 35,
+  "both_clean": 24,
+  "weave_wins": 0,
+  "both_conflict": 11,
+  "regressions": 0,
+  "matches_human": 0,
+  "differs_from_human": 0,
+  "resolution_rate": 0.0,
+  "human_match_rate": 0.0,
+  "cases": []
+}
