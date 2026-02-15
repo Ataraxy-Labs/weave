@@ -65,7 +65,7 @@ pub fn run(
             );
         }
     } else {
-        println!("Usage: weave status --file <path> or --agent <id>");
+        println!("Usage: weave-cli status --file <path> or --agent <id>");
     }
 
     Ok(())
