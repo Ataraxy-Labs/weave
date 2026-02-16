@@ -362,7 +362,10 @@ pub fn entity_merge_with_registry(
     }
 
     // Merge interstitial regions
-    let merged_interstitials = merge_interstitials(&base_regions, &ours_regions, &theirs_regions);
+    let (merged_interstitials, interstitial_conflicts) =
+        merge_interstitials(&base_regions, &ours_regions, &theirs_regions);
+    stats.entities_conflicted += interstitial_conflicts.len();
+    conflicts.extend(interstitial_conflicts);
 
     // Reconstruct the file
     let content = reconstruct(
@@ -846,7 +849,7 @@ fn merge_interstitials(
     base_regions: &[FileRegion],
     ours_regions: &[FileRegion],
     theirs_regions: &[FileRegion],
-) -> HashMap<String, String> {
+) -> (HashMap<String, String>, Vec<EntityConflict>) {
     let base_map: HashMap<&str, &str> = base_regions
         .iter()
         .filter_map(|r| match r {
@@ -877,6 +880,7 @@ fn merge_interstitials(
     all_keys.extend(theirs_map.keys());
 
     let mut merged: HashMap<String, String> = HashMap::new();
+    let mut interstitial_conflicts: Vec<EntityConflict> = Vec::new();
 
     for key in all_keys {
         let base_content = base_map.get(key).copied().unwrap_or("");
@@ -905,15 +909,32 @@ fn merge_interstitials(
                     Ok(m) => {
                         merged.insert(key.to_string(), m);
                     }
-                    Err(conflicted) => {
-                        merged.insert(key.to_string(), conflicted);
+                    Err(_conflicted) => {
+                        // Create a proper conflict instead of silently embedding
+                        // raw conflict markers into the output.
+                        let complexity = classify_conflict(
+                            Some(base_content),
+                            Some(ours_content),
+                            Some(theirs_content),
+                        );
+                        let conflict = EntityConflict {
+                            entity_name: key.to_string(),
+                            entity_type: "interstitial".to_string(),
+                            kind: ConflictKind::BothModified,
+                            complexity,
+                            ours_content: Some(ours_content.to_string()),
+                            theirs_content: Some(theirs_content.to_string()),
+                            base_content: Some(base_content.to_string()),
+                        };
+                        merged.insert(key.to_string(), conflict.to_conflict_markers());
+                        interstitial_conflicts.push(conflict);
                     }
                 }
             }
         }
     }
 
-    merged
+    (merged, interstitial_conflicts)
 }
 
 /// Check if a region is predominantly import/use statements.
@@ -2994,5 +3015,115 @@ fn subtract(a: i32, b: i32) -> i32 {
         );
         assert!(result.content.contains("multiply"), "Should have multiply");
         assert!(result.content.contains("divide"), "Should have divide");
+    }
+
+    #[test]
+    fn test_interstitial_conflict_not_silently_embedded() {
+        // Regression test: when interstitial content between entities has a
+        // both-modified conflict, merge_interstitials must report it as a real
+        // conflict instead of silently embedding raw diffy markers and claiming
+        // is_clean=true.
+        //
+        // Scenario: a class with one method. Both sides add different guard
+        // clause comments in the method body. The method is inside the class
+        // entity, but the comment changes land in interstitial-like content
+        // that diffy cannot auto-merge.
+        let base = r#"export const SORT_MAP = {
+  name: "name",
+  "-name": "name",
+};
+
+export abstract class Store {
+  loader = {};
+
+  updateList(item?: Item, prev?: Item) {
+    if (!item && !prev) return;
+    const id = item?.id ?? prev?.id;
+    if (!id) return;
+
+    const updates = this.getUpdates(item, prev);
+    for (const u of updates) {
+      this.apply(u);
+    }
+  }
+}
+"#;
+        let ours = r#"export const SORT_MAP = {
+  name: "name",
+  "-name": "name",
+};
+
+export abstract class Store {
+  loader = {};
+
+  updateList(item?: Item, prev?: Item) {
+    if (!item && !prev) return;
+    const id = item?.id ?? prev?.id;
+    if (!id) return;
+
+    // If sub-issues are hidden, skip
+    const filters = this.getFilters();
+    if (isSub && filters?.sub === false) return;
+
+    const updates = this.getUpdates(item, prev);
+    for (const u of updates) {
+      this.apply(u);
+    }
+  }
+}
+"#;
+        let theirs = r#"export const SORT_MAP = {
+  name: "name",
+  "-name": "name",
+};
+
+export abstract class Store {
+  loader = {};
+
+  updateList(item?: Item, prev?: Item) {
+    if (!item && !prev) return;
+    const id = item?.id ?? prev?.id;
+    if (!id) return;
+
+    // If sub-work items are hidden, skip updating the list.
+    // Do not skip when transitioning into/out of sub-work item status.
+    const filters = this.getFilters();
+    const wasSub = prev?.parentId !== null;
+    const isNowSub = item?.parentId !== null;
+    if (wasSub && isNowSub && filters?.sub === false) return;
+
+    const updates = this.getUpdates(item, prev);
+    for (const u of updates) {
+      this.apply(u);
+    }
+  }
+}
+"#;
+        let result = entity_merge(base, ours, theirs, "store.ts");
+
+        // The key assertions:
+        // 1. If the content has conflict markers, is_clean() MUST be false
+        let has_markers = result.content.contains("<<<<<<<") || result.content.contains(">>>>>>>");
+        if has_markers {
+            assert!(
+                !result.is_clean(),
+                "BUG: is_clean()=true but merged content has conflict markers!\n\
+                 stats: {}\nconflicts: {:?}\ncontent:\n{}",
+                result.stats, result.conflicts, result.content
+            );
+            assert!(
+                result.stats.entities_conflicted > 0,
+                "entities_conflicted should be > 0 when markers are present"
+            );
+        }
+
+        // 2. If it was resolved cleanly, no markers should exist
+        if result.is_clean() {
+            assert!(
+                !has_markers,
+                "Clean merge should not contain conflict markers!\ncontent:\n{}",
+                result.content
+            );
+        }
     }
 }
