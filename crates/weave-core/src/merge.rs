@@ -93,6 +93,39 @@ pub fn entity_merge_with_registry(
     file_path: &str,
     registry: &ParserRegistry,
 ) -> MergeResult {
+    // Guard: if any input already contains conflict markers (e.g. AU/AA conflicts
+    // where git bakes markers into stage blobs), report as conflict immediately.
+    // We can't do a meaningful 3-way merge on pre-conflicted content.
+    if has_conflict_markers(base) || has_conflict_markers(ours) || has_conflict_markers(theirs) {
+        let mut stats = MergeStats::default();
+        stats.entities_conflicted = 1;
+        stats.used_fallback = true;
+        // Use whichever input has markers as the merged content (preserves
+        // the conflict for the user to resolve manually).
+        let content = if has_conflict_markers(ours) {
+            ours
+        } else if has_conflict_markers(theirs) {
+            theirs
+        } else {
+            base
+        };
+        let complexity = classify_conflict(Some(base), Some(ours), Some(theirs));
+        return MergeResult {
+            content: content.to_string(),
+            conflicts: vec![EntityConflict {
+                entity_name: "(file)".to_string(),
+                entity_type: "file".to_string(),
+                kind: ConflictKind::BothModified,
+                complexity,
+                ours_content: Some(ours.to_string()),
+                theirs_content: Some(theirs.to_string()),
+                base_content: Some(base.to_string()),
+            }],
+            warnings: vec![],
+            stats,
+        };
+    }
+
     // Fast path: if ours == theirs, no merge needed
     if ours == theirs {
         return MergeResult {
@@ -2021,6 +2054,12 @@ fn extract_member_name(line: &str) -> String {
 /// Check if content looks binary (contains null bytes in first 8KB).
 fn is_binary(content: &str) -> bool {
     content.as_bytes().iter().take(8192).any(|&b| b == 0)
+}
+
+/// Check if content already contains git conflict markers.
+/// This happens with AU/AA conflicts where git stores markers in stage blobs.
+fn has_conflict_markers(content: &str) -> bool {
+    content.contains("<<<<<<<") && content.contains(">>>>>>>")
 }
 
 fn skip_sesame(file_path: &str) -> bool {
