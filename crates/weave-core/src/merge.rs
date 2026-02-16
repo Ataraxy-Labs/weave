@@ -27,6 +27,7 @@ pub struct MergeResult {
 impl MergeResult {
     pub fn is_clean(&self) -> bool {
         self.conflicts.is_empty()
+            && !self.content.lines().any(|l| l.starts_with("<<<<<<<"))
     }
 }
 
@@ -3063,82 +3064,33 @@ fn subtract(a: i32, b: i32) -> i32 {
         // conflict instead of silently embedding raw diffy markers and claiming
         // is_clean=true.
         //
-        // Scenario: a class with one method. Both sides add different guard
-        // clause comments in the method body. The method is inside the class
-        // entity, but the comment changes land in interstitial-like content
-        // that diffy cannot auto-merge.
-        let base = r#"export const SORT_MAP = {
-  name: "name",
-  "-name": "name",
-};
+        // Scenario: a barrel export file (index.ts) with comments between
+        // export statements. Both sides modify the SAME interstitial comment
+        // block differently. The exports are the entities; the comment between
+        // them is interstitial content that goes through merge_interstitials
+        // → diffy, which cannot auto-merge conflicting edits.
+        let base = r#"export { alpha } from "./alpha";
 
-export abstract class Store {
-  loader = {};
+// Section: data utilities
+// TODO: add more exports here
 
-  updateList(item?: Item, prev?: Item) {
-    if (!item && !prev) return;
-    const id = item?.id ?? prev?.id;
-    if (!id) return;
-
-    const updates = this.getUpdates(item, prev);
-    for (const u of updates) {
-      this.apply(u);
-    }
-  }
-}
+export { beta } from "./beta";
 "#;
-        let ours = r#"export const SORT_MAP = {
-  name: "name",
-  "-name": "name",
-};
+        let ours = r#"export { alpha } from "./alpha";
 
-export abstract class Store {
-  loader = {};
+// Section: data utilities (sorting)
+// Sorting helpers for list views
 
-  updateList(item?: Item, prev?: Item) {
-    if (!item && !prev) return;
-    const id = item?.id ?? prev?.id;
-    if (!id) return;
-
-    // If sub-issues are hidden, skip
-    const filters = this.getFilters();
-    if (isSub && filters?.sub === false) return;
-
-    const updates = this.getUpdates(item, prev);
-    for (const u of updates) {
-      this.apply(u);
-    }
-  }
-}
+export { beta } from "./beta";
 "#;
-        let theirs = r#"export const SORT_MAP = {
-  name: "name",
-  "-name": "name",
-};
+        let theirs = r#"export { alpha } from "./alpha";
 
-export abstract class Store {
-  loader = {};
+// Section: data utilities (filtering)
+// Filtering helpers for search views
 
-  updateList(item?: Item, prev?: Item) {
-    if (!item && !prev) return;
-    const id = item?.id ?? prev?.id;
-    if (!id) return;
-
-    // If sub-work items are hidden, skip updating the list.
-    // Do not skip when transitioning into/out of sub-work item status.
-    const filters = this.getFilters();
-    const wasSub = prev?.parentId !== null;
-    const isNowSub = item?.parentId !== null;
-    if (wasSub && isNowSub && filters?.sub === false) return;
-
-    const updates = this.getUpdates(item, prev);
-    for (const u of updates) {
-      this.apply(u);
-    }
-  }
-}
+export { beta } from "./beta";
 "#;
-        let result = entity_merge(base, ours, theirs, "store.ts");
+        let result = entity_merge(base, ours, theirs, "index.ts");
 
         // The key assertions:
         // 1. If the content has conflict markers, is_clean() MUST be false
@@ -3164,5 +3116,35 @@ export abstract class Store {
                 result.content
             );
         }
+    }
+
+    #[test]
+    fn test_pre_conflicted_input_not_treated_as_clean() {
+        // Regression test for AU/AA conflicts: git can store conflict markers
+        // directly into stage blobs. Weave must not return is_clean=true.
+        let base = "";
+        let theirs = "";
+        let ours = r#"/**
+ * MIT License
+ */
+
+<<<<<<<< HEAD:src/lib/exports/index.ts
+export { renderDocToBuffer } from "./doc-exporter";
+export type { ExportOptions, ExportMetadata, RenderContext } from "./types";
+========
+export * from "./editor";
+export * from "./types";
+>>>>>>>> feature:packages/core/src/editor/index.ts
+"#;
+        let result = entity_merge(base, ours, theirs, "index.ts");
+
+        assert!(
+            !result.is_clean(),
+            "Pre-conflicted input must not be reported as clean!\n\
+             stats: {}\nconflicts: {:?}",
+            result.stats, result.conflicts,
+        );
+        assert!(result.stats.entities_conflicted > 0);
+        assert!(!result.conflicts.is_empty());
     }
 }
