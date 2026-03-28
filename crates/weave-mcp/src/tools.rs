@@ -125,3 +125,43 @@ pub struct MergeAuditParams {
     #[schemars(description = "Optional: audit only this file")]
     pub file_path: Option<String>,
 }
+
+// ── New v2 tools ──
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateEntityContentParams {
+    #[schemars(description = "Agent identifier")]
+    pub agent_id: String,
+    #[schemars(description = "Path to the file containing the entity")]
+    pub file_path: String,
+    #[schemars(description = "Name of the entity to update")]
+    pub entity_name: String,
+    #[schemars(description = "New source code content for the entity")]
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetEntityContentParams {
+    #[schemars(description = "Path to the file containing the entity")]
+    pub file_path: String,
+    #[schemars(description = "Name of the entity to read")]
+    pub entity_name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MergeFileParams {
+    #[schemars(description = "Path to the file to merge")]
+    pub file_path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ResolveConflictParams {
+    #[schemars(description = "Agent identifier")]
+    pub agent_id: String,
+    #[schemars(description = "Path to the file containing the entity")]
+    pub file_path: String,
+    #[schemars(description = "Name of the conflicted entity to resolve")]
+    pub entity_name: String,
+    #[schemars(description = "Resolved source code content")]
+    pub resolved_content: String,
+}

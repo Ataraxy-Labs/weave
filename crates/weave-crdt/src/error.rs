@@ -11,6 +11,15 @@ pub enum WeaveError {
     #[error("agent not found: {0}")]
     AgentNotFound(String),
 
+    #[error("entity has no content: {0}")]
+    NoContent(String),
+
+    #[error("entity not in conflict: {0}")]
+    NotInConflict(String),
+
+    #[error("merge error: {0}")]
+    MergeError(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

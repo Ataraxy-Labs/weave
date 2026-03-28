@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use automerge::{ObjType, ReadDoc, Value, transaction::Transactable};
 use serde::Serialize;
 
 use crate::error::{Result, WeaveError};
+use crate::merge::VersionVector;
 use crate::state::{now_ms, EntityStateDoc};
 
 // ── Result types ──
@@ -25,6 +28,8 @@ pub struct EntityStatus {
     pub last_modified_by: Option<String>,
     pub last_modified_at: Option<u64>,
     pub version: u64,
+    pub version_vector: VersionVector,
+    pub merge_state: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,7 +52,7 @@ pub struct PotentialConflict {
 
 // ── Helper to read a string field from an automerge map ──
 
-fn get_str(doc: &automerge::AutoCommit, obj: &automerge::ObjId, key: &str) -> Option<String> {
+pub(crate) fn get_str(doc: &automerge::AutoCommit, obj: &automerge::ObjId, key: &str) -> Option<String> {
     match doc.get(obj, key) {
         Ok(Some((Value::Scalar(v), _))) => {
             if let automerge::ScalarValue::Str(s) = v.as_ref() {
@@ -60,7 +65,7 @@ fn get_str(doc: &automerge::AutoCommit, obj: &automerge::ObjId, key: &str) -> Op
     }
 }
 
-fn get_u64(doc: &automerge::AutoCommit, obj: &automerge::ObjId, key: &str) -> Option<u64> {
+pub(crate) fn get_u64(doc: &automerge::AutoCommit, obj: &automerge::ObjId, key: &str) -> Option<u64> {
     match doc.get(obj, key) {
         Ok(Some((Value::Scalar(v), _))) => match v.as_ref() {
             automerge::ScalarValue::Uint(n) => Some(*n),
@@ -146,7 +151,17 @@ pub fn record_modification(
     };
 
     let ts = now_ms();
-    let version = get_u64(&state.doc, &entity_obj, "version").unwrap_or(0) + 1;
+
+    // Read current version vector, increment agent's counter
+    let vv = read_version_vector(&state.doc, &entity_obj);
+    let mut new_vv = vv;
+    new_vv.increment(agent_id);
+
+    // Write version vector back
+    write_version_vector(&mut state.doc, &entity_obj, &new_vv)?;
+
+    // Keep scalar version in sync (total of VV)
+    let version = new_vv.total();
 
     state.doc.put(&entity_obj, "content_hash", content_hash)?;
     state
@@ -171,6 +186,14 @@ pub fn get_entity_status(state: &EntityStateDoc, entity_id: &str) -> Result<Enti
         None => return Err(WeaveError::EntityNotFound(entity_id.to_string())),
     };
 
+    let vv = read_version_vector(&state.doc, &entity_obj);
+    let version = {
+        let vv_total = vv.total();
+        let stored = get_u64(&state.doc, &entity_obj, "version").unwrap_or(0);
+        // Use whichever is larger for backward compat
+        vv_total.max(stored)
+    };
+
     Ok(EntityStatus {
         entity_id: entity_id.to_string(),
         name: get_str(&state.doc, &entity_obj, "name").unwrap_or_default(),
@@ -181,7 +204,10 @@ pub fn get_entity_status(state: &EntityStateDoc, entity_id: &str) -> Result<Enti
         claimed_at: get_u64(&state.doc, &entity_obj, "claimed_at"),
         last_modified_by: get_str(&state.doc, &entity_obj, "last_modified_by"),
         last_modified_at: get_u64(&state.doc, &entity_obj, "last_modified_at"),
-        version: get_u64(&state.doc, &entity_obj, "version").unwrap_or(0),
+        version,
+        version_vector: vv,
+        merge_state: get_str(&state.doc, &entity_obj, "merge_state")
+            .unwrap_or_else(|| "clean".to_string()),
     })
 }
 
@@ -197,6 +223,12 @@ pub fn get_entities_for_file(state: &EntityStateDoc, file_path: &str) -> Result<
         };
         let fp = get_str(&state.doc, &entity_obj, "file_path").unwrap_or_default();
         if fp == file_path {
+            let vv = read_version_vector(&state.doc, &entity_obj);
+            let version = {
+                let vv_total = vv.total();
+                let stored = get_u64(&state.doc, &entity_obj, "version").unwrap_or(0);
+                vv_total.max(stored)
+            };
             result.push(EntityStatus {
                 entity_id: key.clone(),
                 name: get_str(&state.doc, &entity_obj, "name").unwrap_or_default(),
@@ -207,7 +239,10 @@ pub fn get_entities_for_file(state: &EntityStateDoc, file_path: &str) -> Result<
                 claimed_at: get_u64(&state.doc, &entity_obj, "claimed_at"),
                 last_modified_by: get_str(&state.doc, &entity_obj, "last_modified_by"),
                 last_modified_at: get_u64(&state.doc, &entity_obj, "last_modified_at"),
-                version: get_u64(&state.doc, &entity_obj, "version").unwrap_or(0),
+                version,
+                version_vector: vv,
+                merge_state: get_str(&state.doc, &entity_obj, "merge_state")
+                    .unwrap_or_else(|| "clean".to_string()),
             });
         }
     }
@@ -430,17 +465,16 @@ pub fn upsert_entity(
 ) -> Result<()> {
     let entities = state.entities_id()?;
 
-    let entity_obj = match state.doc.get(&entities, entity_id)? {
+    match state.doc.get(&entities, entity_id)? {
         Some((_, id)) => {
-            // Update existing — only update mutable fields, preserve claims
+            // Update existing: only update mutable fields, preserve claims + content
             state.doc.put(&id, "name", name)?;
             state.doc.put(&id, "type", entity_type)?;
             state.doc.put(&id, "file_path", file_path)?;
             state.doc.put(&id, "content_hash", content_hash)?;
-            id
         }
         None => {
-            // Create new
+            // Create new with all v2 fields
             let id = state.doc.put_object(&entities, entity_id, ObjType::Map)?;
             state.doc.put(&id, "name", name)?;
             state.doc.put(&id, "type", entity_type)?;
@@ -448,10 +482,12 @@ pub fn upsert_entity(
             state.doc.put(&id, "content_hash", content_hash)?;
             state.doc.put(&id, "version", 0_i64)?;
             state.doc.put(&id, "last_modified_at", now_ms() as i64)?;
-            id
+            state.doc.put_object(&id, "version_vector", ObjType::Map)?;
+            state.doc.put(&id, "content", "")?;
+            state.doc.put(&id, "base_content", "")?;
+            state.doc.put(&id, "merge_state", "clean")?;
         }
     };
-    let _ = entity_obj; // suppress unused warning
 
     Ok(())
 }
@@ -469,6 +505,37 @@ pub fn set_agent_last_seen(
         None => return Err(WeaveError::AgentNotFound(agent_id.to_string())),
     };
     state.doc.put(&agent_obj, "last_seen", last_seen as i64)?;
+    Ok(())
+}
+
+// ── Version vector helpers ──
+
+/// Read a version vector from an entity's version_vector map.
+pub(crate) fn read_version_vector(doc: &automerge::AutoCommit, entity_obj: &automerge::ObjId) -> VersionVector {
+    let vv_obj = match doc.get(entity_obj, "version_vector") {
+        Ok(Some((_, id))) => id,
+        _ => return VersionVector::new(),
+    };
+
+    let mut map = HashMap::new();
+    for key in doc.keys(&vv_obj) {
+        if let Some(val) = get_u64(doc, &vv_obj, &key) {
+            map.insert(key, val);
+        }
+    }
+    VersionVector::from_map(map)
+}
+
+/// Write a version vector to an entity's version_vector map.
+pub(crate) fn write_version_vector(
+    doc: &mut automerge::AutoCommit,
+    entity_obj: &automerge::ObjId,
+    vv: &VersionVector,
+) -> Result<()> {
+    let vv_obj = doc.put_object(entity_obj, "version_vector", ObjType::Map)?;
+    for (agent_id, &count) in vv.counters() {
+        doc.put(&vv_obj, agent_id.as_str(), count as i64)?;
+    }
     Ok(())
 }
 

@@ -16,9 +16,10 @@ use tokio::sync::Mutex;
 
 use weave_core::git;
 use weave_crdt::{
-    claim_entity, detect_potential_conflicts, get_entities_for_file, get_entity_status,
-    register_agent, release_entity, resolve_entity_id, sync_from_files, upsert_entity,
-    EntityStateDoc,
+    claim_entity, detect_potential_conflicts, get_entities_for_file, get_entity_content,
+    get_entity_status, merge_file_entities, register_agent,
+    release_entity, resolve_entity_conflict, resolve_entity_id, sync_from_files,
+    update_entity_content, upsert_entity, EntityStateDoc,
 };
 
 use crate::tools::*;
@@ -431,6 +432,8 @@ impl WeaveServer {
                     "claimed_by": status.and_then(|s| s.claimed_by.as_ref()),
                     "last_modified_by": status.and_then(|s| s.last_modified_by.as_ref()),
                     "version": status.map(|s| s.version).unwrap_or(0),
+                    "version_vector": status.map(|s| serde_json::to_value(&s.version_vector).unwrap_or_default()),
+                    "merge_state": status.map(|s| s.merge_state.as_str()).unwrap_or("clean"),
                 })
             })
             .collect();
@@ -498,11 +501,21 @@ impl WeaveServer {
         let result: Vec<serde_json::Value> = conflicts
             .iter()
             .map(|c| {
+                // Try to get version vector for richer conflict info
+                let vv = get_entity_status(&state, &c.entity_id)
+                    .ok()
+                    .map(|s| serde_json::to_value(&s.version_vector).unwrap_or_default());
+                let ms = get_entity_status(&state, &c.entity_id)
+                    .ok()
+                    .map(|s| s.merge_state)
+                    .unwrap_or_else(|| "unknown".to_string());
                 serde_json::json!({
                     "entity_id": c.entity_id,
                     "entity_name": c.entity_name,
                     "file_path": c.file_path,
                     "agents": c.agents,
+                    "version_vector": vv,
+                    "merge_state": ms,
                 })
             })
             .collect();
@@ -1059,6 +1072,177 @@ impl WeaveServer {
                 "details": result,
             }))
             .unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(description = "Write entity content to the CRDT. Increments the agent's version vector counter and stores the source code.")]
+    async fn weave_update_entity_content(
+        &self,
+        Parameters(params): Parameters<UpdateEntityContentParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ctx = self
+            .get_context(Some(&params.file_path))
+            .await
+            .map_err(internal_err)?;
+        let (rel_path, abs_path) =
+            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let entity_id =
+            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
+                .map_err(internal_err)?;
+
+        // Compute content hash
+        let hash = format!("{:x}", content_hash_u64(&params.content));
+
+        let mut state = ctx.state.lock().await;
+
+        // Ensure entity exists in CRDT
+        let entities = self.cached_extract_entities(&content, &rel_path).await;
+        if let Some(e) = entities.iter().find(|e| e.id == entity_id) {
+            let _ = upsert_entity(
+                &mut state,
+                &e.id,
+                &e.name,
+                &e.entity_type,
+                &rel_path,
+                &e.content_hash,
+            );
+        }
+
+        update_entity_content(&mut state, &params.agent_id, &entity_id, &params.content, &hash)
+            .map_err(|e| internal_err(e.to_string()))?;
+        let _ = state.save();
+
+        let status = get_entity_content(&state, &entity_id)
+            .map_err(|e| internal_err(e.to_string()))?;
+
+        let response = serde_json::json!({
+            "entity": params.entity_name,
+            "content_hash": hash,
+            "version_vector": serde_json::to_value(&status.version_vector).unwrap_or_default(),
+            "version": status.version_vector.total(),
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&response).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(description = "Read entity content from the CRDT, including version vector, merge state, and any conflict details")]
+    async fn weave_get_entity_content(
+        &self,
+        Parameters(params): Parameters<GetEntityContentParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ctx = self
+            .get_context(Some(&params.file_path))
+            .await
+            .map_err(internal_err)?;
+        let (rel_path, abs_path) =
+            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let entity_id =
+            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
+                .map_err(internal_err)?;
+
+        let state = ctx.state.lock().await;
+        match get_entity_content(&state, &entity_id) {
+            Ok(status) => {
+                let response = serde_json::json!({
+                    "entity": status.name,
+                    "content": status.content,
+                    "base_content": status.base_content,
+                    "content_hash": status.content_hash,
+                    "version_vector": serde_json::to_value(&status.version_vector).unwrap_or_default(),
+                    "merge_state": status.merge_state,
+                    "conflict_ours": status.conflict_ours,
+                    "conflict_theirs": status.conflict_theirs,
+                    "conflict_base": status.conflict_base,
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&response).unwrap_or_default(),
+                )]))
+            }
+            Err(_) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::json!({
+                    "entity": params.entity_name,
+                    "content": "",
+                    "merge_state": "clean",
+                    "version_vector": {},
+                })
+                .to_string(),
+            )])),
+        }
+    }
+
+    #[tool(description = "Trigger entity-level merge for a file. Compares version vectors, auto-merges where possible, marks conflicts.")]
+    async fn weave_merge_file(
+        &self,
+        Parameters(params): Parameters<MergeFileParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ctx = self
+            .get_context(Some(&params.file_path))
+            .await
+            .map_err(internal_err)?;
+        let (rel_path, _abs_path) =
+            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+
+        let mut state = ctx.state.lock().await;
+
+        // Sync from working tree first
+        let _ = sync_from_files(
+            &mut state,
+            &ctx.repo_root,
+            &[rel_path.clone()],
+            &self.registry,
+        );
+
+        let result = merge_file_entities(&mut state, &rel_path, &self.registry)
+            .map_err(|e| internal_err(e.to_string()))?;
+        let _ = state.save();
+
+        let response = serde_json::json!({
+            "file_path": result.file_path,
+            "entities_auto_merged": result.entities_auto_merged,
+            "entities_conflicted": result.entities_conflicted,
+            "clean": result.entities_conflicted == 0,
+            "merged_content": result.merged_content,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&response).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(description = "Resolve a conflict on an entity by providing the resolved content. Merges version vectors and clears conflict state.")]
+    async fn weave_resolve_conflict(
+        &self,
+        Parameters(params): Parameters<ResolveConflictParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ctx = self
+            .get_context(Some(&params.file_path))
+            .await
+            .map_err(internal_err)?;
+        let (rel_path, abs_path) =
+            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let entity_id =
+            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
+                .map_err(internal_err)?;
+
+        let hash = format!("{:x}", content_hash_u64(&params.resolved_content));
+
+        let mut state = ctx.state.lock().await;
+        resolve_entity_conflict(&mut state, &params.agent_id, &entity_id, &params.resolved_content, &hash)
+            .map_err(|e| internal_err(e.to_string()))?;
+        let _ = state.save();
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "entity": params.entity_name,
+                "resolved": true,
+                "content_hash": hash,
+            })
+            .to_string(),
         )]))
     }
 }
