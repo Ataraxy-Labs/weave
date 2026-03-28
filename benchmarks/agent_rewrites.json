@@ -1,0 +1,502 @@
+[
+  {
+    "agent_idx": 0,
+    "func_idx": 0,
+    "task": "Add input validation (check id exists, is a string, reasonable length)",
+    "original": "export function handler0(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "rewritten": "export function handler0(req: Request, res: Response) {\n    const id = req.params.id;\n    if (typeof id !== 'string' || !id || id.length > 64) {\n        return res.status(400).json({ error: 'Invalid id parameter' });\n    }\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 135,
+    "tokens_out": 115
+  },
+  {
+    "agent_idx": 1,
+    "func_idx": 1,
+    "task": "Add a caching layer (check cache first, set cache after db query, with TTL)",
+    "original": "export function handler1(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    return res.json({ result: data, table: 'orders' });\n}",
+    "rewritten": "export async function handler1(req: Request, res: Response) {\n    const id = req.params.id;\n    const cacheKey = `orders:${id}`;\n    let data = await cache.get(cacheKey);\n    if (data) {\n        return res.json({ result: data, table: 'orders', cache: true });\n    }\n    data = await db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    await cache.set(cacheKey, data, { ttl: 60 * 5 });\n    return res.json({ result: data, table: 'orders', cache: false });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 138,
+    "tokens_out": 144
+  },
+  {
+    "agent_idx": 2,
+    "func_idx": 2,
+    "task": "Add error handling with try/catch and structured error logging",
+    "original": "export function handler2(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "rewritten": "export function handler2(req: Request, res: Response) {\n    try {\n        const id = req.params.id;\n        const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n        if (!data) {\n            return res.status(404).json({ error: 'products not found' });\n        }\n        return res.json({ result: data, table: 'products' });\n    } catch (error) {\n        console.error('Error in handler2:', {\n            message: (error as Error).message,\n            stack: (error as Error).stack,\n            params: req.params,\n            path: req.path\n        });\n        return res.status(500).json({ error: 'Internal server error' });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 132,
+    "tokens_out": 153
+  },
+  {
+    "agent_idx": 3,
+    "func_idx": 3,
+    "task": "Add request logging with timing metrics (log start, duration, result)",
+    "original": "export function handler3(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'sessions not found' });\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "rewritten": "export function handler3(req: Request, res: Response) {\n    const start = Date.now();\n    console.log(`handler3: Start handling request for id=${req.params.id}`);\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    const duration = Date.now() - start;\n    if (!data) {\n        console.log(`handler3: Not found. Duration: ${duration}ms`);\n        return res.status(404).json({ error: 'sessions not found' });\n    }\n    console.log(`handler3: Success. Duration: ${duration}ms. Result:`, data);\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 152
+  },
+  {
+    "agent_idx": 4,
+    "func_idx": 4,
+    "task": "Add pagination support (page, limit query params, return total count)",
+    "original": "export function handler4(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    return res.json({ result: data, table: 'events' });\n}",
+    "rewritten": "export function handler4(req: Request, res: Response) {\n    const id = req.params.id;\n    const page = parseInt(req.query.page as string) || 1;\n    const limit = parseInt(req.query.limit as string) || 10;\n    const offset = (page - 1) * limit;\n\n    const totalResult = db.query('SELECT COUNT(*) as count FROM events WHERE id = ?', [id]);\n    const total = totalResult && totalResult[0] ? totalResult[0].count : 0;\n\n    const data = db.query('SELECT * FROM events WHERE id = ? LIMIT ? OFFSET ?', [id, limit, offset]);\n\n    if (!data || data.length === 0) return res.status(404).json({ error: 'events not found' });\n\n    return res.json({ result: data, table: 'events', total, page, limit });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 185
+  },
+  {
+    "agent_idx": 5,
+    "func_idx": 5,
+    "task": "Add rate limiting (track requests per IP, return 429 if over limit)",
+    "original": "export function handler5(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "rewritten": "const rateLimitMap: Map<string, { count: number; lastRequest: number }> = new Map();\nconst RATE_LIMIT = 100; // max requests\nconst RATE_WINDOW = 60 * 1000; // 1 minute\n\nexport function handler5(req: Request, res: Response) {\n    const ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress || '';\n    const now = Date.now();\n    const rateData = rateLimitMap.get(ip as string);\n\n    if (rateData) {\n        if (now - rateData.lastRequest < RATE_WINDOW) {\n            rateData.count += 1;\n            if (rateData.count > RATE_LIMIT) {\n                return res.status(429).json({ error: 'Too many requests. Please try again later.' });\n            }\n        } else {\n            rateData.count = 1;\n            rateData.lastRequest = now;\n        }\n        rateLimitMap.set(ip as string, rateData);\n    } else {\n        rateLimitMap.set(ip as string, { count: 1, lastRequest: now });\n    }\n\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 136,
+    "tokens_out": 291
+  },
+  {
+    "agent_idx": 6,
+    "func_idx": 6,
+    "task": "Refactor to async/await with proper error propagation",
+    "original": "export function handler6(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    return res.json({ result: data, table: 'orders' });\n}",
+    "rewritten": "export async function handler6(req: Request, res: Response) {\n    try {\n        const id = req.params.id;\n        const data = await db.query('SELECT * FROM orders WHERE id = ?', [id]);\n        if (!data) return res.status(404).json({ error: 'orders not found' });\n        return res.json({ result: data, table: 'orders' });\n    } catch (error) {\n        return res.status(500).json({ error: 'Internal server error', details: error instanceof Error ? error.message : error });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 131,
+    "tokens_out": 117
+  },
+  {
+    "agent_idx": 7,
+    "func_idx": 7,
+    "task": "Add input validation (check id exists, is a string, reasonable length)",
+    "original": "export function handler7(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "rewritten": "export function handler7(req: Request, res: Response) {\n    const id = req.params.id;\n    if (typeof id !== 'string' || !id || id.length > 64) {\n        return res.status(400).json({ error: 'Invalid id parameter' });\n    }\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 135,
+    "tokens_out": 115
+  },
+  {
+    "agent_idx": 8,
+    "func_idx": 8,
+    "task": "Add a caching layer (check cache first, set cache after db query, with TTL)",
+    "original": "export function handler8(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'sessions not found' });\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "rewritten": "export async function handler8(req: Request, res: Response) {\n    const id = req.params.id;\n    const cacheKey = `session:${id}`;\n    const cached = await cache.get(cacheKey);\n    if (cached) {\n        return res.json({ result: cached, table: 'sessions', cached: true });\n    }\n    const data = await db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'sessions not found' });\n    await cache.set(cacheKey, data, { ttl: 60 * 5 }); // cache for 5 minutes\n    return res.json({ result: data, table: 'sessions', cached: false });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 138,
+    "tokens_out": 152
+  },
+  {
+    "agent_idx": 9,
+    "func_idx": 9,
+    "task": "Add error handling with try/catch and structured error logging",
+    "original": "export function handler9(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    return res.json({ result: data, table: 'events' });\n}",
+    "rewritten": "export function handler9(req: Request, res: Response) {\n    try {\n        const id = req.params.id;\n        const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n        if (!data) {\n            return res.status(404).json({ error: 'events not found' });\n        }\n        return res.json({ result: data, table: 'events' });\n    } catch (error) {\n        console.error({\n            message: 'Error in handler9',\n            error: error instanceof Error ? error.message : error,\n            stack: error instanceof Error ? error.stack : undefined,\n            params: req.params,\n            query: req.query,\n            body: req.body\n        });\n        return res.status(500).json({ error: 'Internal server error' });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 132,
+    "tokens_out": 166
+  },
+  {
+    "agent_idx": 10,
+    "func_idx": 10,
+    "task": "Add request logging with timing metrics (log start, duration, result)",
+    "original": "export function handler10(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "rewritten": "export function handler10(req: Request, res: Response) {\n    const start = Date.now();\n    console.log(`Request handler10 started for id=${req.params.id}`);\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    const duration = Date.now() - start;\n    if (!data) {\n        console.log(`handler10 completed (id=${id}) in ${duration}ms: users not found`);\n        return res.status(404).json({ error: 'users not found' });\n    }\n    console.log(`handler10 completed (id=${id}) in ${duration}ms: result found`);\n    return res.json({ result: data, table: 'users' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 155
+  },
+  {
+    "agent_idx": 11,
+    "func_idx": 11,
+    "task": "Add pagination support (page, limit query params, return total count)",
+    "original": "export function handler11(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    return res.json({ result: data, table: 'orders' });\n}",
+    "rewritten": "export function handler11(req: Request, res: Response) {\n    const id = req.params.id;\n    const page = parseInt(req.query.page as string) || 1;\n    const limit = parseInt(req.query.limit as string) || 10;\n    const offset = (page - 1) * limit;\n\n    const totalCountResult = db.query('SELECT COUNT(*) as count FROM orders WHERE id = ?', [id]);\n    const totalCount = totalCountResult && totalCountResult[0] ? totalCountResult[0].count : 0;\n\n    if (totalCount === 0) return res.status(404).json({ error: 'orders not found' });\n\n    const data = db.query('SELECT * FROM orders WHERE id = ? LIMIT ? OFFSET ?', [id, limit, offset]);\n    return res.json({ result: data, table: 'orders', total: totalCount, page, limit });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 191
+  },
+  {
+    "agent_idx": 12,
+    "func_idx": 12,
+    "task": "Add rate limiting (track requests per IP, return 429 if over limit)",
+    "original": "export function handler12(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "rewritten": "export function handler12(req: Request, res: Response) {\n    const RATE_LIMIT = 100; // max requests\n    const WINDOW_MS = 60 * 60 * 1000; // 1 hour\n    const ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;\n    if (!globalThis.rateLimits) globalThis.rateLimits = new Map<string, { count: number, reset: number }>();\n    const now = Date.now();\n    let rateInfo = globalThis.rateLimits.get(ip);\n    if (!rateInfo || now > rateInfo.reset) {\n        rateInfo = { count: 1, reset: now + WINDOW_MS };\n        globalThis.rateLimits.set(ip, rateInfo);\n    } else {\n        rateInfo.count++;\n        if (rateInfo.count > RATE_LIMIT) {\n            return res.status(429).json({ error: 'Too many requests. Please try again later.' });\n        }\n        globalThis.rateLimits.set(ip, rateInfo);\n    }\n\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 136,
+    "tokens_out": 273
+  },
+  {
+    "agent_idx": 13,
+    "func_idx": 13,
+    "task": "Refactor to async/await with proper error propagation",
+    "original": "export function handler13(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'sessions not found' });\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "rewritten": "export async function handler13(req: Request, res: Response) {\n    try {\n        const id = req.params.id;\n        const data = await db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n        if (!data) return res.status(404).json({ error: 'sessions not found' });\n        return res.json({ result: data, table: 'sessions' });\n    } catch (error) {\n        return res.status(500).json({ error: 'Internal server error', details: error instanceof Error ? error.message : error });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 131,
+    "tokens_out": 117
+  },
+  {
+    "agent_idx": 14,
+    "func_idx": 14,
+    "task": "Add input validation (check id exists, is a string, reasonable length)",
+    "original": "export function handler14(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    return res.json({ result: data, table: 'events' });\n}",
+    "rewritten": "export function handler14(req: Request, res: Response) {\n    const id = req.params.id;\n    if (\n        typeof id !== 'string' ||\n        !id ||\n        id.length < 1 ||\n        id.length > 128\n    ) {\n        return res.status(400).json({ error: 'Invalid id parameter' });\n    }\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    return res.json({ result: data, table: 'events' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 135,
+    "tokens_out": 127
+  },
+  {
+    "agent_idx": 15,
+    "func_idx": 15,
+    "task": "Add a caching layer (check cache first, set cache after db query, with TTL)",
+    "original": "export function handler15(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "rewritten": "export async function handler15(req: Request, res: Response) {\n    const id = req.params.id;\n    const cacheKey = `users:${id}`;\n    let data = await cache.get(cacheKey);\n    if (data) {\n        return res.json({ result: data, table: 'users', cached: true });\n    }\n    data = await db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    await cache.set(cacheKey, data, { ttl: 60 * 5 }); // cache for 5 minutes\n    return res.json({ result: data, table: 'users' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 138,
+    "tokens_out": 148
+  },
+  {
+    "agent_idx": 16,
+    "func_idx": 16,
+    "task": "Add error handling with try/catch and structured error logging",
+    "original": "export function handler16(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    return res.json({ result: data, table: 'orders' });\n}",
+    "rewritten": "export function handler16(req: Request, res: Response) {\n    try {\n        const id = req.params.id;\n        const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n        if (!data) {\n            return res.status(404).json({ error: 'orders not found' });\n        }\n        return res.json({ result: data, table: 'orders' });\n    } catch (error) {\n        console.error({\n            message: 'Error in handler16',\n            error: error instanceof Error ? error.message : String(error),\n            stack: error instanceof Error ? error.stack : undefined,\n            params: req.params,\n        });\n        return res.status(500).json({ error: 'Internal server error' });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 132,
+    "tokens_out": 155
+  },
+  {
+    "agent_idx": 17,
+    "func_idx": 17,
+    "task": "Add request logging with timing metrics (log start, duration, result)",
+    "original": "export function handler17(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "rewritten": "export function handler17(req: Request, res: Response) {\n    const start = Date.now();\n    console.log(`[handler17] Request start: id=${req.params.id}`);\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    const duration = Date.now() - start;\n    if (!data) {\n        console.log(`[handler17] Not found. Duration: ${duration}ms`);\n        return res.status(404).json({ error: 'products not found', duration });\n    }\n    console.log(`[handler17] Success. Duration: ${duration}ms`);\n    return res.json({ result: data, table: 'products', duration });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 148
+  },
+  {
+    "agent_idx": 18,
+    "func_idx": 18,
+    "task": "Add pagination support (page, limit query params, return total count)",
+    "original": "export function handler18(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'sessions not found' });\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "rewritten": "export function handler18(req: Request, res: Response) {\n    const id = req.params.id;\n    const page = parseInt(req.query.page as string) || 1;\n    const limit = parseInt(req.query.limit as string) || 10;\n    const offset = (page - 1) * limit;\n\n    const totalCountResult = db.query('SELECT COUNT(*) as count FROM sessions WHERE id = ?', [id]);\n    const totalCount = totalCountResult && totalCountResult[0] ? totalCountResult[0].count : 0;\n\n    const data = db.query('SELECT * FROM sessions WHERE id = ? LIMIT ? OFFSET ?', [id, limit, offset]);\n    if (!data || data.length === 0) return res.status(404).json({ error: 'sessions not found' });\n    return res.json({ result: data, table: 'sessions', total: totalCount, page, limit });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 193
+  },
+  {
+    "agent_idx": 19,
+    "func_idx": 19,
+    "task": "Add rate limiting (track requests per IP, return 429 if over limit)",
+    "original": "export function handler19(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    return res.json({ result: data, table: 'events' });\n}",
+    "rewritten": "export function handler19(req: Request, res: Response) {\n    const RATE_LIMIT = 100; // max requests\n    const WINDOW_MS = 60 * 60 * 1000; // 1 hour\n    if (!(global as any).ipRequests) {\n        (global as any).ipRequests = new Map();\n    }\n    const ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;\n    const ipMap = (global as any).ipRequests as Map<string, { count: number, start: number }>;\n    let entry = ipMap.get(ip as string);\n    const now = Date.now();\n    if (!entry || now - entry.start > WINDOW_MS) {\n        entry = { count: 1, start: now };\n        ipMap.set(ip as string, entry);\n    } else {\n        entry.count++;\n        if (entry.count > RATE_LIMIT) {\n            return res.status(429).json({ error: 'Too many requests' });\n        }\n    }\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    return res.json({ result: data, table: 'events' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 136,
+    "tokens_out": 274
+  },
+  {
+    "agent_idx": 20,
+    "func_idx": 20,
+    "task": "Refactor to async/await with proper error propagation",
+    "original": "export function handler20(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "rewritten": "export async function handler20(req: Request, res: Response) {\n    const id = req.params.id;\n    try {\n        const data = await db.query('SELECT * FROM users WHERE id = ?', [id]);\n        if (!data) return res.status(404).json({ error: 'users not found' });\n        return res.json({ result: data, table: 'users' });\n    } catch (error) {\n        return res.status(500).json({ error: 'Internal server error', details: error instanceof Error ? error.message : String(error) });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 131,
+    "tokens_out": 119
+  },
+  {
+    "agent_idx": 21,
+    "func_idx": 21,
+    "task": "Add input validation (check id exists, is a string, reasonable length)",
+    "original": "export function handler21(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    return res.json({ result: data, table: 'orders' });\n}",
+    "rewritten": "export function handler21(req: Request, res: Response) {\n    const id = req.params.id;\n\n    if (\n        typeof id !== 'string' ||\n        !id ||\n        id.length < 1 ||\n        id.length > 64\n    ) {\n        return res.status(400).json({ error: 'Invalid id parameter' });\n    }\n\n    const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    return res.json({ result: data, table: 'orders' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 135,
+    "tokens_out": 127
+  },
+  {
+    "agent_idx": 22,
+    "func_idx": 22,
+    "task": "Add a caching layer (check cache first, set cache after db query, with TTL)",
+    "original": "export function handler22(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "rewritten": "export async function handler22(req: Request, res: Response) {\n    const id = req.params.id;\n    const cacheKey = `products:${id}`;\n    let data = await cache.get(cacheKey);\n    if (!data) {\n        data = await db.query('SELECT * FROM products WHERE id = ?', [id]);\n        if (!data) return res.status(404).json({ error: 'products not found' });\n        await cache.set(cacheKey, data, { ttl: 3600 }); // TTL 1 hour\n    }\n    return res.json({ result: data, table: 'products' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 138,
+    "tokens_out": 127
+  },
+  {
+    "agent_idx": 23,
+    "func_idx": 23,
+    "task": "Add error handling with try/catch and structured error logging",
+    "original": "export function handler23(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'sessions not found' });\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "rewritten": "export function handler23(req: Request, res: Response) {\n    try {\n        const id = req.params.id;\n        const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n        if (!data) {\n            return res.status(404).json({ error: 'sessions not found' });\n        }\n        return res.json({ result: data, table: 'sessions' });\n    } catch (error) {\n        console.error({\n            message: 'Error in handler23',\n            error: error instanceof Error ? error.message : error,\n            stack: error instanceof Error ? error.stack : undefined,\n            params: req.params\n        });\n        return res.status(500).json({ error: 'Internal server error' });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 132,
+    "tokens_out": 154
+  },
+  {
+    "agent_idx": 24,
+    "func_idx": 24,
+    "task": "Add request logging with timing metrics (log start, duration, result)",
+    "original": "export function handler24(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    return res.json({ result: data, table: 'events' });\n}",
+    "rewritten": "export function handler24(req: Request, res: Response) {\n    const start = Date.now();\n    console.log(`[handler24] Start request for id: ${req.params.id}`);\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    const duration = Date.now() - start;\n    if (!data) {\n        console.log(`[handler24] Request for id: ${id} failed (not found), duration: ${duration}ms`);\n        return res.status(404).json({ error: 'events not found' });\n    }\n    console.log(`[handler24] Request for id: ${id} succeeded, duration: ${duration}ms, result:`, data);\n    return res.json({ result: data, table: 'events' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 168
+  },
+  {
+    "agent_idx": 25,
+    "func_idx": 25,
+    "task": "Add pagination support (page, limit query params, return total count)",
+    "original": "export function handler25(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "rewritten": "export function handler25(req: Request, res: Response) {\n    const id = req.params.id;\n    const page = parseInt(req.query.page as string) || 1;\n    const limit = parseInt(req.query.limit as string) || 10;\n    const offset = (page - 1) * limit;\n\n    // Get total count\n    const countResult = db.query('SELECT COUNT(*) as total FROM users WHERE id = ?', [id]);\n    const total = countResult && countResult[0] ? countResult[0].total : 0;\n\n    // Get paginated data\n    const data = db.query('SELECT * FROM users WHERE id = ? LIMIT ? OFFSET ?', [id, limit, offset]);\n    if (!data || data.length === 0) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users', total, page, limit });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 198
+  },
+  {
+    "agent_idx": 26,
+    "func_idx": 26,
+    "task": "Add rate limiting (track requests per IP, return 429 if over limit)",
+    "original": "export function handler26(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    return res.json({ result: data, table: 'orders' });\n}",
+    "rewritten": "export function handler26(req: Request, res: Response) {\n    const RATE_LIMIT = 100; // max requests\n    const TIME_WINDOW = 60 * 1000; // in ms (1 minute)\n    if (!(global as any).ipRequests) (global as any).ipRequests = {};\n    const ip = req.ip || (req.headers['x-forwarded-for'] as string) || req.connection.remoteAddress;\n    const now = Date.now();\n    const ipRequests = (global as any).ipRequests;\n\n    if (!ipRequests[ip]) {\n        ipRequests[ip] = [];\n    }\n    ipRequests[ip] = ipRequests[ip].filter((timestamp: number) => now - timestamp < TIME_WINDOW);\n    if (ipRequests[ip].length >= RATE_LIMIT) {\n        return res.status(429).json({ error: 'Too many requests. Please try again later.' });\n    }\n    ipRequests[ip].push(now);\n\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    return res.json({ result: data, table: 'orders' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 136,
+    "tokens_out": 257
+  },
+  {
+    "agent_idx": 27,
+    "func_idx": 27,
+    "task": "Refactor to async/await with proper error propagation",
+    "original": "export function handler27(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "rewritten": "export async function handler27(req: Request, res: Response) {\n    const id = req.params.id;\n    try {\n        const data = await db.query('SELECT * FROM products WHERE id = ?', [id]);\n        if (!data) return res.status(404).json({ error: 'products not found' });\n        return res.json({ result: data, table: 'products' });\n    } catch (error) {\n        return res.status(500).json({ error: 'Internal server error', details: error instanceof Error ? error.message : error });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 131,
+    "tokens_out": 117
+  },
+  {
+    "agent_idx": 28,
+    "func_idx": 28,
+    "task": "Add input validation (check id exists, is a string, reasonable length)",
+    "original": "export function handler28(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'sessions not found' });\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "rewritten": "export function handler28(req: Request, res: Response) {\n    const id = req.params.id;\n\n    if (\n        typeof id !== 'string' ||\n        !id ||\n        id.length < 1 ||\n        id.length > 128\n    ) {\n        return res.status(400).json({ error: 'Invalid id parameter' });\n    }\n\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'sessions not found' });\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 135,
+    "tokens_out": 127
+  },
+  {
+    "agent_idx": 29,
+    "func_idx": 29,
+    "task": "Add a caching layer (check cache first, set cache after db query, with TTL)",
+    "original": "export function handler29(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    return res.json({ result: data, table: 'events' });\n}",
+    "rewritten": "export async function handler29(req: Request, res: Response) {\n    const id = req.params.id;\n    const cacheKey = `events:${id}`;\n    const cached = await cache.get(cacheKey);\n    if (cached) {\n        return res.json({ result: cached, table: 'events', cache: true });\n    }\n    const data = await db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    await cache.set(cacheKey, data, { ttl: 60 * 5 }); // cache 5 minutes\n    return res.json({ result: data, table: 'events', cache: false });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 138,
+    "tokens_out": 151
+  },
+  {
+    "agent_idx": 30,
+    "func_idx": 30,
+    "task": "Add error handling with try/catch and structured error logging",
+    "original": "export function handler30(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "rewritten": "export function handler30(req: Request, res: Response) {\n    try {\n        const id = req.params.id;\n        const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n        if (!data) {\n            return res.status(404).json({ error: 'users not found' });\n        }\n        return res.json({ result: data, table: 'users' });\n    } catch (error) {\n        console.error({\n            message: 'Error in handler30',\n            error: error instanceof Error ? error.message : error,\n            stack: error instanceof Error ? error.stack : undefined,\n            params: req.params,\n            time: new Date().toISOString()\n        });\n        return res.status(500).json({ error: 'Internal server error' });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 132,
+    "tokens_out": 163
+  },
+  {
+    "agent_idx": 31,
+    "func_idx": 31,
+    "task": "Add request logging with timing metrics (log start, duration, result)",
+    "original": "export function handler31(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    return res.json({ result: data, table: 'orders' });\n}",
+    "rewritten": "export function handler31(req: Request, res: Response) {\n    const start = Date.now();\n    console.log(`[handler31] Start request for id=${req.params.id}`);\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    const duration = Date.now() - start;\n    if (!data) {\n        console.log(`[handler31] Not found (id=${id}) - Duration: ${duration}ms`);\n        return res.status(404).json({ error: 'orders not found' });\n    }\n    console.log(`[handler31] Success (id=${id}) - Duration: ${duration}ms - Result:`, data);\n    return res.json({ result: data, table: 'orders' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 161
+  },
+  {
+    "agent_idx": 32,
+    "func_idx": 32,
+    "task": "Add pagination support (page, limit query params, return total count)",
+    "original": "export function handler32(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "rewritten": "export function handler32(req: Request, res: Response) {\n    const id = req.params.id;\n    const page = parseInt(req.query.page as string, 10) || 1;\n    const limit = parseInt(req.query.limit as string, 10) || 10;\n    const offset = (page - 1) * limit;\n\n    const totalResult = db.query('SELECT COUNT(*) as count FROM products WHERE id = ?', [id]);\n    const total = totalResult && totalResult[0] ? totalResult[0].count : 0;\n\n    if (total === 0) return res.status(404).json({ error: 'products not found' });\n\n    const data = db.query('SELECT * FROM products WHERE id = ? LIMIT ? OFFSET ?', [id, limit, offset]);\n    return res.json({ result: data, table: 'products', total });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 184
+  },
+  {
+    "agent_idx": 33,
+    "func_idx": 33,
+    "task": "Add rate limiting (track requests per IP, return 429 if over limit)",
+    "original": "export function handler33(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'sessions not found' });\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "rewritten": "const rateLimitMap: Map<string, { count: number; timestamp: number }> = new Map();\nconst RATE_LIMIT = 100; // Max requests\nconst RATE_WINDOW_MS = 60 * 1000; // 1 minute\n\nexport function handler33(req: Request, res: Response) {\n    const ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress || '';\n    const now = Date.now();\n    const entry = rateLimitMap.get(ip) || { count: 0, timestamp: now };\n    if (now - entry.timestamp > RATE_WINDOW_MS) {\n        rateLimitMap.set(ip, { count: 1, timestamp: now });\n    } else {\n        if (entry.count >= RATE_LIMIT) {\n            return res.status(429).json({ error: 'Too many requests' });\n        }\n        rateLimitMap.set(ip, { count: entry.count + 1, timestamp: entry.timestamp });\n    }\n\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'sessions not found' });\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 136,
+    "tokens_out": 261
+  },
+  {
+    "agent_idx": 34,
+    "func_idx": 34,
+    "task": "Refactor to async/await with proper error propagation",
+    "original": "export function handler34(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    return res.json({ result: data, table: 'events' });\n}",
+    "rewritten": "export async function handler34(req: Request, res: Response) {\n    try {\n        const id = req.params.id;\n        const data = await db.query('SELECT * FROM events WHERE id = ?', [id]);\n        if (!data) {\n            return res.status(404).json({ error: 'events not found' });\n        }\n        return res.json({ result: data, table: 'events' });\n    } catch (error) {\n        return res.status(500).json({ error: 'Internal server error' });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 131,
+    "tokens_out": 111
+  },
+  {
+    "agent_idx": 35,
+    "func_idx": 35,
+    "task": "Add input validation (check id exists, is a string, reasonable length)",
+    "original": "export function handler35(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "rewritten": "export function handler35(req: Request, res: Response) {\n    const id = req.params.id;\n    if (\n        typeof id !== 'string' ||\n        !id ||\n        id.length < 1 ||\n        id.length > 64\n    ) {\n        return res.status(400).json({ error: 'Invalid id parameter' });\n    }\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 135,
+    "tokens_out": 127
+  },
+  {
+    "agent_idx": 36,
+    "func_idx": 36,
+    "task": "Add a caching layer (check cache first, set cache after db query, with TTL)",
+    "original": "export function handler36(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    return res.json({ result: data, table: 'orders' });\n}",
+    "rewritten": "export async function handler36(req: Request, res: Response) {\n    const id = req.params.id;\n    const cacheKey = `orders:${id}`;\n    let data = await cache.get(cacheKey);\n    if (data) {\n        return res.json({ result: data, table: 'orders', cached: true });\n    }\n    data = await db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    await cache.set(cacheKey, data, { ttl: 60 * 5 }); // cache for 5 minutes\n    return res.json({ result: data, table: 'orders', cached: false });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 138,
+    "tokens_out": 151
+  },
+  {
+    "agent_idx": 37,
+    "func_idx": 37,
+    "task": "Add error handling with try/catch and structured error logging",
+    "original": "export function handler37(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "rewritten": "export function handler37(req: Request, res: Response) {\n    try {\n        const id = req.params.id;\n        const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n        if (!data) {\n            return res.status(404).json({ error: 'products not found' });\n        }\n        return res.json({ result: data, table: 'products' });\n    } catch (error) {\n        console.error({\n            message: 'Error in handler37',\n            error: error instanceof Error ? error.message : String(error),\n            stack: error instanceof Error ? error.stack : undefined,\n            params: req.params,\n            url: req.originalUrl\n        });\n        return res.status(500).json({ error: 'Internal server error' });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 132,
+    "tokens_out": 162
+  },
+  {
+    "agent_idx": 38,
+    "func_idx": 38,
+    "task": "Add request logging with timing metrics (log start, duration, result)",
+    "original": "export function handler38(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'sessions not found' });\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "rewritten": "export function handler38(req: Request, res: Response) {\n    const start = Date.now();\n    console.log(`[handler38] Start request: ${req.method} ${req.originalUrl} at ${new Date(start).toISOString()}`);\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    const duration = Date.now() - start;\n    if (!data) {\n        console.log(`[handler38] End request: Not found (404), duration: ${duration}ms`);\n        return res.status(404).json({ error: 'sessions not found' });\n    }\n    console.log(`[handler38] End request: Success, duration: ${duration}ms, result: ${JSON.stringify(data)}`);\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 175
+  },
+  {
+    "agent_idx": 39,
+    "func_idx": 39,
+    "task": "Add pagination support (page, limit query params, return total count)",
+    "original": "export function handler39(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    return res.json({ result: data, table: 'events' });\n}",
+    "rewritten": "export function handler39(req: Request, res: Response) {\n    const id = req.params.id;\n    const page = parseInt(req.query.page as string) || 1;\n    const limit = parseInt(req.query.limit as string) || 10;\n    const offset = (page - 1) * limit;\n\n    const totalResult = db.query('SELECT COUNT(*) as count FROM events WHERE id = ?', [id]);\n    const total = totalResult && totalResult[0] ? totalResult[0].count : 0;\n\n    const data = db.query('SELECT * FROM events WHERE id = ? LIMIT ? OFFSET ?', [id, limit, offset]);\n    if (!data || data.length === 0) return res.status(404).json({ error: 'events not found' });\n\n    return res.json({\n        result: data,\n        table: 'events',\n        total,\n        page,\n        limit\n    });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 192
+  },
+  {
+    "agent_idx": 40,
+    "func_idx": 40,
+    "task": "Add rate limiting (track requests per IP, return 429 if over limit)",
+    "original": "export function handler40(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "rewritten": "export function handler40(req: Request, res: Response) {\n    const RATE_LIMIT = 100; // max requests\n    const WINDOW_MS = 60 * 1000; // per minute\n    const ip = req.ip;\n    if (!(global as any).rateLimitStore) {\n        (global as any).rateLimitStore = new Map<string, { count: number, firstRequest: number }>();\n    }\n    const store = (global as any).rateLimitStore as Map<string, { count: number, firstRequest: number }>;\n    const now = Date.now();\n    let record = store.get(ip);\n    if (!record) {\n        record = { count: 1, firstRequest: now };\n        store.set(ip, record);\n    } else {\n        if (now - record.firstRequest < WINDOW_MS) {\n            record.count += 1;\n        } else {\n            record.count = 1;\n            record.firstRequest = now;\n        }\n    }\n    if (record.count > RATE_LIMIT) {\n        return res.status(429).json({ error: 'Too many requests' });\n    }\n\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 136,
+    "tokens_out": 294
+  },
+  {
+    "agent_idx": 41,
+    "func_idx": 41,
+    "task": "Refactor to async/await with proper error propagation",
+    "original": "export function handler41(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    return res.json({ result: data, table: 'orders' });\n}",
+    "rewritten": "export async function handler41(req: Request, res: Response) {\n    const id = req.params.id;\n    try {\n        const data = await db.query('SELECT * FROM orders WHERE id = ?', [id]);\n        if (!data) return res.status(404).json({ error: 'orders not found' });\n        return res.json({ result: data, table: 'orders' });\n    } catch (error) {\n        return res.status(500).json({ error: 'Internal server error' });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 131,
+    "tokens_out": 107
+  },
+  {
+    "agent_idx": 42,
+    "func_idx": 42,
+    "task": "Add input validation (check id exists, is a string, reasonable length)",
+    "original": "export function handler42(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "rewritten": "export function handler42(req: Request, res: Response) {\n    const id = req.params.id;\n    if (typeof id !== 'string' || !id || id.length > 64) {\n        return res.status(400).json({ error: 'Invalid id parameter' });\n    }\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 135,
+    "tokens_out": 115
+  },
+  {
+    "agent_idx": 43,
+    "func_idx": 43,
+    "task": "Add a caching layer (check cache first, set cache after db query, with TTL)",
+    "original": "export function handler43(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'sessions not found' });\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "rewritten": "export async function handler43(req: Request, res: Response) {\n    const id = req.params.id;\n    const cacheKey = `sessions:${id}`;\n    const ttl = 60 * 5; // 5 minutes\n\n    let data = await cache.get(cacheKey);\n    if (!data) {\n        data = await db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n        if (!data) return res.status(404).json({ error: 'sessions not found' });\n        await cache.set(cacheKey, data, ttl);\n    }\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 138,
+    "tokens_out": 131
+  },
+  {
+    "agent_idx": 44,
+    "func_idx": 44,
+    "task": "Add error handling with try/catch and structured error logging",
+    "original": "export function handler44(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    return res.json({ result: data, table: 'events' });\n}",
+    "rewritten": "export function handler44(req: Request, res: Response) {\n    try {\n        const id = req.params.id;\n        const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n        if (!data) {\n            return res.status(404).json({ error: 'events not found' });\n        }\n        return res.json({ result: data, table: 'events' });\n    } catch (error) {\n        console.error('Error in handler44:', {\n            message: (error as Error).message,\n            stack: (error as Error).stack,\n            params: req.params,\n            time: new Date().toISOString()\n        });\n        return res.status(500).json({ error: 'Internal server error' });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 132,
+    "tokens_out": 156
+  },
+  {
+    "agent_idx": 45,
+    "func_idx": 45,
+    "task": "Add request logging with timing metrics (log start, duration, result)",
+    "original": "export function handler45(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'users not found' });\n    return res.json({ result: data, table: 'users' });\n}",
+    "rewritten": "export function handler45(req: Request, res: Response) {\n    const startTime = Date.now();\n    console.log(`Request handler45 started for id: ${req.params.id}`);\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM users WHERE id = ?', [id]);\n    const duration = Date.now() - startTime;\n    if (!data) {\n        console.log(`handler45: users not found for id: ${id}. Duration: ${duration}ms`);\n        return res.status(404).json({ error: 'users not found' });\n    }\n    console.log(`handler45: Success for id: ${id}. Duration: ${duration}ms. Result:`, data);\n    return res.json({ result: data, table: 'users' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 164
+  },
+  {
+    "agent_idx": 46,
+    "func_idx": 46,
+    "task": "Add pagination support (page, limit query params, return total count)",
+    "original": "export function handler46(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM orders WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'orders not found' });\n    return res.json({ result: data, table: 'orders' });\n}",
+    "rewritten": "export function handler46(req: Request, res: Response) {\n    const id = req.params.id;\n    const page = parseInt(req.query.page as string) || 1;\n    const limit = parseInt(req.query.limit as string) || 10;\n    const offset = (page - 1) * limit;\n\n    const totalResult = db.query('SELECT COUNT(*) as count FROM orders WHERE id = ?', [id]);\n    const total = totalResult && totalResult[0] ? totalResult[0].count : 0;\n\n    if (total === 0) {\n        return res.status(404).json({ error: 'orders not found' });\n    }\n\n    const data = db.query('SELECT * FROM orders WHERE id = ? LIMIT ? OFFSET ?', [id, limit, offset]);\n\n    return res.json({\n        result: data,\n        table: 'orders',\n        total,\n        page,\n        limit\n    });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 134,
+    "tokens_out": 193
+  },
+  {
+    "agent_idx": 47,
+    "func_idx": 47,
+    "task": "Add rate limiting (track requests per IP, return 429 if over limit)",
+    "original": "export function handler47(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "rewritten": "const rateLimitWindowMs = 15 * 60 * 1000; // 15 minutes\nconst rateLimitMaxRequests = 100;\nconst rateLimitStore: Record<string, { count: number; firstRequest: number }> = {};\n\nexport function handler47(req: Request, res: Response) {\n    const ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress || '';\n    const now = Date.now();\n    if (!rateLimitStore[ip]) {\n        rateLimitStore[ip] = { count: 1, firstRequest: now };\n    } else {\n        if (now - rateLimitStore[ip].firstRequest < rateLimitWindowMs) {\n            rateLimitStore[ip].count += 1;\n        } else {\n            rateLimitStore[ip] = { count: 1, firstRequest: now };\n        }\n    }\n    if (rateLimitStore[ip].count > rateLimitMaxRequests) {\n        return res.status(429).json({ error: 'Too many requests' });\n    }\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM products WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'products not found' });\n    return res.json({ result: data, table: 'products' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 136,
+    "tokens_out": 277
+  },
+  {
+    "agent_idx": 48,
+    "func_idx": 48,
+    "task": "Refactor to async/await with proper error propagation",
+    "original": "export function handler48(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'sessions not found' });\n    return res.json({ result: data, table: 'sessions' });\n}",
+    "rewritten": "export async function handler48(req: Request, res: Response) {\n    try {\n        const id = req.params.id;\n        const data = await db.query('SELECT * FROM sessions WHERE id = ?', [id]);\n        if (!data) return res.status(404).json({ error: 'sessions not found' });\n        return res.json({ result: data, table: 'sessions' });\n    } catch (error) {\n        return res.status(500).json({ error: 'Internal server error' });\n    }\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 131,
+    "tokens_out": 107
+  },
+  {
+    "agent_idx": 49,
+    "func_idx": 49,
+    "task": "Add input validation (check id exists, is a string, reasonable length)",
+    "original": "export function handler49(req: Request, res: Response) {\n    const id = req.params.id;\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    return res.json({ result: data, table: 'events' });\n}",
+    "rewritten": "export function handler49(req: Request, res: Response) {\n    const id = req.params.id;\n    if (\n        typeof id !== 'string' ||\n        !id ||\n        id.length > 64 ||\n        id.length < 1\n    ) {\n        return res.status(400).json({ error: 'Invalid id parameter' });\n    }\n    const data = db.query('SELECT * FROM events WHERE id = ?', [id]);\n    if (!data) return res.status(404).json({ error: 'events not found' });\n    return res.json({ result: data, table: 'events' });\n}",
+    "model": "gpt-4.1",
+    "tokens_in": 135,
+    "tokens_out": 127
+  }
+]

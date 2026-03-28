@@ -3299,6 +3299,7 @@ name = "weave-crdt"
 version = "0.2.6"
 dependencies = [
  "automerge",
+ "git2",
  "sem-core",
  "serde",
  "serde_json",

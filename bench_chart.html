@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Git vs Weave CRDT Merge Performance</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    gap: 32px;
+    padding: 40px 0;
+    -webkit-font-smoothing: antialiased;
+  }
+  .chart-container {
+    width: 880px;
+    padding: 48px 56px 40px;
+    background: #161b22;
+    border-radius: 16px;
+    border: 1px solid #30363d;
+  }
+  .title {
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.4px;
+    color: #f0f6fc;
+    text-align: center;
+  }
+  .subtitle {
+    font-size: 15px;
+    font-weight: 400;
+    color: #7d8590;
+    text-align: center;
+    margin-top: 6px;
+    margin-bottom: 36px;
+  }
+  .legend {
+    display: flex;
+    justify-content: center;
+    gap: 32px;
+    margin-bottom: 28px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #c9d1d9;
+  }
+  .legend-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+  }
+  svg text {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  .method-note {
+    font-size: 12px;
+    color: #484f58;
+    text-align: center;
+    margin-top: 16px;
+  }
+</style>
+</head>
+<body>
+
+<div class="chart-container">
+  <div class="title">50 GPT Agents Building Features: Merge Speed</div>
+  <div class="subtitle">Each agent builds a unique feature on a shared Express API</div>
+  <div class="legend">
+    <div class="legend-item">
+      <div class="legend-swatch" style="background: #f97316;"></div>
+      Git (worktrees + sequential merge)
+    </div>
+    <div class="legend-item">
+      <div class="legend-swatch" style="background: #2dd4bf;"></div>
+      Weave CRDT (entity-level merge)
+    </div>
+  </div>
+  <svg id="chart" viewBox="0 0 768 380" xmlns="http://www.w3.org/2000/svg"></svg>
+  <div class="method-note">GPT-4.1 agents, real code generation, measured on M3 MacBook Pro</div>
+</div>
+
+<script>
+(function() {
+  const data = [
+    { agents: 2,  git: 199,  crdt: 9,   ratio: '22x' },
+    { agents: 5,  git: 512,  crdt: 11,  ratio: '47x' },
+    { agents: 10, git: 1125, crdt: 21,  ratio: '54x' },
+    { agents: 20, git: 2069, crdt: 48,  ratio: '43x' },
+    { agents: 50, git: 5227, crdt: 181, ratio: '29x' },
+  ];
+
+  const svg = document.getElementById('chart');
+  const W = 768, H = 380;
+  const padL = 62, padR = 24, padT = 36, padB = 56;
+  const chartW = W - padL - padR;
+  const chartH = H - padT - padB;
+
+  const maxVal = 5500;
+  const yTicks = [0, 1000, 2000, 3000, 4000, 5000];
+
+  const gitColor = '#f97316';
+  const crdtColor = '#2dd4bf';
+  const gridColor = '#21262d';
+  const axisTextColor = '#7d8590';
+  const labelColor = '#e6edf3';
+
+  const groupCount = data.length;
+  const groupWidth = chartW / groupCount;
+  const barWidth = groupWidth * 0.28;
+  const barGap = 6;
+  const minBarH = 6;
+
+  function y(val) { return padT + chartH - (val / maxVal) * chartH; }
+  function x(i) { return padL + i * groupWidth + groupWidth / 2; }
+
+  function el(tag, attrs, text) {
+    const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  // Grid + Y labels
+  yTicks.forEach(tick => {
+    const yPos = y(tick);
+    svg.appendChild(el('line', {
+      x1: padL, y1: yPos, x2: W - padR, y2: yPos,
+      stroke: gridColor, 'stroke-width': 1
+    }));
+    svg.appendChild(el('text', {
+      x: padL - 12, y: yPos + 4,
+      fill: axisTextColor, 'font-size': '12', 'text-anchor': 'end', 'font-weight': '500'
+    }, tick === 0 ? '0' : tick.toLocaleString() + 'ms'));
+  });
+
+  // Bars
+  data.forEach((d, i) => {
+    const cx = x(i);
+    const gitX = cx - barGap / 2 - barWidth;
+    const crdtX = cx + barGap / 2;
+    const r = 4;
+
+    // Git bar
+    const gitH = Math.max((d.git / maxVal) * chartH, minBarH);
+    const gitY = padT + chartH - gitH;
+    svg.appendChild(el('rect', { x: gitX, y: gitY, width: barWidth, height: gitH, fill: gitColor, rx: r, ry: r }));
+    if (gitH > r) svg.appendChild(el('rect', { x: gitX, y: gitY + gitH - r, width: barWidth, height: r, fill: gitColor }));
+
+    // CRDT bar
+    const crdtH = Math.max((d.crdt / maxVal) * chartH, minBarH);
+    const crdtY = padT + chartH - crdtH;
+    svg.appendChild(el('rect', { x: crdtX, y: crdtY, width: barWidth, height: crdtH, fill: crdtColor, rx: r, ry: r }));
+    if (crdtH > r) svg.appendChild(el('rect', { x: crdtX, y: crdtY + crdtH - r, width: barWidth, height: r, fill: crdtColor }));
+
+    // Value labels
+    svg.appendChild(el('text', {
+      x: gitX + barWidth / 2, y: gitY - 8,
+      fill: labelColor, 'font-size': '12', 'font-weight': '600', 'text-anchor': 'middle'
+    }, d.git.toLocaleString() + 'ms'));
+
+    svg.appendChild(el('text', {
+      x: crdtX + barWidth / 2, y: crdtY - 18,
+      fill: labelColor, 'font-size': '12', 'font-weight': '600', 'text-anchor': 'middle'
+    }, d.crdt + 'ms'));
+
+    // X axis label
+    svg.appendChild(el('text', {
+      x: cx, y: padT + chartH + 22,
+      fill: axisTextColor, 'font-size': '13', 'font-weight': '600', 'text-anchor': 'middle'
+    }, d.agents + ' agents'));
+
+    // Ratio below
+    svg.appendChild(el('text', {
+      x: cx, y: padT + chartH + 40,
+      fill: crdtColor, 'font-size': '11', 'font-weight': '700', 'text-anchor': 'middle', opacity: '0.8'
+    }, d.ratio));
+  });
+})();
+</script>
+</body>
+</html>
