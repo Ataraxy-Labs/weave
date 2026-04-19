@@ -1240,6 +1240,7 @@ fn is_import_region(content: &str) -> bool {
             // Detect start of multi-line import: `import {` or `import (` without closing on same line
             if (trimmed.contains('{') && !trimmed.contains('}'))
                 || (trimmed.starts_with("import (") && !trimmed.contains(')'))
+                || (trimmed.starts_with("from ") && trimmed.contains("import (") && !trimmed.contains(')'))
             {
                 in_multiline_import = true;
             }
@@ -1367,7 +1368,8 @@ fn parse_import_statements(content: &str) -> (Vec<ImportStatement>, Vec<String>)
             let trimmed = line.trim();
             // Check for multi-line import: `import {` without `}` on same line
             let starts_multiline = (trimmed.contains('{') && !trimmed.contains('}'))
-                || (trimmed.starts_with("import (") && !trimmed.contains(')'));
+                || (trimmed.starts_with("import (") && !trimmed.contains(')'))
+                || (trimmed.starts_with("from ") && trimmed.contains("import (") && !trimmed.contains(')'));
 
             if starts_multiline {
                 let mut block_lines = vec![line.to_string()];
@@ -1581,7 +1583,8 @@ fn merge_imports_with_multiline(
         if is_import_line(line) {
             let trimmed = line.trim();
             let starts_multiline = (trimmed.contains('{') && !trimmed.contains('}'))
-                || (trimmed.starts_with("import (") && !trimmed.contains(')'));
+                || (trimmed.starts_with("import (") && !trimmed.contains(')'))
+                || (trimmed.starts_with("from ") && trimmed.contains("import (") && !trimmed.contains(')'));
 
             if starts_multiline && ours_imp_idx < ours_imports.len() {
                 let imp = &ours_imports[ours_imp_idx];
