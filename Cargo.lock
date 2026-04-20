@@ -2172,9 +2172,9 @@ dependencies = [
 
 [[package]]
 name = "sem-core"
-version = "0.3.20"
+version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51d25bebaa97c9171af5766a5e5f23f6eac23e3ed9f4915193900dc4c50236f8"
+checksum = "cbaabcd8f6c987298deab2bba7e81937bc1d0ab552393b15ec147e3109de306c"
 dependencies = [
  "git2",
  "rayon",
@@ -2209,6 +2209,7 @@ dependencies = [
  "tree-sitter-swift",
  "tree-sitter-typescript",
  "tree-sitter-xml",
+ "tree-sitter-zig",
  "xxhash-rust",
 ]
 
@@ -3080,6 +3081,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-zig"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab11fc124851b0db4dd5e55983bbd9631192e93238389dcd44521715e5d53e28"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3301,7 +3312,7 @@ dependencies = [
 
 [[package]]
 name = "weave-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "clap",
  "colored",
@@ -3316,7 +3327,7 @@ dependencies = [
 
 [[package]]
 name = "weave-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "diffy",
  "pretty_assertions",
@@ -3328,7 +3339,7 @@ dependencies = [
 
 [[package]]
 name = "weave-crdt"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "automerge",
  "sem-core",
@@ -3341,7 +3352,7 @@ dependencies = [
 
 [[package]]
 name = "weave-driver"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "env_logger",
  "log",
@@ -3353,7 +3364,7 @@ dependencies = [
 
 [[package]]
 name = "weave-github"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "base64",
@@ -3373,7 +3384,7 @@ dependencies = [
 
 [[package]]
 name = "weave-mcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "lru",
  "openssl",
