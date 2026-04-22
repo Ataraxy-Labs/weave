@@ -1174,8 +1174,8 @@ fn merge_interstitials(
                 // Theirs is whitespace-only, ours has real changes
                 merged.insert(key.to_string(), ours_content.to_string());
             } else if is_import_region(base_content)
-                && is_import_region(ours_content)
-                && is_import_region(theirs_content)
+                || is_import_region(ours_content)
+                || is_import_region(theirs_content)
             {
                 // Commutative merge: treat import lines as a set
                 let result = merge_imports_commutatively(base_content, ours_content, theirs_content);
@@ -1689,6 +1689,39 @@ fn merge_imports_with_multiline(
     }
 
     let mut result = result_parts.join("\n");
+
+    // Non-import lines: use diffy 3-way merge so adds/deletes/edits on
+    // either side are handled correctly (fixes #60).
+    let extract_non_imports = |content: &str| -> String {
+        content
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !is_import_line(l))
+            .filter(|l| {
+                let t = l.trim();
+                // Exclude multi-line import continuation lines (specifiers, closing parens/braces)
+                !(t.ends_with(',') && !t.contains('='))
+                    && t != ")"
+                    && t != "}"
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let base_ni = extract_non_imports(_base_raw);
+    let ours_ni = extract_non_imports(ours_raw);
+    let theirs_ni = extract_non_imports(_theirs_raw);
+
+    if !base_ni.is_empty() || !ours_ni.is_empty() || !theirs_ni.is_empty() {
+        let merged_ni = match diffy::merge(&base_ni, &ours_ni, &theirs_ni) {
+            Ok(m) => m,
+            Err(conflicted) => conflicted,
+        };
+        if !merged_ni.trim().is_empty() {
+            result.push('\n');
+            result.push('\n');
+            result.push_str(&merged_ni);
+        }
+    }
+
     let ours_trailing = ours_raw.len() - ours_raw.trim_end_matches('\n').len();
     let result_trailing = result.len() - result.trim_end_matches('\n').len();
     for _ in result_trailing..ours_trailing {
