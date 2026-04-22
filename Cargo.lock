@@ -3312,7 +3312,11 @@ dependencies = [
 
 [[package]]
 name = "weave-cli"
+<<<<<<< HEAD
 version = "0.3.1"
+=======
+version = "0.3.2"
+>>>>>>> 6def86e (Fix silent drop of non-import lines in import regions (fixes #60))
 dependencies = [
  "clap",
  "colored",
@@ -3327,7 +3331,11 @@ dependencies = [
 
 [[package]]
 name = "weave-core"
+<<<<<<< HEAD
 version = "0.3.1"
+=======
+version = "0.3.2"
+>>>>>>> 6def86e (Fix silent drop of non-import lines in import regions (fixes #60))
 dependencies = [
  "diffy",
  "pretty_assertions",
@@ -3339,7 +3347,11 @@ dependencies = [
 
 [[package]]
 name = "weave-crdt"
+<<<<<<< HEAD
 version = "0.3.1"
+=======
+version = "0.3.2"
+>>>>>>> 6def86e (Fix silent drop of non-import lines in import regions (fixes #60))
 dependencies = [
  "automerge",
  "sem-core",
@@ -3352,7 +3364,11 @@ dependencies = [
 
 [[package]]
 name = "weave-driver"
+<<<<<<< HEAD
 version = "0.3.1"
+=======
+version = "0.3.2"
+>>>>>>> 6def86e (Fix silent drop of non-import lines in import regions (fixes #60))
 dependencies = [
  "env_logger",
  "log",
@@ -3364,7 +3380,11 @@ dependencies = [
 
 [[package]]
 name = "weave-github"
+<<<<<<< HEAD
 version = "0.3.1"
+=======
+version = "0.3.2"
+>>>>>>> 6def86e (Fix silent drop of non-import lines in import regions (fixes #60))
 dependencies = [
  "axum",
  "base64",
@@ -3384,7 +3404,11 @@ dependencies = [
 
 [[package]]
 name = "weave-mcp"
+<<<<<<< HEAD
 version = "0.3.1"
+=======
+version = "0.3.2"
+>>>>>>> 6def86e (Fix silent drop of non-import lines in import regions (fixes #60))
 dependencies = [
  "lru",
  "openssl",

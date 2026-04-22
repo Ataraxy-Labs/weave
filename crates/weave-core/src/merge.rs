@@ -1174,8 +1174,8 @@ fn merge_interstitials(
                 // Theirs is whitespace-only, ours has real changes
                 merged.insert(key.to_string(), ours_content.to_string());
             } else if is_import_region(base_content)
-                || is_import_region(ours_content)
-                || is_import_region(theirs_content)
+                && is_import_region(ours_content)
+                && is_import_region(theirs_content)
             {
                 // Commutative merge: treat import lines as a set
                 let result = merge_imports_commutatively(base_content, ours_content, theirs_content);
@@ -1455,6 +1455,7 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
         .filter(|l| is_import_line(l) && !base_lines.contains(l) && !ours_lines.contains(l))
         .collect();
 
+    // Build import groups from ours (import lines only)
     let mut groups: Vec<Vec<&str>> = Vec::new();
     let mut current_group: Vec<&str> = Vec::new();
 
@@ -1468,8 +1469,6 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
             if theirs_deleted.contains(line) {
                 continue;
             }
-            current_group.push(line);
-        } else {
             current_group.push(line);
         }
     }
@@ -1495,30 +1494,45 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
         }
     }
 
-    // Sort import lines within each group alphabetically so new imports
-    // land in the conventional position rather than appended at the end.
+    // Sort import lines within each group alphabetically
     for group in &mut groups {
-        // Only sort lines that are imports; keep non-import lines (comments) in place.
-        let import_indices: Vec<usize> = group.iter().enumerate()
-            .filter(|(_, l)| is_import_line(l))
-            .map(|(i, _)| i)
-            .collect();
-        let mut import_lines: Vec<&str> = import_indices.iter().map(|&i| group[i]).collect();
-        import_lines.sort_unstable();
-        for (j, &idx) in import_indices.iter().enumerate() {
-            group[idx] = import_lines[j];
-        }
+        group.sort_unstable();
     }
 
-    let mut result_lines: Vec<&str> = Vec::new();
+    let mut import_lines: Vec<&str> = Vec::new();
     for (i, group) in groups.iter().enumerate() {
         if i > 0 {
-            result_lines.push("");
+            import_lines.push("");
         }
-        result_lines.extend(group);
+        import_lines.extend(group);
     }
 
-    let mut result = result_lines.join("\n");
+    let mut result = import_lines.join("\n");
+
+    // Non-import lines: use diffy 3-way merge so adds/deletes/edits on
+    // either side are handled correctly (fixes #60).
+    let extract_non_imports = |content: &str| -> String {
+        content
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !is_import_line(l))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let base_ni = extract_non_imports(base);
+    let ours_ni = extract_non_imports(ours);
+    let theirs_ni = extract_non_imports(theirs);
+
+    if !base_ni.is_empty() || !ours_ni.is_empty() || !theirs_ni.is_empty() {
+        let merged_ni = match diffy::merge(&base_ni, &ours_ni, &theirs_ni) {
+            Ok(m) => m,
+            Err(conflicted) => conflicted,
+        };
+        if !merged_ni.trim().is_empty() {
+            result.push('\n');
+            result.push('\n');
+            result.push_str(&merged_ni);
+        }
+    }
     let ours_trailing = ours.len() - ours.trim_end_matches('\n').len();
     let result_trailing = result.len() - result.trim_end_matches('\n').len();
     for _ in result_trailing..ours_trailing {

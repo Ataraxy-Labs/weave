@@ -1,6 +1,6 @@
 [package]
 name = "weave-github"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "GitHub webhook handler for entity-level semantic merges"
@@ -11,7 +11,7 @@ name = "weave-github"
 path = "src/main.rs"
 
 [dependencies]
-weave-core = { version = "0.3.1", path = "../weave-core" }
+weave-core = { version = "0.3.2", path = "../weave-core" }
 sem-core = "0.3.20"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
