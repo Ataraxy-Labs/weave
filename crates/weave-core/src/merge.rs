@@ -551,6 +551,66 @@ pub fn entity_merge_with_registry(
                 return git_merge_file(base, ours, theirs, &mut stats);
             }
         }
+
+    }
+
+    // Line-level drop detection: lines present in all 3 inputs (unchanged by
+    // either branch) must appear in the output. Dropping them is always wrong.
+    // This runs on ALL clean merges, not just those with both-changed entities.
+    if conflicts.is_empty() {
+        let base_lines: HashSet<&str> = base.lines()
+            .map(|l| l.trim())
+            .filter(|l| l.len() > 15 && !is_import_line_trimmed(l))
+            .collect();
+        let ours_lines: HashSet<&str> = ours.lines()
+            .map(|l| l.trim())
+            .filter(|l| l.len() > 15 && !is_import_line_trimmed(l))
+            .collect();
+        let theirs_lines: HashSet<&str> = theirs.lines()
+            .map(|l| l.trim())
+            .filter(|l| l.len() > 15 && !is_import_line_trimmed(l))
+            .collect();
+        let output_lines: HashSet<&str> = content.lines()
+            .map(|l| l.trim())
+            .collect();
+
+        // Unchanged lines (in all 3) must be in output
+        let missing_unchanged = base_lines.iter()
+            .filter(|l| ours_lines.contains(*l) && theirs_lines.contains(*l))
+            .filter(|l| !output_lines.contains(*l))
+            .count();
+
+        if missing_unchanged > 0 {
+            return git_merge_file(base, ours, theirs, &mut stats);
+        }
+
+        // Lines added by either branch (not in base) shouldn't be dropped either.
+        // Split into two tiers:
+        // - "Significant" lines (> 40 chars): even 1 missing is likely a bug, since
+        //   long lines are unique enough that reformatting won't change them completely
+        // - Shorter lines (16-40 chars): use threshold > 3, since these could be
+        //   structural lines reformatted by the import merger or brace placement
+        let mut missing_added_significant = 0;
+        let mut missing_added_short = 0;
+        for l in ours_lines.iter().chain(theirs_lines.iter()) {
+            if base_lines.contains(l) || output_lines.contains(l) {
+                continue;
+            }
+            // Also check if the core content appears as a substring in any output line
+            // (handles reformatting like `Foo {` becoming `Foo\n{`)
+            if l.len() > 25 && content.contains(*l) {
+                continue;
+            }
+            if l.len() > 40 {
+                missing_added_significant += 1;
+            } else {
+                missing_added_short += 1;
+            }
+        }
+
+        if missing_added_significant > 0 || missing_added_short > 3 {
+            return git_merge_file(base, ours, theirs, &mut stats);
+        }
     }
 
     let entity_result = MergeResult {
@@ -1335,6 +1395,19 @@ fn is_import_line(line: &str) -> bool {
         || trimmed.starts_with("using ")
 }
 
+/// Like is_import_line but operates on already-trimmed strings.
+/// Used in the line-level safety net where we compare trimmed lines.
+fn is_import_line_trimmed(trimmed: &str) -> bool {
+    trimmed.starts_with("import ")
+        || trimmed.starts_with("from ")
+        || trimmed.starts_with("use ")
+        || trimmed.starts_with("require(")
+        || trimmed.starts_with("const ") && trimmed.contains("require(")
+        || trimmed.starts_with("package ")
+        || trimmed.starts_with("#include ")
+        || trimmed.starts_with("using ")
+}
+
 /// A complete import statement (possibly multi-line) as a single unit.
 #[derive(Debug, Clone)]
 struct ImportStatement {
@@ -1346,6 +1419,40 @@ struct ImportStatement {
     specifiers: Vec<String>,
     /// Whether this is a multi-line import block
     is_multiline: bool,
+}
+
+/// Extract specifiers from a single-line import statement.
+/// e.g. "from X import A, B, C" → ["A", "B", "C"]
+///      "import { A, B } from 'X'" → ["A", "B"]
+///      "import X from 'Y'" → [] (default import, no named specifiers)
+fn parse_single_line_specifiers(trimmed: &str) -> Vec<String> {
+    // Python: "from X import A, B, C"
+    if let Some(import_pos) = trimmed.find(" import ") {
+        let after_import = &trimmed[import_pos + 8..];
+        // Skip if it's "import *" or "import (..." (multi-line handled elsewhere)
+        if after_import.starts_with('*') || after_import.starts_with('(') {
+            return Vec::new();
+        }
+        return after_import
+            .split(',')
+            .map(|s| s.trim().trim_end_matches(';').to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    // JS/TS: "import { A, B } from 'X'"
+    if trimmed.starts_with("import ") {
+        if let Some(brace_start) = trimmed.find('{') {
+            if let Some(brace_end) = trimmed.find('}') {
+                let inner = &trimmed[brace_start + 1..brace_end];
+                return inner
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+        }
+    }
+    Vec::new()
 }
 
 /// Parse content into import statements, handling multi-line imports as single units.
@@ -1405,12 +1512,13 @@ fn parse_import_statements(content: &str) -> (Vec<ImportStatement>, Vec<String>)
                     is_multiline: true,
                 });
             } else {
-                // Single-line import
+                // Single-line import — also parse specifiers for set-based merging
                 let source = import_source_prefix(line).to_string();
+                let specifiers = parse_single_line_specifiers(trimmed);
                 imports.push(ImportStatement {
                     lines: vec![line.to_string()],
                     source,
-                    specifiers: Vec::new(),
+                    specifiers,
                     is_multiline: false,
                 });
             }
@@ -1659,8 +1767,71 @@ fn merge_imports_with_multiline(
                 // Single-line import
                 if ours_imp_idx < ours_imports.len() {
                     let imp = &ours_imports[ours_imp_idx];
-                    handled_theirs_sources.insert(imp.source.as_str());
+                    let source = imp.source.as_str();
+                    handled_theirs_sources.insert(source);
                     ours_imp_idx += 1;
+
+                    // Check if theirs has a multi-line version with more specifiers
+                    if let Some(theirs_spec_set) = theirs_specs.get(source) {
+                        let base_spec_set = base_specs.get(source).cloned().unwrap_or_default();
+                        let theirs_added: HashSet<&str> = theirs_spec_set.difference(&base_spec_set).copied().collect();
+
+                        if !theirs_added.is_empty() {
+                            // Parse ours single-line specifier from the line text
+                            let mut ours_specifiers: Vec<&str> = Vec::new();
+                            let trimmed_line = line.trim();
+                            // Python: "from X import Y, Z" → extract after "import "
+                            if let Some(import_pos) = trimmed_line.find(" import ") {
+                                let after_import = &trimmed_line[import_pos + 8..];
+                                for spec in after_import.split(',') {
+                                    let s = spec.trim().trim_end_matches(';');
+                                    if !s.is_empty() {
+                                        ours_specifiers.push(s);
+                                    }
+                                }
+                            }
+                            // JS/TS: "import X from 'Y'" → X is a default import, not a specifier
+                            // Only merge if we found named specifiers
+                            if !ours_specifiers.is_empty() {
+                                let mut final_specs: Vec<&str> = ours_specifiers.clone();
+                                for added in &theirs_added {
+                                    if !final_specs.contains(added) {
+                                        final_specs.push(added);
+                                    }
+                                }
+                                // Find theirs import to get formatting
+                                if let Some(theirs_imp) = theirs_imports.iter().find(|ti| ti.source == source) {
+                                    if theirs_imp.is_multiline {
+                                        // Use theirs's multi-line formatting
+                                        let indent = if theirs_imp.lines.len() > 1 {
+                                            let second = &theirs_imp.lines[1];
+                                            &second[..second.len() - second.trim_start().len()]
+                                        } else {
+                                            "    "
+                                        };
+                                        // Reconstruct as multi-line using theirs's opening/closing style
+                                        result_parts.push(theirs_imp.lines[0].clone());
+                                        for spec in &final_specs {
+                                            result_parts.push(format!("{}{},", indent, spec));
+                                        }
+                                        if let Some(last) = theirs_imp.lines.last() {
+                                            result_parts.push(last.clone());
+                                        }
+                                        i += 1;
+                                        continue;
+                                    }
+                                }
+                                // Theirs not multi-line but has more specifiers: reconstruct single-line
+                                // e.g. "from X import A, B, C"
+                                let prefix = &trimmed_line[..trimmed_line.find(" import ").unwrap() + 8];
+                                result_parts.push(format!("{}{}", prefix, final_specs.join(", ")));
+                                i += 1;
+                                continue;
+                            }
+                        }
+                    }
+                } else {
+                    // No more ours imports to match
                 }
                 // Check if theirs deleted this single-line import
                 if !theirs_deleted_single.contains(line) {
@@ -1678,11 +1849,7 @@ fn merge_imports_with_multiline(
         if handled_theirs_sources.contains(imp.source.as_str()) {
             continue;
         }
-        // Check if this source exists in base (if so, it was handled above)
-        if base_specs.contains_key(imp.source.as_str()) {
-            continue;
-        }
-        // Truly new import from theirs
+        // Truly new import from theirs (source wasn't handled in the main loop)
         for line in &imp.lines {
             result_parts.push(line.clone());
         }
