@@ -71,7 +71,7 @@ pub fn sync_from_files(
         }
 
         // Extract and store interstitial regions
-        let regions = extract_regions(&content, &entities);
+        let regions = extract_regions(&content, entities.as_slice());
         let interstitials_map = state.file_interstitials_id()?;
         for region in &regions {
             if let FileRegion::Interstitial(inter) = region {

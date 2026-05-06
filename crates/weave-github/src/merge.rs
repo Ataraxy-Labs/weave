@@ -87,7 +87,7 @@ pub async fn handle_pull_request(state: &AppState, pr: &PrEvent) -> Result<(), S
         let reg = Arc::clone(&registry);
 
         let result = tokio::task::spawn_blocking(move || {
-            entity_merge_with_registry(&base, &ours, &theirs, &file_path, &reg, &weave_core::MarkerFormat::default())
+            entity_merge_with_registry(&base, &ours, &theirs, &file_path, &*reg, &weave_core::MarkerFormat::default())
         })
         .await
         .map_err(|e| format!("merge task panicked: {e}"))?;

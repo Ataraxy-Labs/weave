@@ -2205,9 +2205,9 @@ dependencies = [
 
 [[package]]
 name = "sem-core"
-version = "0.3.23"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbaabcd8f6c987298deab2bba7e81937bc1d0ab552393b15ec147e3109de306c"
+checksum = "2b8735044916e0ad41503d2dd22bdff6aacf1adfb46dfe32b78443cdc7a37300"
 dependencies = [
  "git2",
  "rayon",
@@ -3075,9 +3075,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-scala"
-version = "0.25.1"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3394d6bc99bceae03c75482a93f1bcefff11e69d3a405f1410e864212b52739a"
+checksum = "de5a4a7ff23a55474ce6a741d52aaeca7a82fe9421bb982b86e98c6ac8629397"
 dependencies = [
  "cc",
  "tree-sitter-language",

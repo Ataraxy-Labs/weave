@@ -62,7 +62,7 @@ pub fn validate_merge(
     }
 
     // Build the dependency graph
-    let graph = EntityGraph::build(repo_root, file_paths, registry);
+    let (graph, _entities) = EntityGraph::build(repo_root, file_paths, registry);
 
     // Build a set of modified entity IDs for quick lookup
     let modified_ids: HashSet<String> = modified_entities

@@ -305,7 +305,7 @@ impl WeaveServer {
         // dependency chain is claimed by another agent
         let mut dep_warnings: Vec<serde_json::Value> = Vec::new();
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let graph = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
 
         // Find graph entity matching our claimed entity
         if let Some(graph_entity) = graph
@@ -645,7 +645,7 @@ impl WeaveServer {
 
         // Build graph from all supported files in the repo
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let graph = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
 
         // Find the entity by name in the target file
         let entity_id = graph
@@ -692,7 +692,7 @@ impl WeaveServer {
             Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let graph = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
 
         let entity_id = graph
             .entities
@@ -738,7 +738,7 @@ impl WeaveServer {
             Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let graph = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
 
         let entity_id = graph
             .entities

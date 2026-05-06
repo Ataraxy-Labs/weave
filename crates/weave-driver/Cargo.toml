@@ -12,7 +12,7 @@ readme = "../../README.md"
 
 [dependencies]
 weave-core = { path = "../weave-core", version = "0.3.2" }
-sem-core = "0.3.20"
+sem-core = "0.5.3"
 weave-crdt = { path = "../weave-crdt", version = "0.3.2", optional = true }
 serde_json = "1"
 env_logger = "0.11"
