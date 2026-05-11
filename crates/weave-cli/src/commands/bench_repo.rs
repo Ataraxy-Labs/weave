@@ -6,7 +6,7 @@ use weave_core::entity_merge_with_registry;
 use sem_core::parser::plugins::create_default_registry;
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "ts", "tsx", "js", "jsx", "py", "rs", "go", "java", "c", "cpp", "cc", "h", "hpp", "rb", "cs",
+    "ts", "tsx", "js", "jsx", "py", "rs", "go", "java", "c", "cpp", "cc", "h", "hpp", "rb", "cs", "dart",
 ];
 
 struct Stats {

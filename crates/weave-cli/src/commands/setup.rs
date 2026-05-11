@@ -12,6 +12,7 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
     "*.xml", "*.plist", "*.svg", "*.csproj", "*.fsproj", "*.vbproj",
     "*.json", "*.yaml", "*.yml", "*.toml", "*.md",
     "*.scala", "*.sc", "*.sbt", "*.kojo", "*.mill",
+    "*.dart",
 ];
 
 pub fn run(driver_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
