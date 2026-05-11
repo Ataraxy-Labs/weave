@@ -1,0 +1,34 @@
+{
+  "name": "@ataraxy-labs/weave",
+  "version": "0.3.3",
+  "description": "npm wrapper for the weave CLI, driver, and MCP server. Downloads matching release binaries and exposes weave, weave-driver, and weave-mcp commands.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "bin": {
+    "weave": "./bin/weave.js",
+    "weave-driver": "./bin/weave-driver.js",
+    "weave-mcp": "./bin/weave-mcp.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "postinstall": "node ./scripts/postinstall.mjs",
+    "prepack": "node ./scripts/sync-package-version.mjs"
+  },
+  "files": [
+    "bin/weave.js",
+    "bin/weave-driver.js",
+    "bin/weave-mcp.js",
+    "scripts/package-meta.mjs",
+    "scripts/postinstall.mjs",
+    "scripts/verify-checksum.mjs",
+    "scripts/sync-package-version.mjs",
+    "README.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT"
+  ]
+}
