@@ -47,7 +47,7 @@ Full benchmark suite: 11ms. Individual merges: 65-374us.
 
 ## Key Features
 
-- 21 languages + 5 data formats (see full list below)
+- 23 languages + 5 data formats (see full list below)
 - Rename detection via confidence-scored structural hashing (0.95/0.8/0.6 scoring)
 - Commutative import merge with group preservation
 - Unordered class members (methods added at same position resolve cleanly)
@@ -100,7 +100,7 @@ claude mcp add --scope user weave -- weave-mcp
 
 ## Language Support
 
-21 programming languages:
+23 programming languages:
 
 | Language | Extensions | Entity Types |
 |----------|-----------|--------------|
@@ -110,6 +110,8 @@ claude mcp add --scope user weave -- weave-mcp
 | Go | .go | functions, methods, types, vars, consts |
 | Rust | .rs | functions, structs, enums, impls, traits, mods, consts |
 | Java | .java | classes, methods, interfaces, enums, fields, constructors |
+| Dart | .dart | classes, functions, methods, enums, extensions, mixins |
+| Scala | .scala .sc .sbt | classes, objects, traits, functions, types |
 | C | .c .h | functions, structs, enums, unions, typedefs |
 | C++ | .cpp .cc .hpp | functions, classes, structs, enums, namespaces, templates |
 | C# | .cs | classes, methods, interfaces, enums, structs, properties |

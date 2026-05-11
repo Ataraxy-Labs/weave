@@ -25,7 +25,7 @@
   <img src="https://img.shields.io/badge/tests-124_passing-brightgreen" alt="Tests">
   <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="Version">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow" alt="License"></a>
-  <img src="https://img.shields.io/badge/languages-26-blue" alt="Languages">
+  <img src="https://img.shields.io/badge/languages-28-blue" alt="Languages">
 </p>
 
 <p align="center">
