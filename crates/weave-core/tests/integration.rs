@@ -1857,6 +1857,96 @@ case class Product(id: String, price: Double)
     assert!(result.content.contains("Product"));
 }
 
+// =============================================================================
+// Dart
+// =============================================================================
+
+#[test]
+fn dart_two_agents_add_different_functions() {
+    let base = r#"class Calculator {
+  int value = 0;
+}
+"#;
+    let ours = r#"class Calculator {
+  int value = 0;
+
+  void add(int amount) {
+    value += amount;
+  }
+}
+"#;
+    let theirs = r#"class Calculator {
+  int value = 0;
+
+  void subtract(int amount) {
+    value -= amount;
+  }
+}
+"#;
+
+    let result = entity_merge(base, ours, theirs, "calculator.dart");
+    assert!(
+        result.is_clean(),
+        "Two agents adding different functions to Dart class should auto-resolve. Conflicts: {:?}",
+        result.conflicts
+    );
+    assert!(result.content.contains("add(int amount)"));
+    assert!(result.content.contains("subtract(int amount)"));
+}
+
+#[test]
+fn dart_one_modifies_one_adds() {
+    let base = r#"void greet(String name) {
+  print('Hello, $name');
+}
+"#;
+    let ours = r#"void greet(String name) {
+  print('Greetings, $name!');
+}
+"#;
+    let theirs = r#"void greet(String name) {
+  print('Hello, $name');
+}
+
+void sayGoodbye(String name) {
+  print('Goodbye, $name');
+}
+"#;
+
+    let result = entity_merge(base, ours, theirs, "greetings.dart");
+    assert!(
+        result.is_clean(),
+        "One modifies existing function, other adds new function should auto-resolve. Conflicts: {:?}",
+        result.conflicts
+    );
+    assert!(result.content.contains("Greetings, $name!"));
+    assert!(result.content.contains("sayGoodbye"));
+}
+
+#[test]
+fn dart_both_modify_same_method_incompatibly() {
+    let base = r#"void process(String data) {
+  var d = data;
+  print(d);
+}
+"#;
+    let ours = r#"void process(String data) {
+  var d = data.toLowerCase();
+  print(d);
+}
+"#;
+    let theirs = r#"void process(String data) {
+  var d = data.toUpperCase();
+  print(d);
+}
+"#;
+
+    let result = entity_merge(base, ours, theirs, "processor.dart");
+    assert!(!result.is_clean(), "Incompatible changes to the same function must conflict");
+    assert!(is_inside_conflict_markers(&result.content, "toLowerCase()"));
+    assert!(is_inside_conflict_markers(&result.content, "toUpperCase()"));
+}
+
 /// Check if a needle appears only inside conflict marker blocks
 fn is_inside_conflict_markers(content: &str, needle: &str) -> bool {
     let mut in_conflict = false;
