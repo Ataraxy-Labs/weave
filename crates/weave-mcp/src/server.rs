@@ -235,10 +235,9 @@ impl WeaveServer {
         let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
 
         let entities = self.cached_extract_entities(&content, &rel_path).await;
-        if entities.is_empty()
-            && self.registry.get_plugin(&rel_path).is_none() {
-                return Err(internal_err(format!("No parser for file: {}", rel_path)));
-            }
+        if entities.is_empty() && self.registry.get_plugin(&rel_path).is_none() {
+            return Err(internal_err(format!("No parser for file: {}", rel_path)));
+        }
         let result: Vec<serde_json::Value> = entities
             .iter()
             .map(|e| {
