@@ -1,0 +1,1 @@
+{"version":3,"sources":["../../../../src/server/use-cache/constants.ts"],"sourcesContent":["export const DYNAMIC_EXPIRE = 300 // 5 minutes\nexport const RUNTIME_PREFETCH_DYNAMIC_STALE = 30 // 30 seconds\n"],"names":["DYNAMIC_EXPIRE","RUNTIME_PREFETCH_DYNAMIC_STALE"],"mappings":"AAAA,OAAO,MAAMA,iBAAiB,IAAI,YAAY;CAAb;AACjC,OAAO,MAAMC,iCAAiC,GAAG,aAAa;CAAd","ignoreList":[0]}

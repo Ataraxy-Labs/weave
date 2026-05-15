@@ -1,0 +1,22 @@
+import { PHASE_DEVELOPMENT_SERVER, type PHASE_PRODUCTION_SERVER, type PHASE_TYPE } from '../shared/lib/constants';
+import type { ExperimentalConfig, NextConfigComplete, NextConfig, NextConfigRuntime } from './config-shared';
+export { normalizeConfig } from './config-shared';
+export type { DomainLocale, NextConfig } from './config-shared';
+export declare function warnOptionHasBeenDeprecated(config: NextConfig, nestedPropertyKey: string, reason: string, silent: boolean): boolean;
+export declare function warnOptionHasBeenMovedOutOfExperimental(config: NextConfig, oldExperimentalKey: string, newKey: string, configFileName: string, silent: boolean): NextConfig;
+type LoadConfigOptions = {
+    customConfig?: object | null;
+    rawConfig?: boolean;
+    silent?: boolean;
+    reportExperimentalFeatures?: (configuredExperimentalFeatures: ConfiguredExperimentalFeature[]) => void;
+    reactProductionProfiling?: boolean;
+    debugPrerender?: boolean;
+};
+export default function loadConfig(phase: typeof PHASE_DEVELOPMENT_SERVER, dir: string, opts?: LoadConfigOptions): Promise<NextConfigComplete>;
+export default function loadConfig(phase: typeof PHASE_PRODUCTION_SERVER | typeof PHASE_DEVELOPMENT_SERVER, dir: string, opts?: LoadConfigOptions): Promise<NextConfigRuntime | NextConfigComplete>;
+export default function loadConfig(phase: PHASE_TYPE, dir: string, opts?: LoadConfigOptions): Promise<NextConfigComplete>;
+export type ConfiguredExperimentalFeature = {
+    key: keyof ExperimentalConfig;
+    value: ExperimentalConfig[keyof ExperimentalConfig];
+    reason?: string;
+};

@@ -56,15 +56,9 @@ pub fn format_comment(file_results: &[FileMergeResult], total_stats: &MergeStats
         for conflict in &fr.result.conflicts {
             out.push_str(&format!(
                 "- **{} `{}`** ({}, {})\n",
-                conflict.entity_type,
-                conflict.entity_name,
-                conflict.kind,
-                conflict.complexity
+                conflict.entity_type, conflict.entity_name, conflict.kind, conflict.complexity
             ));
-            out.push_str(&format!(
-                "  > {}\n",
-                conflict.complexity.resolution_hint()
-            ));
+            out.push_str(&format!("  > {}\n", conflict.complexity.resolution_hint()));
         }
         out.push('\n');
     }

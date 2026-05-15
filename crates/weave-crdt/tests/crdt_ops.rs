@@ -7,7 +7,10 @@ use weave_crdt::{
 
 fn setup_state_with_entity(entity_id: &str, name: &str, file_path: &str) -> EntityStateDoc {
     let mut state = EntityStateDoc::new_memory().unwrap();
-    upsert_entity(&mut state, entity_id, name, "function", file_path, "hash123").unwrap();
+    upsert_entity(
+        &mut state, entity_id, name, "function", file_path, "hash123",
+    )
+    .unwrap();
     state
 }
 
@@ -148,7 +151,12 @@ fn test_agent_heartbeat() {
     let mut state = EntityStateDoc::new_memory().unwrap();
     register_agent(&mut state, "agent-1", "Agent One", "main").unwrap();
 
-    agent_heartbeat(&mut state, "agent-1", &["eid1".to_string(), "eid2".to_string()]).unwrap();
+    agent_heartbeat(
+        &mut state,
+        "agent-1",
+        &["eid1".to_string(), "eid2".to_string()],
+    )
+    .unwrap();
 
     let status = get_agent_status(&state, "agent-1").unwrap();
     assert_eq!(status.working_on, vec!["eid1", "eid2"]);
@@ -223,7 +231,15 @@ fn test_detect_potential_conflict() {
 #[test]
 fn test_upsert_entity_create() {
     let mut state = EntityStateDoc::new_memory().unwrap();
-    upsert_entity(&mut state, "eid1", "my_func", "function", "src/lib.rs", "hash1").unwrap();
+    upsert_entity(
+        &mut state,
+        "eid1",
+        "my_func",
+        "function",
+        "src/lib.rs",
+        "hash1",
+    )
+    .unwrap();
 
     let status = get_entity_status(&state, "eid1").unwrap();
     assert_eq!(status.name, "my_func");
@@ -235,11 +251,27 @@ fn test_upsert_entity_create() {
 #[test]
 fn test_upsert_entity_update_preserves_claims() {
     let mut state = EntityStateDoc::new_memory().unwrap();
-    upsert_entity(&mut state, "eid1", "my_func", "function", "src/lib.rs", "hash1").unwrap();
+    upsert_entity(
+        &mut state,
+        "eid1",
+        "my_func",
+        "function",
+        "src/lib.rs",
+        "hash1",
+    )
+    .unwrap();
     claim_entity(&mut state, "agent-1", "eid1").unwrap();
 
     // Upsert again with new content hash
-    upsert_entity(&mut state, "eid1", "my_func", "function", "src/lib.rs", "hash2").unwrap();
+    upsert_entity(
+        &mut state,
+        "eid1",
+        "my_func",
+        "function",
+        "src/lib.rs",
+        "hash2",
+    )
+    .unwrap();
 
     let status = get_entity_status(&state, "eid1").unwrap();
     assert_eq!(status.content_hash, "hash2");
@@ -253,10 +285,24 @@ fn test_two_agents_different_entities_no_conflict() {
     let mut state = EntityStateDoc::new_memory().unwrap();
 
     // Create two entities
-    upsert_entity(&mut state, "f::process_data", "process_data", "function", "src/lib.rs", "h1")
-        .unwrap();
-    upsert_entity(&mut state, "f::validate_input", "validate_input", "function", "src/lib.rs", "h2")
-        .unwrap();
+    upsert_entity(
+        &mut state,
+        "f::process_data",
+        "process_data",
+        "function",
+        "src/lib.rs",
+        "h1",
+    )
+    .unwrap();
+    upsert_entity(
+        &mut state,
+        "f::validate_input",
+        "validate_input",
+        "function",
+        "src/lib.rs",
+        "h2",
+    )
+    .unwrap();
 
     // Register two agents
     register_agent(&mut state, "claude-1", "Claude-1", "feature-a").unwrap();
@@ -277,8 +323,15 @@ fn test_two_agents_different_entities_no_conflict() {
 fn test_two_agents_same_entity_warning() {
     let mut state = EntityStateDoc::new_memory().unwrap();
 
-    upsert_entity(&mut state, "f::process_data", "process_data", "function", "src/lib.rs", "h1")
-        .unwrap();
+    upsert_entity(
+        &mut state,
+        "f::process_data",
+        "process_data",
+        "function",
+        "src/lib.rs",
+        "h1",
+    )
+    .unwrap();
 
     register_agent(&mut state, "claude-1", "Claude-1", "feature-a").unwrap();
     register_agent(&mut state, "claude-2", "Claude-2", "feature-b").unwrap();

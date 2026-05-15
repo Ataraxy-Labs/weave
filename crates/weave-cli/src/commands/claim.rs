@@ -1,9 +1,7 @@
 use colored::Colorize;
 use sem_core::parser::plugins::create_default_registry;
 use weave_core::git::find_repo_root;
-use weave_crdt::{
-    claim_entity, resolve_entity_id, upsert_entity, ClaimResult, EntityStateDoc,
-};
+use weave_crdt::{claim_entity, resolve_entity_id, upsert_entity, ClaimResult, EntityStateDoc};
 
 pub fn run(
     agent_id: &str,

@@ -1,0 +1,32 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", {
+    value: true
+});
+Object.defineProperty(exports, "RootLevelDevOverlayElement", {
+    enumerable: true,
+    get: function() {
+        return RootLevelDevOverlayElement;
+    }
+});
+const _interop_require_default = require("@swc/helpers/_/_interop_require_default");
+const _jsxruntime = require("react/jsx-runtime");
+const _react = /*#__PURE__*/ _interop_require_default._(require("react"));
+const _globalerror = /*#__PURE__*/ _interop_require_default._(require("../../../client/components/builtin/global-error"));
+const _appdevoverlayerrorboundary = require("./app-dev-overlay-error-boundary");
+function RootLevelDevOverlayElement({ children }) {
+    return /*#__PURE__*/ (0, _jsxruntime.jsx)(_appdevoverlayerrorboundary.AppDevOverlayErrorBoundary, {
+        globalError: [
+            _globalerror.default,
+            null
+        ],
+        children: children
+    });
+}
+
+if ((typeof exports.default === 'function' || (typeof exports.default === 'object' && exports.default !== null)) && typeof exports.default.__esModule === 'undefined') {
+  Object.defineProperty(exports.default, '__esModule', { value: true });
+  Object.assign(exports.default, exports);
+  module.exports = exports.default;
+}
+
+//# sourceMappingURL=client-entry.js.map

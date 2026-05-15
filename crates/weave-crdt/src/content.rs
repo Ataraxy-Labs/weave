@@ -1,4 +1,4 @@
-use automerge::{ReadDoc, transaction::Transactable};
+use automerge::{transaction::Transactable, ReadDoc};
 use serde::Serialize;
 
 use crate::error::{Result, WeaveError};
@@ -54,7 +54,9 @@ pub fn update_entity_content(
     if !current_content.is_empty() {
         let base = get_str(&state.doc, &entity_obj, "base_content").unwrap_or_default();
         if base.is_empty() {
-            state.doc.put(&entity_obj, "base_content", current_content.as_str())?;
+            state
+                .doc
+                .put(&entity_obj, "base_content", current_content.as_str())?;
         }
     }
 
@@ -74,10 +76,7 @@ pub fn update_entity_content(
 }
 
 /// Get the full content status of an entity.
-pub fn get_entity_content(
-    state: &EntityStateDoc,
-    entity_id: &str,
-) -> Result<EntityContentStatus> {
+pub fn get_entity_content(state: &EntityStateDoc, entity_id: &str) -> Result<EntityContentStatus> {
     let entities = state.entities_id()?;
 
     let entity_obj = match state.doc.get(&entities, entity_id)? {
@@ -86,8 +85,8 @@ pub fn get_entity_content(
     };
 
     let vv = read_version_vector(&state.doc, &entity_obj);
-    let merge_state = get_str(&state.doc, &entity_obj, "merge_state")
-        .unwrap_or_else(|| "clean".to_string());
+    let merge_state =
+        get_str(&state.doc, &entity_obj, "merge_state").unwrap_or_else(|| "clean".to_string());
 
     Ok(EntityContentStatus {
         entity_id: entity_id.to_string(),
@@ -123,8 +122,8 @@ pub fn resolve_entity_conflict(
         None => return Err(WeaveError::EntityNotFound(entity_id.to_string())),
     };
 
-    let merge_state = get_str(&state.doc, &entity_obj, "merge_state")
-        .unwrap_or_else(|| "clean".to_string());
+    let merge_state =
+        get_str(&state.doc, &entity_obj, "merge_state").unwrap_or_else(|| "clean".to_string());
     if merge_state != "conflict" {
         return Err(WeaveError::NotInConflict(entity_id.to_string()));
     }
@@ -139,7 +138,9 @@ pub fn resolve_entity_conflict(
     // Store resolved content
     state.doc.put(&entity_obj, "content", resolved_content)?;
     state.doc.put(&entity_obj, "content_hash", content_hash)?;
-    state.doc.put(&entity_obj, "base_content", resolved_content)?;
+    state
+        .doc
+        .put(&entity_obj, "base_content", resolved_content)?;
 
     // Keep scalar version in sync
     state.doc.put(&entity_obj, "version", vv.total() as i64)?;
@@ -162,7 +163,11 @@ pub fn resolve_entity_conflict(
     if state.doc.get(&entity_obj, "conflict_ours_agent")?.is_some() {
         state.doc.delete(&entity_obj, "conflict_ours_agent")?;
     }
-    if state.doc.get(&entity_obj, "conflict_theirs_agent")?.is_some() {
+    if state
+        .doc
+        .get(&entity_obj, "conflict_theirs_agent")?
+        .is_some()
+    {
         state.doc.delete(&entity_obj, "conflict_theirs_agent")?;
     }
 
@@ -191,8 +196,12 @@ pub fn set_entity_conflict(
     state.doc.put(&entity_obj, "conflict_ours", ours)?;
     state.doc.put(&entity_obj, "conflict_theirs", theirs)?;
     state.doc.put(&entity_obj, "conflict_base", base)?;
-    state.doc.put(&entity_obj, "conflict_ours_agent", ours_agent)?;
-    state.doc.put(&entity_obj, "conflict_theirs_agent", theirs_agent)?;
+    state
+        .doc
+        .put(&entity_obj, "conflict_ours_agent", ours_agent)?;
+    state
+        .doc
+        .put(&entity_obj, "conflict_theirs_agent", theirs_agent)?;
 
     Ok(())
 }

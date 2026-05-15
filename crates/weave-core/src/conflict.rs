@@ -1,5 +1,5 @@
-use std::fmt;
 use serde::Serialize;
+use std::fmt;
 
 /// Controls conflict marker format: enhanced (weave metadata) or standard (git-compatible).
 ///
@@ -15,13 +15,19 @@ pub struct MarkerFormat {
 
 impl Default for MarkerFormat {
     fn default() -> Self {
-        Self { marker_length: 7, enhanced: true }
+        Self {
+            marker_length: 7,
+            enhanced: true,
+        }
     }
 }
 
 impl MarkerFormat {
     pub fn standard(marker_length: usize) -> Self {
-        Self { marker_length, enhanced: false }
+        Self {
+            marker_length,
+            enhanced: false,
+        }
     }
 }
 
@@ -59,14 +65,38 @@ impl fmt::Display for ConflictKind {
                 modified_in_ours: false,
             } => write!(f, "deleted in ours, modified in theirs"),
             ConflictKind::BothAdded => write!(f, "both added"),
-            ConflictKind::RenameRename { base_name, ours_name, theirs_name } => {
-                write!(f, "both renamed: '{}' → ours '{}', theirs '{}'", base_name, ours_name, theirs_name)
+            ConflictKind::RenameRename {
+                base_name,
+                ours_name,
+                theirs_name,
+            } => {
+                write!(
+                    f,
+                    "both renamed: '{}' → ours '{}', theirs '{}'",
+                    base_name, ours_name, theirs_name
+                )
             }
-            ConflictKind::RenameModify { old_name, new_name, renamed_in_ours: true } => {
-                write!(f, "renamed in ours ('{}' → '{}'), modified in theirs", old_name, new_name)
+            ConflictKind::RenameModify {
+                old_name,
+                new_name,
+                renamed_in_ours: true,
+            } => {
+                write!(
+                    f,
+                    "renamed in ours ('{}' → '{}'), modified in theirs",
+                    old_name, new_name
+                )
             }
-            ConflictKind::RenameModify { old_name, new_name, renamed_in_ours: false } => {
-                write!(f, "modified in ours, renamed in theirs ('{}' → '{}')", old_name, new_name)
+            ConflictKind::RenameModify {
+                old_name,
+                new_name,
+                renamed_in_ours: false,
+            } => {
+                write!(
+                    f,
+                    "modified in ours, renamed in theirs ('{}' → '{}')",
+                    old_name, new_name
+                )
             }
         }
     }
@@ -103,22 +133,28 @@ impl ConflictComplexity {
     /// Human-readable resolution hint for this conflict type.
     pub fn resolution_hint(&self) -> &'static str {
         match self {
-            ConflictComplexity::Text =>
-                "Cosmetic change on both sides. Pick either version or combine formatting.",
-            ConflictComplexity::Syntax =>
-                "Structural change (rename/retype). Check callers of this entity.",
-            ConflictComplexity::Functional =>
-                "Logic changed on both sides. Requires understanding intent of each change.",
-            ConflictComplexity::TextSyntax =>
-                "Renamed and reformatted. Prefer the structural change, verify formatting.",
-            ConflictComplexity::TextFunctional =>
-                "Logic and cosmetic changes overlap. Resolve logic first, then reformat.",
-            ConflictComplexity::SyntaxFunctional =>
-                "Structural and logic conflict. Both design and behavior differ.",
-            ConflictComplexity::TextSyntaxFunctional =>
-                "All three dimensions conflict. Manual review required.",
-            ConflictComplexity::Unknown =>
-                "Could not classify. Compare both versions manually.",
+            ConflictComplexity::Text => {
+                "Cosmetic change on both sides. Pick either version or combine formatting."
+            }
+            ConflictComplexity::Syntax => {
+                "Structural change (rename/retype). Check callers of this entity."
+            }
+            ConflictComplexity::Functional => {
+                "Logic changed on both sides. Requires understanding intent of each change."
+            }
+            ConflictComplexity::TextSyntax => {
+                "Renamed and reformatted. Prefer the structural change, verify formatting."
+            }
+            ConflictComplexity::TextFunctional => {
+                "Logic and cosmetic changes overlap. Resolve logic first, then reformat."
+            }
+            ConflictComplexity::SyntaxFunctional => {
+                "Structural and logic conflict. Both design and behavior differ."
+            }
+            ConflictComplexity::TextSyntaxFunctional => {
+                "All three dimensions conflict. Manual review required."
+            }
+            ConflictComplexity::Unknown => "Could not classify. Compare both versions manually.",
         }
     }
 }
@@ -139,7 +175,11 @@ impl fmt::Display for ConflictComplexity {
 }
 
 /// Classify conflict complexity by analyzing what changed between versions.
-pub fn classify_conflict(base: Option<&str>, ours: Option<&str>, theirs: Option<&str>) -> ConflictComplexity {
+pub fn classify_conflict(
+    base: Option<&str>,
+    ours: Option<&str>,
+    theirs: Option<&str>,
+) -> ConflictComplexity {
     let base = base.unwrap_or("");
     let ours = ours.unwrap_or("");
     let theirs = theirs.unwrap_or("");
@@ -298,7 +338,8 @@ pub fn narrow_conflict_lines<'a>(
     theirs_lines: &'a [&'a str],
 ) -> (usize, usize) {
     // Common prefix
-    let prefix_len = ours_lines.iter()
+    let prefix_len = ours_lines
+        .iter()
         .zip(theirs_lines.iter())
         .take_while(|(a, b)| a == b)
         .count();
@@ -307,7 +348,9 @@ pub fn narrow_conflict_lines<'a>(
     let ours_remaining = ours_lines.len() - prefix_len;
     let theirs_remaining = theirs_lines.len() - prefix_len;
     let max_suffix = ours_remaining.min(theirs_remaining);
-    let suffix_len = ours_lines.iter().rev()
+    let suffix_len = ours_lines
+        .iter()
+        .rev()
         .zip(theirs_lines.iter().rev())
         .take(max_suffix)
         .take_while(|(a, b)| a == b)
@@ -368,10 +411,18 @@ impl EntityConflict {
                 self.entity_type, self.entity_name, self.complexity, confidence
             );
             let hint = match &self.kind {
-                ConflictKind::RenameModify { old_name, new_name, renamed_in_ours: true } => {
+                ConflictKind::RenameModify {
+                    old_name,
+                    new_name,
+                    renamed_in_ours: true,
+                } => {
                     format!("Renamed in ours ('{}' -> '{}'). Theirs modified the body. Take the new name and apply theirs' changes.", old_name, new_name)
                 }
-                ConflictKind::RenameModify { old_name, new_name, renamed_in_ours: false } => {
+                ConflictKind::RenameModify {
+                    old_name,
+                    new_name,
+                    renamed_in_ours: false,
+                } => {
                     format!("Renamed in theirs ('{}' -> '{}'). Ours modified the body. Take the new name and apply ours' changes.", old_name, new_name)
                 }
                 _ => self.complexity.resolution_hint().to_string(),
@@ -547,11 +598,7 @@ pub fn parse_weave_conflicts(content: &str) -> Vec<ParsedConflict> {
 
 fn parse_conflict_header(header: &str) -> (String, String, ConflictComplexity, String) {
     // Format: "<<<<<<< ours — <type> `<name>` (<complexity>, confidence: <conf>)"
-    let after_dash = header
-        .split('\u{2014}')
-        .nth(1)
-        .unwrap_or(header)
-        .trim();
+    let after_dash = header.split('\u{2014}').nth(1).unwrap_or(header).trim();
 
     // Extract entity type (word before backtick)
     let entity_kind = after_dash
@@ -562,11 +609,7 @@ fn parse_conflict_header(header: &str) -> (String, String, ConflictComplexity, S
         .to_string();
 
     // Extract entity name (between backticks)
-    let entity_name = after_dash
-        .split('`')
-        .nth(1)
-        .unwrap_or("")
-        .to_string();
+    let entity_name = after_dash.split('`').nth(1).unwrap_or("").to_string();
 
     // Extract complexity and confidence from parenthesized section
     let paren_content = after_dash
@@ -732,20 +775,44 @@ mod tests {
             base_content: Some("return 0;".to_string()),
         };
         let markers = conflict.to_conflict_markers(&MarkerFormat::default());
-        assert!(markers.contains("confidence: medium"), "Markers should contain confidence: {}", markers);
-        assert!(markers.contains("// hint: Logic changed on both sides"), "Markers should contain hint: {}", markers);
+        assert!(
+            markers.contains("confidence: medium"),
+            "Markers should contain confidence: {}",
+            markers
+        );
+        assert!(
+            markers.contains("// hint: Logic changed on both sides"),
+            "Markers should contain hint: {}",
+            markers
+        );
     }
 
     #[test]
     fn test_resolution_hints() {
-        assert!(ConflictComplexity::Text.resolution_hint().contains("Cosmetic"));
-        assert!(ConflictComplexity::Syntax.resolution_hint().contains("Structural"));
-        assert!(ConflictComplexity::Functional.resolution_hint().contains("Logic"));
-        assert!(ConflictComplexity::TextSyntax.resolution_hint().contains("Renamed"));
-        assert!(ConflictComplexity::TextFunctional.resolution_hint().contains("Logic and cosmetic"));
-        assert!(ConflictComplexity::SyntaxFunctional.resolution_hint().contains("Structural and logic"));
-        assert!(ConflictComplexity::TextSyntaxFunctional.resolution_hint().contains("All three"));
-        assert!(ConflictComplexity::Unknown.resolution_hint().contains("Could not classify"));
+        assert!(ConflictComplexity::Text
+            .resolution_hint()
+            .contains("Cosmetic"));
+        assert!(ConflictComplexity::Syntax
+            .resolution_hint()
+            .contains("Structural"));
+        assert!(ConflictComplexity::Functional
+            .resolution_hint()
+            .contains("Logic"));
+        assert!(ConflictComplexity::TextSyntax
+            .resolution_hint()
+            .contains("Renamed"));
+        assert!(ConflictComplexity::TextFunctional
+            .resolution_hint()
+            .contains("Logic and cosmetic"));
+        assert!(ConflictComplexity::SyntaxFunctional
+            .resolution_hint()
+            .contains("Structural and logic"));
+        assert!(ConflictComplexity::TextSyntaxFunctional
+            .resolution_hint()
+            .contains("All three"));
+        assert!(ConflictComplexity::Unknown
+            .resolution_hint()
+            .contains("Could not classify"));
     }
 
     #[test]
@@ -792,7 +859,11 @@ mod tests {
             theirs_content: Some("class Bar { y() {} }".to_string()),
             base_content: None,
         };
-        let content = format!("some code\n{}\nmore code\n{}\nend", c1.to_conflict_markers(&MarkerFormat::default()), c2.to_conflict_markers(&MarkerFormat::default()));
+        let content = format!(
+            "some code\n{}\nmore code\n{}\nend",
+            c1.to_conflict_markers(&MarkerFormat::default()),
+            c2.to_conflict_markers(&MarkerFormat::default())
+        );
         let parsed = parse_weave_conflicts(&content);
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].entity_name, "foo");

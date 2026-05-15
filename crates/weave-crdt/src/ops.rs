@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use automerge::{ObjType, ReadDoc, Value, transaction::Transactable};
+use automerge::{transaction::Transactable, ObjType, ReadDoc, Value};
 use serde::Serialize;
 
 use crate::error::{Result, WeaveError};
@@ -52,7 +52,11 @@ pub struct PotentialConflict {
 
 // ── Helper to read a string field from an automerge map ──
 
-pub(crate) fn get_str(doc: &automerge::AutoCommit, obj: &automerge::ObjId, key: &str) -> Option<String> {
+pub(crate) fn get_str(
+    doc: &automerge::AutoCommit,
+    obj: &automerge::ObjId,
+    key: &str,
+) -> Option<String> {
     match doc.get(obj, key) {
         Ok(Some((Value::Scalar(v), _))) => {
             if let automerge::ScalarValue::Str(s) = v.as_ref() {
@@ -65,7 +69,11 @@ pub(crate) fn get_str(doc: &automerge::AutoCommit, obj: &automerge::ObjId, key: 
     }
 }
 
-pub(crate) fn get_u64(doc: &automerge::AutoCommit, obj: &automerge::ObjId, key: &str) -> Option<u64> {
+pub(crate) fn get_u64(
+    doc: &automerge::AutoCommit,
+    obj: &automerge::ObjId,
+    key: &str,
+) -> Option<u64> {
     match doc.get(obj, key) {
         Ok(Some((Value::Scalar(v), _))) => match v.as_ref() {
             automerge::ScalarValue::Uint(n) => Some(*n),
@@ -113,11 +121,7 @@ pub fn claim_entity(
 }
 
 /// Release an entity claim.
-pub fn release_entity(
-    state: &mut EntityStateDoc,
-    agent_id: &str,
-    entity_id: &str,
-) -> Result<()> {
+pub fn release_entity(state: &mut EntityStateDoc, agent_id: &str, entity_id: &str) -> Result<()> {
     let entities = state.entities_id()?;
 
     let entity_obj = match state.doc.get(&entities, entity_id)? {
@@ -164,12 +168,8 @@ pub fn record_modification(
     let version = new_vv.total();
 
     state.doc.put(&entity_obj, "content_hash", content_hash)?;
-    state
-        .doc
-        .put(&entity_obj, "last_modified_by", agent_id)?;
-    state
-        .doc
-        .put(&entity_obj, "last_modified_at", ts as i64)?;
+    state.doc.put(&entity_obj, "last_modified_by", agent_id)?;
+    state.doc.put(&entity_obj, "last_modified_at", ts as i64)?;
     state.doc.put(&entity_obj, "version", version as i64)?;
 
     log_operation(state, agent_id, entity_id, "modify")?;
@@ -328,9 +328,7 @@ pub fn agent_heartbeat(
         .doc
         .put_object(&agent_obj, "working_on", ObjType::List)?;
     for (i, entity_id) in working_on.iter().enumerate() {
-        state
-            .doc
-            .insert(&list_id, i, entity_id.as_str())?;
+        state.doc.insert(&list_id, i, entity_id.as_str())?;
     }
 
     Ok(())
@@ -511,7 +509,10 @@ pub fn set_agent_last_seen(
 // ── Version vector helpers ──
 
 /// Read a version vector from an entity's version_vector map.
-pub(crate) fn read_version_vector(doc: &automerge::AutoCommit, entity_obj: &automerge::ObjId) -> VersionVector {
+pub(crate) fn read_version_vector(
+    doc: &automerge::AutoCommit,
+    entity_obj: &automerge::ObjId,
+) -> VersionVector {
     let vv_obj = match doc.get(entity_obj, "version_vector") {
         Ok(Some((_, id))) => id,
         _ => return VersionVector::new(),
@@ -549,9 +550,7 @@ fn log_operation(
 ) -> Result<()> {
     let operations = state.operations_id()?;
     let len = state.doc.length(&operations);
-    let entry = state
-        .doc
-        .insert_object(&operations, len, ObjType::Map)?;
+    let entry = state.doc.insert_object(&operations, len, ObjType::Map)?;
     state.doc.put(&entry, "agent", agent_id)?;
     state.doc.put(&entry, "entity_id", entity_id)?;
     state.doc.put(&entry, "op", op)?;

@@ -17,9 +17,9 @@ use tokio::sync::Mutex;
 use weave_core::git;
 use weave_crdt::{
     claim_entity, detect_potential_conflicts, get_entities_for_file, get_entity_content,
-    get_entity_status, merge_file_entities, register_agent,
-    release_entity, resolve_entity_conflict, resolve_entity_id, sync_from_files,
-    update_entity_content, upsert_entity, EntityStateDoc,
+    get_entity_status, merge_file_entities, register_agent, release_entity,
+    resolve_entity_conflict, resolve_entity_id, sync_from_files, update_entity_content,
+    upsert_entity, EntityStateDoc,
 };
 
 use crate::tools::*;
@@ -77,13 +77,11 @@ impl WeaveServer {
             return Ok(root);
         }
 
-        Err(
-            "Cannot find git repository. Either:\n\
+        Err("Cannot find git repository. Either:\n\
              - Pass an absolute file path (e.g. /Users/you/project/src/lib.ts)\n\
              - Set WEAVE_REPO env var to the repo root\n\
              - Run weave-mcp from within a git repo"
-                .to_string(),
-        )
+            .to_string())
     }
 
     /// Resolve a file path to (repo_root-relative path, absolute path).
@@ -135,12 +133,7 @@ impl WeaveServer {
         files
     }
 
-    fn walk_dir(
-        dir: &Path,
-        root: &Path,
-        registry: &ParserRegistry,
-        files: &mut Vec<String>,
-    ) {
+    fn walk_dir(dir: &Path, root: &Path, registry: &ParserRegistry, files: &mut Vec<String>) {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return,
@@ -184,11 +177,7 @@ impl WeaveServer {
     }
 
     /// Extract entities with LRU caching. Cache hit skips tree-sitter parse entirely.
-    async fn cached_extract_entities(
-        &self,
-        content: &str,
-        rel_path: &str,
-    ) -> Vec<SemanticEntity> {
+    async fn cached_extract_entities(&self, content: &str, rel_path: &str) -> Vec<SemanticEntity> {
         let hash = content_hash_u64(content);
         let key = (rel_path.to_string(), hash);
 
@@ -230,7 +219,9 @@ impl WeaveServer {
         }
     }
 
-    #[tool(description = "List all semantic entities (functions, classes, etc.) in a file with their types and line ranges")]
+    #[tool(
+        description = "List all semantic entities (functions, classes, etc.) in a file with their types and line ranges"
+    )]
     async fn weave_extract_entities(
         &self,
         Parameters(params): Parameters<ExtractEntitiesParams>,
@@ -239,8 +230,7 @@ impl WeaveServer {
             .get_context(Some(&params.file_path))
             .await
             .map_err(internal_err)?;
-        let (rel_path, abs_path) =
-            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
 
         let entities = self.cached_extract_entities(&content, &rel_path).await;
@@ -267,7 +257,9 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Claim an entity before editing it. Advisory lock that signals to other agents you're working on this entity. Returns predictive warnings if related entities are claimed by other agents.")]
+    #[tool(
+        description = "Claim an entity before editing it. Advisory lock that signals to other agents you're working on this entity. Returns predictive warnings if related entities are claimed by other agents."
+    )]
     async fn weave_claim_entity(
         &self,
         Parameters(params): Parameters<ClaimEntityParams>,
@@ -276,8 +268,7 @@ impl WeaveServer {
             .get_context(Some(&params.file_path))
             .await
             .map_err(internal_err)?;
-        let (rel_path, abs_path) =
-            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
         let entity_id =
             Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
@@ -377,8 +368,7 @@ impl WeaveServer {
             .get_context(Some(&params.file_path))
             .await
             .map_err(internal_err)?;
-        let (rel_path, abs_path) =
-            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
         let entity_id =
             Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
@@ -394,7 +384,9 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Show entity status for a file: all entities with their claim and modification status")]
+    #[tool(
+        description = "Show entity status for a file: all entities with their claim and modification status"
+    )]
     async fn weave_status(
         &self,
         Parameters(params): Parameters<StatusParams>,
@@ -403,8 +395,7 @@ impl WeaveServer {
             .get_context(Some(&params.file_path))
             .await
             .map_err(internal_err)?;
-        let (rel_path, abs_path) =
-            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
 
         let mut state = ctx.state.lock().await;
@@ -415,8 +406,8 @@ impl WeaveServer {
             &self.registry,
         );
 
-        let entities = get_entities_for_file(&state, &rel_path)
-            .map_err(|e| internal_err(e.to_string()))?;
+        let entities =
+            get_entities_for_file(&state, &rel_path).map_err(|e| internal_err(e.to_string()))?;
 
         let file_entities = self.cached_extract_entities(&content, &rel_path).await;
 
@@ -452,8 +443,7 @@ impl WeaveServer {
             .get_context(Some(&params.file_path))
             .await
             .map_err(internal_err)?;
-        let (rel_path, abs_path) =
-            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
         let entity_id =
             Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
@@ -484,7 +474,9 @@ impl WeaveServer {
         }
     }
 
-    #[tool(description = "Detect entities being worked on by multiple agents — potential merge conflicts")]
+    #[tool(
+        description = "Detect entities being worked on by multiple agents — potential merge conflicts"
+    )]
     async fn weave_potential_conflicts(
         &self,
         Parameters(params): Parameters<PotentialConflictsParams>,
@@ -525,7 +517,9 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Preview what a merge between two branches would look like using weave's entity-level analysis")]
+    #[tool(
+        description = "Preview what a merge between two branches would look like using weave's entity-level analysis"
+    )]
     async fn weave_preview_merge(
         &self,
         Parameters(params): Parameters<PreviewMergeParams>,
@@ -606,13 +600,22 @@ impl WeaveServer {
             }));
         }
 
-        let clean_count = results.iter().filter(|r| r["clean"].as_bool().unwrap_or(true)).count();
+        let clean_count = results
+            .iter()
+            .filter(|r| r["clean"].as_bool().unwrap_or(true))
+            .count();
         let conflict_count = results.len() - clean_count;
         let overall_confidence = if conflict_count > 0 {
             "conflict"
-        } else if results.iter().any(|r| r["confidence"].as_str() == Some("medium")) {
+        } else if results
+            .iter()
+            .any(|r| r["confidence"].as_str() == Some("medium"))
+        {
             "medium"
-        } else if results.iter().any(|r| r["confidence"].as_str() == Some("high")) {
+        } else if results
+            .iter()
+            .any(|r| r["confidence"].as_str() == Some("high"))
+        {
             "high"
         } else {
             "very_high"
@@ -631,7 +634,9 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Get entities that the given entity depends on (calls, references, imports)")]
+    #[tool(
+        description = "Get entities that the given entity depends on (calls, references, imports)"
+    )]
     async fn weave_get_dependencies(
         &self,
         Parameters(params): Parameters<EntityDepsParams>,
@@ -640,8 +645,7 @@ impl WeaveServer {
             .get_context(Some(&params.file_path))
             .await
             .map_err(internal_err)?;
-        let (rel_path, _abs_path) =
-            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
         // Build graph from all supported files in the repo
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
@@ -652,9 +656,19 @@ impl WeaveServer {
             .entities
             .values()
             .find(|e| e.name == params.entity_name && e.file_path == rel_path)
-            .or_else(|| graph.entities.values().find(|e| e.name == params.entity_name))
+            .or_else(|| {
+                graph
+                    .entities
+                    .values()
+                    .find(|e| e.name == params.entity_name)
+            })
             .map(|e| e.id.clone())
-            .ok_or_else(|| internal_err(format!("Entity '{}' not found in graph", params.entity_name)))?;
+            .ok_or_else(|| {
+                internal_err(format!(
+                    "Entity '{}' not found in graph",
+                    params.entity_name
+                ))
+            })?;
 
         let deps = graph.get_dependencies(&entity_id);
         let result: Vec<serde_json::Value> = deps
@@ -679,7 +693,9 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Get entities that depend on the given entity (reverse dependencies — who calls/references it)")]
+    #[tool(
+        description = "Get entities that depend on the given entity (reverse dependencies — who calls/references it)"
+    )]
     async fn weave_get_dependents(
         &self,
         Parameters(params): Parameters<EntityDepsParams>,
@@ -688,8 +704,7 @@ impl WeaveServer {
             .get_context(Some(&params.file_path))
             .await
             .map_err(internal_err)?;
-        let (rel_path, _abs_path) =
-            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
         let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
@@ -698,9 +713,19 @@ impl WeaveServer {
             .entities
             .values()
             .find(|e| e.name == params.entity_name && e.file_path == rel_path)
-            .or_else(|| graph.entities.values().find(|e| e.name == params.entity_name))
+            .or_else(|| {
+                graph
+                    .entities
+                    .values()
+                    .find(|e| e.name == params.entity_name)
+            })
             .map(|e| e.id.clone())
-            .ok_or_else(|| internal_err(format!("Entity '{}' not found in graph", params.entity_name)))?;
+            .ok_or_else(|| {
+                internal_err(format!(
+                    "Entity '{}' not found in graph",
+                    params.entity_name
+                ))
+            })?;
 
         let deps = graph.get_dependents(&entity_id);
         let result: Vec<serde_json::Value> = deps
@@ -725,7 +750,9 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Impact analysis: if this entity changes, what else might be affected? Returns all transitive dependents.")]
+    #[tool(
+        description = "Impact analysis: if this entity changes, what else might be affected? Returns all transitive dependents."
+    )]
     async fn weave_impact_analysis(
         &self,
         Parameters(params): Parameters<ImpactAnalysisParams>,
@@ -734,8 +761,7 @@ impl WeaveServer {
             .get_context(Some(&params.file_path))
             .await
             .map_err(internal_err)?;
-        let (rel_path, _abs_path) =
-            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
         let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
@@ -744,9 +770,19 @@ impl WeaveServer {
             .entities
             .values()
             .find(|e| e.name == params.entity_name && e.file_path == rel_path)
-            .or_else(|| graph.entities.values().find(|e| e.name == params.entity_name))
+            .or_else(|| {
+                graph
+                    .entities
+                    .values()
+                    .find(|e| e.name == params.entity_name)
+            })
             .map(|e| e.id.clone())
-            .ok_or_else(|| internal_err(format!("Entity '{}' not found in graph", params.entity_name)))?;
+            .ok_or_else(|| {
+                internal_err(format!(
+                    "Entity '{}' not found in graph",
+                    params.entity_name
+                ))
+            })?;
 
         let impact = graph.impact_analysis(&entity_id);
         let result: Vec<serde_json::Value> = impact
@@ -794,7 +830,9 @@ impl WeaveServer {
         ))]))
     }
 
-    #[tool(description = "Send a heartbeat to keep agent status active and update what entities it's working on")]
+    #[tool(
+        description = "Send a heartbeat to keep agent status active and update what entities it's working on"
+    )]
     async fn weave_agent_heartbeat(
         &self,
         Parameters(params): Parameters<AgentHeartbeatParams>,
@@ -808,7 +846,9 @@ impl WeaveServer {
         Ok(CallToolResult::success(vec![Content::text("OK")]))
     }
 
-    #[tool(description = "Semantic diff between two refs: shows entity-level changes (added, modified, deleted, renamed) instead of line-level diffs")]
+    #[tool(
+        description = "Semantic diff between two refs: shows entity-level changes (added, modified, deleted, renamed) instead of line-level diffs"
+    )]
     async fn weave_diff(
         &self,
         Parameters(params): Parameters<DiffParams>,
@@ -823,9 +863,10 @@ impl WeaveServer {
         let files = if let Some(ref fp) = params.file_path {
             let p = Path::new(fp);
             if p.is_absolute() {
-                let root = git::find_repo_root_from_path(p)
-                    .map_err(|e| internal_err(e.to_string()))?;
-                let rel = p.strip_prefix(&root)
+                let root =
+                    git::find_repo_root_from_path(p).map_err(|e| internal_err(e.to_string()))?;
+                let rel = p
+                    .strip_prefix(&root)
                     .map(|r| r.to_string_lossy().to_string())
                     .unwrap_or_else(|_| fp.clone());
                 vec![rel]
@@ -882,7 +923,9 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Parse weave conflict markers in a file and return a structured summary with entity names, conflict types, confidence levels, and resolution hints")]
+    #[tool(
+        description = "Parse weave conflict markers in a file and return a structured summary with entity names, conflict types, confidence levels, and resolution hints"
+    )]
     async fn weave_merge_summary(
         &self,
         Parameters(params): Parameters<MergeSummaryParams>,
@@ -891,8 +934,7 @@ impl WeaveServer {
             .get_context(Some(&params.file_path))
             .await
             .map_err(internal_err)?;
-        let (_rel_path, abs_path) =
-            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (_rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
         let content = Self::read_file_at(&abs_path, &params.file_path).map_err(internal_err)?;
         let conflicts = weave_core::parse_weave_conflicts(&content);
@@ -921,7 +963,9 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Run a merge between two branches and return per-entity audit trail: what resolution strategy was used for each entity (unchanged, diffy_merged, inner_merged, conflict, etc.)")]
+    #[tool(
+        description = "Run a merge between two branches and return per-entity audit trail: what resolution strategy was used for each entity (unchanged, diffy_merged, inner_merged, conflict, etc.)"
+    )]
     async fn weave_merge_audit(
         &self,
         Parameters(params): Parameters<MergeAuditParams>,
@@ -986,7 +1030,9 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Validate a merge for semantic risks: detect when auto-merged entities reference other entities that were also modified")]
+    #[tool(
+        description = "Validate a merge for semantic risks: detect when auto-merged entities reference other entities that were also modified"
+    )]
     async fn weave_validate_merge(
         &self,
         Parameters(params): Parameters<ValidateMergeParams>,
@@ -1075,7 +1121,9 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Write entity content to the CRDT. Increments the agent's version vector counter and stores the source code.")]
+    #[tool(
+        description = "Write entity content to the CRDT. Increments the agent's version vector counter and stores the source code."
+    )]
     async fn weave_update_entity_content(
         &self,
         Parameters(params): Parameters<UpdateEntityContentParams>,
@@ -1084,8 +1132,7 @@ impl WeaveServer {
             .get_context(Some(&params.file_path))
             .await
             .map_err(internal_err)?;
-        let (rel_path, abs_path) =
-            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
         let entity_id =
             Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
@@ -1109,12 +1156,18 @@ impl WeaveServer {
             );
         }
 
-        update_entity_content(&mut state, &params.agent_id, &entity_id, &params.content, &hash)
-            .map_err(|e| internal_err(e.to_string()))?;
+        update_entity_content(
+            &mut state,
+            &params.agent_id,
+            &entity_id,
+            &params.content,
+            &hash,
+        )
+        .map_err(|e| internal_err(e.to_string()))?;
         let _ = state.save();
 
-        let status = get_entity_content(&state, &entity_id)
-            .map_err(|e| internal_err(e.to_string()))?;
+        let status =
+            get_entity_content(&state, &entity_id).map_err(|e| internal_err(e.to_string()))?;
 
         let response = serde_json::json!({
             "entity": params.entity_name,
@@ -1128,7 +1181,9 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Read entity content from the CRDT, including version vector, merge state, and any conflict details")]
+    #[tool(
+        description = "Read entity content from the CRDT, including version vector, merge state, and any conflict details"
+    )]
     async fn weave_get_entity_content(
         &self,
         Parameters(params): Parameters<GetEntityContentParams>,
@@ -1137,8 +1192,7 @@ impl WeaveServer {
             .get_context(Some(&params.file_path))
             .await
             .map_err(internal_err)?;
-        let (rel_path, abs_path) =
-            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
         let entity_id =
             Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
@@ -1174,7 +1228,9 @@ impl WeaveServer {
         }
     }
 
-    #[tool(description = "Trigger entity-level merge for a file. Compares version vectors, auto-merges where possible, marks conflicts.")]
+    #[tool(
+        description = "Trigger entity-level merge for a file. Compares version vectors, auto-merges where possible, marks conflicts."
+    )]
     async fn weave_merge_file(
         &self,
         Parameters(params): Parameters<MergeFileParams>,
@@ -1183,8 +1239,7 @@ impl WeaveServer {
             .get_context(Some(&params.file_path))
             .await
             .map_err(internal_err)?;
-        let (rel_path, _abs_path) =
-            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
         let mut state = ctx.state.lock().await;
 
@@ -1213,7 +1268,9 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Resolve a conflict on an entity by providing the resolved content. Merges version vectors and clears conflict state.")]
+    #[tool(
+        description = "Resolve a conflict on an entity by providing the resolved content. Merges version vectors and clears conflict state."
+    )]
     async fn weave_resolve_conflict(
         &self,
         Parameters(params): Parameters<ResolveConflictParams>,
@@ -1222,8 +1279,7 @@ impl WeaveServer {
             .get_context(Some(&params.file_path))
             .await
             .map_err(internal_err)?;
-        let (rel_path, abs_path) =
-            Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
         let entity_id =
             Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
@@ -1232,8 +1288,14 @@ impl WeaveServer {
         let hash = format!("{:x}", content_hash_u64(&params.resolved_content));
 
         let mut state = ctx.state.lock().await;
-        resolve_entity_conflict(&mut state, &params.agent_id, &entity_id, &params.resolved_content, &hash)
-            .map_err(|e| internal_err(e.to_string()))?;
+        resolve_entity_conflict(
+            &mut state,
+            &params.agent_id,
+            &entity_id,
+            &params.resolved_content,
+            &hash,
+        )
+        .map_err(|e| internal_err(e.to_string()))?;
         let _ = state.save();
 
         Ok(CallToolResult::success(vec![Content::text(

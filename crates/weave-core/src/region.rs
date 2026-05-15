@@ -208,7 +208,8 @@ fn find_leading_comment_start(lines: &[&str], entity_start: usize, min_line: usi
             || trimmed.starts_with("/**") // JSDoc/JavaDoc one-liner
             || trimmed.starts_with("* ")  // JSDoc/JavaDoc continuation
             || trimmed == "*"             // Empty JSDoc line
-            || trimmed == "*/"            // End of JSDoc block
+            || trimmed == "*/"
+        // End of JSDoc block
         {
             comment_start = line_idx;
             if line_idx == min_line {
@@ -256,12 +257,19 @@ export function world() {
         let plugin = registry.get_plugin("test.ts").unwrap();
         let entities = plugin.extract_entities(content, "test.ts");
 
-        assert!(!entities.is_empty(), "Should extract entities from TypeScript");
+        assert!(
+            !entities.is_empty(),
+            "Should extract entities from TypeScript"
+        );
 
         let regions = extract_regions(content, &entities);
 
         // Should have interstitial + entity regions
-        assert!(regions.len() >= 2, "Should have multiple regions, got {}", regions.len());
+        assert!(
+            regions.len() >= 2,
+            "Should have multiple regions, got {}",
+            regions.len()
+        );
 
         // Verify entities are present
         let entity_regions: Vec<_> = regions
@@ -272,9 +280,20 @@ export function world() {
             })
             .collect();
 
-        let entity_names: Vec<&str> = entity_regions.iter().map(|e| e.entity_name.as_str()).collect();
-        assert!(entity_names.contains(&"hello"), "Should find hello function, got {:?}", entity_names);
-        assert!(entity_names.contains(&"world"), "Should find world function, got {:?}", entity_names);
+        let entity_names: Vec<&str> = entity_regions
+            .iter()
+            .map(|e| e.entity_name.as_str())
+            .collect();
+        assert!(
+            entity_names.contains(&"hello"),
+            "Should find hello function, got {:?}",
+            entity_names
+        );
+        assert!(
+            entity_names.contains(&"world"),
+            "Should find world function, got {:?}",
+            entity_names
+        );
     }
 
     #[test]
@@ -299,14 +318,20 @@ export function world() {
         let plugin = registry.get_plugin("test.ts").unwrap();
         let entities = plugin.extract_entities(content, "test.ts");
 
-        let _hello = entities.iter().find(|e| e.name == "hello").expect("Should find hello");
+        let _hello = entities
+            .iter()
+            .find(|e| e.name == "hello")
+            .expect("Should find hello");
         let regions = extract_regions(content, &entities);
 
         // Find the hello entity region
-        let hello_region = regions.iter().find(|r| match r {
-            FileRegion::Entity(e) => e.entity_name == "hello",
-            _ => false,
-        }).expect("Should find hello region");
+        let hello_region = regions
+            .iter()
+            .find(|r| match r {
+                FileRegion::Entity(e) => e.entity_name == "hello",
+                _ => false,
+            })
+            .expect("Should find hello region");
 
         // The entity region should include the JSDoc comment
         assert!(
@@ -326,7 +351,8 @@ export function world() {
             assert!(
                 !inter.content().contains("/**") || inter.content().contains("@param") == false,
                 "Interstitial should not contain the bundled JSDoc. Key: {:?}, Content: {:?}",
-                inter.key(), inter.content(),
+                inter.key(),
+                inter.content(),
             );
         }
     }
@@ -355,10 +381,13 @@ fn subtract(a: i32, b: i32) -> i32 {
         let entities = plugin.extract_entities(content, "test.rs");
 
         let regions = extract_regions(content, &entities);
-        let add_region = regions.iter().find(|r| match r {
-            FileRegion::Entity(e) => e.entity_name == "add",
-            _ => false,
-        }).expect("Should find add region");
+        let add_region = regions
+            .iter()
+            .find(|r| match r {
+                FileRegion::Entity(e) => e.entity_name == "add",
+                _ => false,
+            })
+            .expect("Should find add region");
 
         assert!(
             add_region.content().contains("/// Adds two numbers"),

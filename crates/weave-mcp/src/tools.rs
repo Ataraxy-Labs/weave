@@ -108,9 +108,13 @@ pub struct MergeSummaryParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DiffParams {
-    #[schemars(description = "Base ref to compare from (branch, tag, or commit hash, e.g. 'main')")]
+    #[schemars(
+        description = "Base ref to compare from (branch, tag, or commit hash, e.g. 'main')"
+    )]
     pub base_ref: String,
-    #[schemars(description = "Target ref to compare to (branch, tag, or commit hash, e.g. 'feature-x'). Defaults to HEAD.")]
+    #[schemars(
+        description = "Target ref to compare to (branch, tag, or commit hash, e.g. 'feature-x'). Defaults to HEAD."
+    )]
     pub target_ref: Option<String>,
     #[schemars(description = "Optional: diff only this file")]
     pub file_path: Option<String>,

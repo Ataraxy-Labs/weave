@@ -84,21 +84,24 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Setup { ref driver } => {
-            commands::setup::run(driver.as_deref())
-        }
+        Commands::Setup { ref driver } => commands::setup::run(driver.as_deref()),
         Commands::Unsetup => commands::setup::unsetup(),
-        Commands::Preview { ref branch, ref file } => {
-            commands::preview::run(branch, file.as_deref())
-        }
-        Commands::Status { ref file, ref agent } => {
-            commands::status::run(file.as_deref(), agent.as_deref())
-        }
+        Commands::Preview {
+            ref branch,
+            ref file,
+        } => commands::preview::run(branch, file.as_deref()),
+        Commands::Status {
+            ref file,
+            ref agent,
+        } => commands::status::run(file.as_deref(), agent.as_deref()),
         Commands::Bench => commands::bench::run(),
-        Commands::BenchRepo { ref repo, limit, show_diff, ref save } => commands::bench_repo::run(repo, limit, show_diff, save.as_deref()),
-        Commands::Summary { ref file, json } => {
-            commands::summary::run(file, json)
-        }
+        Commands::BenchRepo {
+            ref repo,
+            limit,
+            show_diff,
+            ref save,
+        } => commands::bench_repo::run(repo, limit, show_diff, save.as_deref()),
+        Commands::Summary { ref file, json } => commands::summary::run(file, json),
         Commands::Claim {
             ref agent_id,
             ref file_path,

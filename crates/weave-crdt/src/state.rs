@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use automerge::{AutoCommit, ObjType, ReadDoc, Value, ROOT, transaction::Transactable};
+use automerge::{transaction::Transactable, AutoCommit, ObjType, ReadDoc, Value, ROOT};
 
 use crate::error::{Result, WeaveError};
 
@@ -93,16 +93,19 @@ impl EntityStateDoc {
         }
 
         // Set schema version
-        self.doc.put(ROOT, "schema_version", SCHEMA_VERSION as i64)?;
+        self.doc
+            .put(ROOT, "schema_version", SCHEMA_VERSION as i64)?;
 
         // Ensure file_entity_order exists
         if self.doc.get(ROOT, "file_entity_order")?.is_none() {
-            self.doc.put_object(ROOT, "file_entity_order", ObjType::Map)?;
+            self.doc
+                .put_object(ROOT, "file_entity_order", ObjType::Map)?;
         }
 
         // Ensure file_interstitials exists
         if self.doc.get(ROOT, "file_interstitials")?.is_none() {
-            self.doc.put_object(ROOT, "file_interstitials", ObjType::Map)?;
+            self.doc
+                .put_object(ROOT, "file_interstitials", ObjType::Map)?;
         }
 
         // Migrate entities: add version_vector and content fields
@@ -117,7 +120,9 @@ impl EntityStateDoc {
 
             // Create version_vector from existing version + last_modified_by
             if self.doc.get(&entity_obj, "version_vector")?.is_none() {
-                let vv_obj = self.doc.put_object(&entity_obj, "version_vector", ObjType::Map)?;
+                let vv_obj = self
+                    .doc
+                    .put_object(&entity_obj, "version_vector", ObjType::Map)?;
 
                 let version = match self.doc.get(&entity_obj, "version")? {
                     Some((Value::Scalar(v), _)) => match v.as_ref() {

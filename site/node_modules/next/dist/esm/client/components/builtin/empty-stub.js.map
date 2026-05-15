@@ -1,0 +1,1 @@
+{"version":3,"sources":["../../../../../src/client/components/builtin/empty-stub.tsx"],"sourcesContent":["export default function Empty() {\n  return null\n}\n"],"names":["Empty"],"mappings":"AAAA,eAAe,SAASA;IACtB,OAAO;AACT","ignoreList":[0]}

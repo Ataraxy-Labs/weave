@@ -9,7 +9,15 @@ fn setup() -> EntityStateDoc {
 
 fn setup_with_entity(entity_id: &str, name: &str) -> EntityStateDoc {
     let mut state = setup();
-    upsert_entity(&mut state, entity_id, name, "function", "src/lib.rs", "hash0").unwrap();
+    upsert_entity(
+        &mut state,
+        entity_id,
+        name,
+        "function",
+        "src/lib.rs",
+        "hash0",
+    )
+    .unwrap();
     state
 }
 
@@ -201,7 +209,15 @@ fn test_migration_idempotent() {
     // Create and populate a doc via open (saves to disk)
     {
         let mut state = EntityStateDoc::open(&path).unwrap();
-        upsert_entity(&mut state, "eid1", "my_func", "function", "src/lib.rs", "h0").unwrap();
+        upsert_entity(
+            &mut state,
+            "eid1",
+            "my_func",
+            "function",
+            "src/lib.rs",
+            "h0",
+        )
+        .unwrap();
         update_entity_content(&mut state, "agent-1", "eid1", "content_v1", "h1").unwrap();
         state.save().unwrap();
     }

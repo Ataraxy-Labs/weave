@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    padding: 40px;
+  }
+  .container {
+    width: 1200px;
+    background: #0d1117;
+  }
+  .header {
+    text-align: center;
+    margin-bottom: 44px;
+  }
+  .header h1 {
+    font-size: 36px;
+    font-weight: 700;
+    color: #e6edf3;
+    letter-spacing: -0.5px;
+  }
+  .header h1 span {
+    color: #58a6ff;
+  }
+  .header p {
+    color: #8b949e;
+    font-size: 15px;
+    margin-top: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  .panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-bottom: 32px;
+  }
+  .panel {
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid #30363d;
+  }
+  .panel-header {
+    padding: 12px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .panel.git .panel-header {
+    background: #1c1214;
+    color: #f85149;
+    border-bottom: 1px solid #30363d;
+  }
+  .panel.weave .panel-header {
+    background: #0f1b15;
+    color: #3fb950;
+    border-bottom: 1px solid #30363d;
+  }
+  .panel-body {
+    padding: 16px;
+    font-size: 13px;
+    line-height: 1.7;
+    background: #161b22;
+    min-height: 260px;
+  }
+  .conflict { color: #f85149; font-weight: 600; }
+  .ours { color: #f0883e; }
+  .theirs { color: #d2a8ff; }
+  .normal { color: #8b949e; }
+  .clean { color: #e6edf3; }
+  .added { color: #3fb950; }
+  .dim { color: #484f58; }
+  .keyword { color: #ff7b72; }
+  .func { color: #d2a8ff; }
+  .string { color: #a5d6ff; }
+  .param { color: #ffa657; }
+
+  .arrow-row {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 32px;
+    color: #8b949e;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+  }
+  .arrow-row .arrow {
+    font-size: 24px;
+    color: #3fb950;
+  }
+
+  .footer {
+    text-align: center;
+    color: #8b949e;
+    font-size: 14px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  .footer code {
+    background: #21262d;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    color: #58a6ff;
+    font-size: 14px;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1><span>weave</span> &mdash; structural merge for git</h1>
+    <p>Merges functions, not lines. Sits on top of git.</p>
+  </div>
+
+  <div class="panels">
+    <div class="panel git">
+      <div class="panel-header">
+        <span>&#10005;</span> git merge
+      </div>
+      <div class="panel-body">
+        <span class="normal"><span class="keyword">def</span> <span class="func">calculate_total</span>(<span class="param">items</span>):</span><br>
+        <span class="conflict">&lt;&lt;&lt;&lt;&lt;&lt;&lt; HEAD</span><br>
+        <span class="ours">&nbsp;&nbsp;tax = sum(i.price for i in items) * 0.08</span><br>
+        <span class="ours">&nbsp;&nbsp;return sum(i.price for i in items) + tax</span><br>
+        <span class="conflict">=======</span><br>
+        <span class="theirs">&nbsp;&nbsp;discount = get_bulk_discount(items)</span><br>
+        <span class="theirs">&nbsp;&nbsp;return sum(i.price for i in items) - discount</span><br>
+        <span class="conflict">&gt;&gt;&gt;&gt;&gt;&gt;&gt; feature/discounts</span><br>
+        <br>
+        <span class="normal"><span class="keyword">def</span> <span class="func">format_receipt</span>(<span class="param">order</span>):</span><br>
+        <span class="conflict">&lt;&lt;&lt;&lt;&lt;&lt;&lt; HEAD</span><br>
+        <span class="ours">&nbsp;&nbsp;header = f"Receipt #{order.id}"</span><br>
+        <span class="conflict">=======</span><br>
+        <span class="theirs">&nbsp;&nbsp;header = f"Invoice #{order.id}"</span><br>
+        <span class="conflict">&gt;&gt;&gt;&gt;&gt;&gt;&gt; feature/discounts</span><br>
+        <span class="ours">&nbsp;&nbsp;return header</span><br>
+      </div>
+    </div>
+
+    <div class="panel weave">
+      <div class="panel-header">
+        <span>&#10003;</span> weave merge
+      </div>
+      <div class="panel-body">
+        <span class="clean"><span class="keyword">def</span> <span class="func">calculate_total</span>(<span class="param">items</span>):</span><br>
+        <span class="added">&nbsp;&nbsp;tax = sum(i.price for i in items) * 0.08</span><br>
+        <span class="added">&nbsp;&nbsp;discount = get_bulk_discount(items)</span><br>
+        <span class="added">&nbsp;&nbsp;subtotal = sum(i.price for i in items)</span><br>
+        <span class="added">&nbsp;&nbsp;return subtotal + tax - discount</span><br>
+        <br>
+        <span class="clean"><span class="keyword">def</span> <span class="func">format_receipt</span>(<span class="param">order</span>):</span><br>
+        <span class="dim">&nbsp;&nbsp;<i># both sides edited &rarr; flagged for review</i></span><br>
+        <span class="clean">&nbsp;&nbsp;header = f"Invoice #{order.id}"</span><br>
+        <span class="clean">&nbsp;&nbsp;return header</span><br>
+        <br>
+        <span class="dim">&nbsp;&nbsp;<i># different functions? merged clean.</i></span><br>
+        <span class="dim">&nbsp;&nbsp;<i># same function? flagged, not mangled.</i></span><br>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-row">
+    git sees two edits to the same file <span class="arrow">&rarr;</span> conflict &nbsp;&nbsp;|&nbsp;&nbsp; weave sees two edits to different functions <span class="arrow">&rarr;</span> clean merge
+  </div>
+
+  <div class="footer">
+    <code>brew install weave</code>
+  </div>
+</div>
+</body>
+</html>

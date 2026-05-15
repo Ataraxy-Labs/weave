@@ -2,11 +2,12 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
-use weave_core::entity_merge_with_registry;
 use sem_core::parser::plugins::create_default_registry;
+use weave_core::entity_merge_with_registry;
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "ts", "tsx", "js", "jsx", "py", "rs", "go", "java", "c", "cpp", "cc", "h", "hpp", "rb", "cs", "dart",
+    "ts", "tsx", "js", "jsx", "py", "rs", "go", "java", "c", "cpp", "cc", "h", "hpp", "rb", "cs",
+    "dart",
 ];
 
 struct Stats {
@@ -44,7 +45,12 @@ struct BenchResults {
     cases: Vec<CaseRecord>,
 }
 
-pub fn run(repo_path: &str, limit: usize, show_diff: bool, save_dir: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    repo_path: &str,
+    limit: usize,
+    show_diff: bool,
+    save_dir: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Path::new(repo_path).canonicalize()?;
     // Support both regular and bare repos
     let is_git = repo.join(".git").exists() || repo.join("HEAD").exists();
@@ -52,7 +58,11 @@ pub fn run(repo_path: &str, limit: usize, show_diff: bool, save_dir: Option<&str
         return Err(format!("{} is not a git repository", repo_path).into());
     }
 
-    let repo_name = repo.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let repo_name = repo
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     println!("weave real-world benchmark");
     println!("==========================");
     println!("repo: {} ({})", repo_name, repo.display());
@@ -94,7 +104,11 @@ pub fn run(repo_path: &str, limit: usize, show_diff: bool, save_dir: Option<&str
     for (i, merge_commit) in merge_commits.iter().enumerate() {
         // Get the two parents
         let output = Command::new("git")
-            .args(["rev-parse", &format!("{}^1", merge_commit), &format!("{}^2", merge_commit)])
+            .args([
+                "rev-parse",
+                &format!("{}^1", merge_commit),
+                &format!("{}^2", merge_commit),
+            ])
             .current_dir(&repo)
             .output()?;
         let parents: Vec<String> = String::from_utf8(output.stdout)?
@@ -126,7 +140,10 @@ pub fn run(repo_path: &str, limit: usize, show_diff: bool, save_dir: Option<&str
         let both_touched: Vec<&String> = files_p1.intersection(&files_p2).collect();
 
         for file in both_touched {
-            let ext = Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or("");
+            let ext = Path::new(file)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
             if !SUPPORTED_EXTENSIONS.contains(&ext) {
                 continue;
             }
@@ -155,7 +172,14 @@ pub fn run(repo_path: &str, limit: usize, show_diff: bool, save_dir: Option<&str
             stats.files_tested += 1;
 
             let git_clean = diffy::merge(&base_content, &ours, &theirs).is_ok();
-            let weave_result = entity_merge_with_registry(&base_content, &ours, &theirs, file, &registry, &weave_core::MarkerFormat::default());
+            let weave_result = entity_merge_with_registry(
+                &base_content,
+                &ours,
+                &theirs,
+                file,
+                &registry,
+                &weave_core::MarkerFormat::default(),
+            );
             // Check content for actual weave conflict markers only.
             // Don't use is_clean() as it can false-positive when the conflicts vec has entries
             // but the content was resolved correctly. Also use specific marker format to avoid
@@ -170,7 +194,16 @@ pub fn run(repo_path: &str, limit: usize, show_diff: bool, save_dir: Option<&str
                     stats.regressions += 1;
                     println!("  REGR   {}  {}", short(merge_commit), file);
                     if let Some(dir) = save_dir {
-                        let case_dir = save_case(dir, merge_commit, file, &base_content, &ours, &theirs, &human, &weave_result.content)?;
+                        let case_dir = save_case(
+                            dir,
+                            merge_commit,
+                            file,
+                            &base_content,
+                            &ours,
+                            &theirs,
+                            &human,
+                            &weave_result.content,
+                        )?;
                         cases.push(CaseRecord {
                             commit: merge_commit.clone(),
                             file: file.clone(),
@@ -185,7 +218,16 @@ pub fn run(repo_path: &str, limit: usize, show_diff: bool, save_dir: Option<&str
                         stats.matches_human += 1;
                         println!("  MATCH  {}  {}", short(merge_commit), file);
                         if let Some(dir) = save_dir {
-                            let case_dir = save_case(dir, merge_commit, file, &base_content, &ours, &theirs, &human, &weave_result.content)?;
+                            let case_dir = save_case(
+                                dir,
+                                merge_commit,
+                                file,
+                                &base_content,
+                                &ours,
+                                &theirs,
+                                &human,
+                                &weave_result.content,
+                            )?;
                             cases.push(CaseRecord {
                                 commit: merge_commit.clone(),
                                 file: file.clone(),
@@ -200,7 +242,16 @@ pub fn run(repo_path: &str, limit: usize, show_diff: bool, save_dir: Option<&str
                             print_inline_diff(&weave_result.content, &human);
                         }
                         if let Some(dir) = save_dir {
-                            let case_dir = save_case(dir, merge_commit, file, &base_content, &ours, &theirs, &human, &weave_result.content)?;
+                            let case_dir = save_case(
+                                dir,
+                                merge_commit,
+                                file,
+                                &base_content,
+                                &ours,
+                                &theirs,
+                                &human,
+                                &weave_result.content,
+                            )?;
                             cases.push(CaseRecord {
                                 commit: merge_commit.clone(),
                                 file: file.clone(),
@@ -280,9 +331,18 @@ fn save_case(
     Ok(dir_name)
 }
 
-fn changed_files(repo: &Path, base: &str, head: &str) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
+fn changed_files(
+    repo: &Path,
+    base: &str,
+    head: &str,
+) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
     let output = Command::new("git")
-        .args(["diff", "--name-only", "--diff-filter=M", &format!("{}..{}", base, head)])
+        .args([
+            "diff",
+            "--name-only",
+            "--diff-filter=M",
+            &format!("{}..{}", base, head),
+        ])
         .current_dir(repo)
         .output()?;
     Ok(String::from_utf8(output.stdout)?
@@ -310,7 +370,10 @@ fn short(hash: &str) -> &str {
 }
 
 fn normalize(s: &str) -> String {
-    s.lines().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n")
+    s.lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn print_inline_diff(weave: &str, human: &str) {
@@ -375,6 +438,9 @@ fn print_results(s: &Stats, repo_name: &str) {
     }
 
     if s.regressions > 0 {
-        println!("\nWARNING: {} regressions (git clean, weave conflict)", s.regressions);
+        println!(
+            "\nWARNING: {} regressions (git clean, weave conflict)",
+            s.regressions
+        );
     }
 }

@@ -3,10 +3,7 @@ use sem_core::parser::plugins::create_default_registry;
 use weave_core::git::find_repo_root;
 use weave_crdt::{get_agent_status, get_entities_for_file, sync_from_files, EntityStateDoc};
 
-pub fn run(
-    file: Option<&str>,
-    agent: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(file: Option<&str>, agent: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let repo_root = find_repo_root()?;
     let state_path = repo_root.join(".weave").join("state.automerge");
     let mut state = EntityStateDoc::open(&state_path)?;
@@ -18,11 +15,14 @@ pub fn run(
                 println!("Agent: {}", status.agent_id.bold());
                 println!("  Status: {}", status.status);
                 println!("  Branch: {}", status.branch);
-                println!("  Working on: {}", if status.working_on.is_empty() {
-                    "(nothing)".to_string()
-                } else {
-                    status.working_on.join(", ")
-                });
+                println!(
+                    "  Working on: {}",
+                    if status.working_on.is_empty() {
+                        "(nothing)".to_string()
+                    } else {
+                        status.working_on.join(", ")
+                    }
+                );
             }
             Err(_) => {
                 println!("Agent '{}' not found in state.", agent_id);

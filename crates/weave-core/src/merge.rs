@@ -4,21 +4,23 @@ use std::process::Command;
 use std::sync::{mpsc, LazyLock};
 use std::time::Duration;
 
-use serde::Serialize;
 use sem_core::model::change::ChangeType;
 use sem_core::model::entity::SemanticEntity;
 use sem_core::model::identity::match_entities;
 use sem_core::parser::plugins::create_default_registry;
 use sem_core::parser::registry::ParserRegistry;
+use serde::Serialize;
 
 /// Static parser registry shared across all merge operations.
 /// Avoids recreating 11 tree-sitter language parsers per merge call.
 static PARSER_REGISTRY: LazyLock<ParserRegistry> = LazyLock::new(create_default_registry);
 
-use crate::conflict::{classify_conflict, ConflictComplexity, ConflictKind, EntityConflict, MarkerFormat, MergeStats};
+use crate::conflict::{
+    classify_conflict, ConflictComplexity, ConflictKind, EntityConflict, MarkerFormat, MergeStats,
+};
+use crate::reconstruct::reconstruct;
 use crate::region::{extract_regions, EntityRegion, FileRegion};
 use crate::validate::SemanticWarning;
-use crate::reconstruct::reconstruct;
 
 /// How an individual entity was resolved during merge.
 #[derive(Debug, Clone, Serialize)]
@@ -64,8 +66,7 @@ pub struct MergeResult {
 
 impl MergeResult {
     pub fn is_clean(&self) -> bool {
-        self.conflicts.is_empty()
-            && !self.content.lines().any(|l| l.starts_with("<<<<<<< ours"))
+        self.conflicts.is_empty() && !self.content.lines().any(|l| l.starts_with("<<<<<<< ours"))
     }
 }
 
@@ -92,12 +93,7 @@ pub enum ResolvedEntity {
 /// - No parser matches the file type
 /// - Parser returns 0 entities for non-empty content
 /// - File exceeds 1MB
-pub fn entity_merge(
-    base: &str,
-    ours: &str,
-    theirs: &str,
-    file_path: &str,
-) -> MergeResult {
+pub fn entity_merge(base: &str, ours: &str, theirs: &str, file_path: &str) -> MergeResult {
     entity_merge_fmt(base, ours, theirs, file_path, &MarkerFormat::default())
 }
 
@@ -124,14 +120,24 @@ pub fn entity_merge_fmt(
 
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = entity_merge_with_registry(&base_owned, &ours_owned, &theirs_owned, &path_owned, &PARSER_REGISTRY, &fmt_owned);
+        let result = entity_merge_with_registry(
+            &base_owned,
+            &ours_owned,
+            &theirs_owned,
+            &path_owned,
+            &PARSER_REGISTRY,
+            &fmt_owned,
+        );
         let _ = tx.send(result);
     });
 
     match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
         Ok(result) => result,
         Err(_) => {
-            eprintln!("weave: merge timed out after {}s for {}, falling back to git merge-file", timeout_secs, file_path);
+            eprintln!(
+                "weave: merge timed out after {}s for {}, falling back to git merge-file",
+                timeout_secs, file_path
+            );
             let mut stats = MergeStats::default();
             stats.used_fallback = true;
             git_merge_file(base, ours, theirs, &mut stats)
@@ -265,13 +271,20 @@ pub fn entity_merge_with_registry(
         return line_level_fallback(base, ours, theirs, file_path);
     }
     // Allow empty entities if content is actually empty
-    if ours_entities.is_empty() && !ours.trim().is_empty() && theirs_entities.is_empty() && !theirs.trim().is_empty() {
+    if ours_entities.is_empty()
+        && !ours.trim().is_empty()
+        && theirs_entities.is_empty()
+        && !theirs.trim().is_empty()
+    {
         return line_level_fallback(base, ours, theirs, file_path);
     }
 
     // Fallback if too many duplicate entity names. Entity matching is O(n*m) on
     // same-named entities which can hang on files with many `var app = ...` etc.
-    if has_excessive_duplicates(&base_entities) || has_excessive_duplicates(&ours_entities) || has_excessive_duplicates(&theirs_entities) {
+    if has_excessive_duplicates(&base_entities)
+        || has_excessive_duplicates(&ours_entities)
+        || has_excessive_duplicates(&theirs_entities)
+    {
         return line_level_fallback(base, ours, theirs, file_path);
     }
 
@@ -288,7 +301,14 @@ pub fn entity_merge_with_registry(
 
     // Match entities: base↔ours and base↔theirs
     let ours_changes = match_entities(&base_entities, &ours_entities, file_path, None, None, None);
-    let theirs_changes = match_entities(&base_entities, &theirs_entities, file_path, None, None, None);
+    let theirs_changes = match_entities(
+        &base_entities,
+        &theirs_entities,
+        file_path,
+        None,
+        None,
+        None,
+    );
 
     // Build lookup maps
     let base_entity_map: HashMap<&str, &SemanticEntity> =
@@ -388,16 +408,35 @@ pub fn entity_merge_with_registry(
             let theirs_entity = theirs_entity_map.get(theirs_new_id.as_str());
             let base_name = base_entity.map(|e| e.name.as_str()).unwrap_or(entity_id);
             let ours_name = ours_entity.map(|e| e.name.as_str()).unwrap_or(ours_new_id);
-            let theirs_name = theirs_entity.map(|e| e.name.as_str()).unwrap_or(theirs_new_id);
+            let theirs_name = theirs_entity
+                .map(|e| e.name.as_str())
+                .unwrap_or(theirs_new_id);
 
-            let base_rc = base_entity.map(|e| base_region_content.get(e.id.as_str()).map(|s| s.to_string()).unwrap_or_else(|| e.content.clone()));
-            let ours_rc = ours_entity.map(|e| ours_region_content.get(e.id.as_str()).map(|s| s.to_string()).unwrap_or_else(|| e.content.clone()));
-            let theirs_rc = theirs_entity.map(|e| theirs_region_content.get(e.id.as_str()).map(|s| s.to_string()).unwrap_or_else(|| e.content.clone()));
+            let base_rc = base_entity.map(|e| {
+                base_region_content
+                    .get(e.id.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| e.content.clone())
+            });
+            let ours_rc = ours_entity.map(|e| {
+                ours_region_content
+                    .get(e.id.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| e.content.clone())
+            });
+            let theirs_rc = theirs_entity.map(|e| {
+                theirs_region_content
+                    .get(e.id.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| e.content.clone())
+            });
 
             stats.entities_conflicted += 1;
             let conflict = EntityConflict {
                 entity_name: base_name.to_string(),
-                entity_type: base_entity.map(|e| e.entity_type.clone()).unwrap_or_default(),
+                entity_type: base_entity
+                    .map(|e| e.entity_type.clone())
+                    .unwrap_or_default(),
                 kind: ConflictKind::RenameRename {
                     base_name: base_name.to_string(),
                     ours_name: ours_name.to_string(),
@@ -411,7 +450,9 @@ pub fn entity_merge_with_registry(
             conflicts.push(conflict.clone());
             audit.push(EntityAudit {
                 name: base_name.to_string(),
-                entity_type: base_entity.map(|e| e.entity_type.clone()).unwrap_or_default(),
+                entity_type: base_entity
+                    .map(|e| e.entity_type.clone())
+                    .unwrap_or_default(),
                 resolution: ResolutionStrategy::ConflictRenameRename,
             });
             let resolution = ResolvedEntity::Conflict(conflict);
@@ -425,10 +466,20 @@ pub fn entity_merge_with_registry(
 
         let in_base = base_entity_map.get(entity_id.as_str());
         // Follow rename chains: if base entity was renamed in ours/theirs, use renamed version
-        let ours_id = base_to_ours_rename.get(entity_id.as_str()).map(|s| s.as_str()).unwrap_or(entity_id.as_str());
-        let theirs_id = base_to_theirs_rename.get(entity_id.as_str()).map(|s| s.as_str()).unwrap_or(entity_id.as_str());
-        let in_ours = ours_entity_map.get(ours_id).or_else(|| ours_entity_map.get(entity_id.as_str()));
-        let in_theirs = theirs_entity_map.get(theirs_id).or_else(|| theirs_entity_map.get(entity_id.as_str()));
+        let ours_id = base_to_ours_rename
+            .get(entity_id.as_str())
+            .map(|s| s.as_str())
+            .unwrap_or(entity_id.as_str());
+        let theirs_id = base_to_theirs_rename
+            .get(entity_id.as_str())
+            .map(|s| s.as_str())
+            .unwrap_or(entity_id.as_str());
+        let in_ours = ours_entity_map
+            .get(ours_id)
+            .or_else(|| ours_entity_map.get(entity_id.as_str()));
+        let in_theirs = theirs_entity_map
+            .get(theirs_id)
+            .or_else(|| theirs_entity_map.get(entity_id.as_str()));
 
         let ours_change = ours_change_map.get(entity_id);
         let theirs_change = theirs_change_map.get(entity_id);
@@ -451,12 +502,14 @@ pub fn entity_merge_with_registry(
         );
 
         // Build audit entry from entity info
-        let entity_name = in_ours.map(|e| e.name.as_str())
+        let entity_name = in_ours
+            .map(|e| e.name.as_str())
             .or_else(|| in_theirs.map(|e| e.name.as_str()))
             .or_else(|| in_base.map(|e| e.name.as_str()))
             .unwrap_or(entity_id)
             .to_string();
-        let entity_type = in_ours.map(|e| e.entity_type.as_str())
+        let entity_type = in_ours
+            .map(|e| e.entity_type.as_str())
             .or_else(|| in_theirs.map(|e| e.entity_type.as_str()))
             .or_else(|| in_base.map(|e| e.entity_type.as_str()))
             .unwrap_or("")
@@ -543,39 +596,44 @@ pub fn entity_merge_with_registry(
         // drop means entities were silently lost.
         if conflicts.is_empty() && !merged_entities.is_empty() {
             let merged_top = filter_nested_entities(merged_entities);
-            let deleted_count = resolved_entities.values()
+            let deleted_count = resolved_entities
+                .values()
                 .filter(|r| matches!(r, ResolvedEntity::Deleted))
                 .count();
-            let expected_min = ours_entities.len().min(theirs_entities.len()).saturating_sub(deleted_count);
+            let expected_min = ours_entities
+                .len()
+                .min(theirs_entities.len())
+                .saturating_sub(deleted_count);
             if expected_min > 3 && merged_top.len() < expected_min * 80 / 100 {
                 return git_merge_file(base, ours, theirs, &mut stats);
             }
         }
-
     }
 
     // Line-level drop detection: lines present in all 3 inputs (unchanged by
     // either branch) must appear in the output. Dropping them is always wrong.
     // This runs on ALL clean merges, not just those with both-changed entities.
     if conflicts.is_empty() {
-        let base_lines: HashSet<&str> = base.lines()
+        let base_lines: HashSet<&str> = base
+            .lines()
             .map(|l| l.trim())
             .filter(|l| l.len() > 15 && !is_import_line_trimmed(l))
             .collect();
-        let ours_lines: HashSet<&str> = ours.lines()
+        let ours_lines: HashSet<&str> = ours
+            .lines()
             .map(|l| l.trim())
             .filter(|l| l.len() > 15 && !is_import_line_trimmed(l))
             .collect();
-        let theirs_lines: HashSet<&str> = theirs.lines()
+        let theirs_lines: HashSet<&str> = theirs
+            .lines()
             .map(|l| l.trim())
             .filter(|l| l.len() > 15 && !is_import_line_trimmed(l))
             .collect();
-        let output_lines: HashSet<&str> = content.lines()
-            .map(|l| l.trim())
-            .collect();
+        let output_lines: HashSet<&str> = content.lines().map(|l| l.trim()).collect();
 
         // Unchanged lines (in all 3) must be in output
-        let missing_unchanged = base_lines.iter()
+        let missing_unchanged = base_lines
+            .iter()
             .filter(|l| ours_lines.contains(*l) && theirs_lines.contains(*l))
             .filter(|l| !output_lines.contains(*l))
             .count();
@@ -624,10 +682,18 @@ pub fn entity_merge_with_registry(
     // Floor: never produce more conflict markers than git merge-file.
     // Entity merge can split one git conflict into multiple per-entity conflicts,
     // or interstitial merges can produce conflicts not tracked in the conflicts vec.
-    let entity_markers = entity_result.content.lines().filter(|l| l.starts_with("<<<<<<<")).count();
+    let entity_markers = entity_result
+        .content
+        .lines()
+        .filter(|l| l.starts_with("<<<<<<<"))
+        .count();
     if entity_markers > 0 {
         let git_result = git_merge_file(base, ours, theirs, &mut stats);
-        let git_markers = git_result.content.lines().filter(|l| l.starts_with("<<<<<<<")).count();
+        let git_markers = git_result
+            .content
+            .lines()
+            .filter(|l| l.starts_with("<<<<<<<"))
+            .count();
         if entity_markers > git_markers {
             return git_result;
         }
@@ -650,8 +716,10 @@ pub fn entity_merge_with_registry(
         if max_input_len > 500 && merged_len < max_input_len * 70 / 100 {
             // Check if the length reduction is explained by one branch deleting content
             let base_len = base.len();
-            let ours_deleted = base_len > ours.len() && (base_len - ours.len()) > max_input_len * 20 / 100;
-            let theirs_deleted = base_len > theirs.len() && (base_len - theirs.len()) > max_input_len * 20 / 100;
+            let ours_deleted =
+                base_len > ours.len() && (base_len - ours.len()) > max_input_len * 20 / 100;
+            let theirs_deleted =
+                base_len > theirs.len() && (base_len - theirs.len()) > max_input_len * 20 / 100;
             if !ours_deleted && !theirs_deleted {
                 return git_merge_file(base, ours, theirs, &mut stats);
             }
@@ -679,7 +747,9 @@ fn resolve_entity(
 ) -> (ResolvedEntity, ResolutionStrategy) {
     // Helper: get region content (from file lines) for an entity, falling back to entity.content
     let region_content = |entity: &SemanticEntity, map: &HashMap<&str, &str>| -> String {
-        map.get(entity.id.as_str()).map(|s| s.to_string()).unwrap_or_else(|| entity.content.clone())
+        map.get(entity.id.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| entity.content.clone())
     };
 
     match (in_base, in_ours, in_theirs) {
@@ -692,33 +762,57 @@ fn resolve_entity(
             let ours_rc_lazy = || region_content(ours, ours_region_content);
             let theirs_rc_lazy = || region_content(theirs, theirs_region_content);
 
-            let ours_modified = ours.content_hash != base.content_hash
-                || ours_rc_lazy() != base_rc_lazy();
-            let theirs_modified = theirs.content_hash != base.content_hash
-                || theirs_rc_lazy() != base_rc_lazy();
+            let ours_modified =
+                ours.content_hash != base.content_hash || ours_rc_lazy() != base_rc_lazy();
+            let theirs_modified =
+                theirs.content_hash != base.content_hash || theirs_rc_lazy() != base_rc_lazy();
 
             match (ours_modified, theirs_modified) {
                 (false, false) => {
                     // Neither changed
                     stats.entities_unchanged += 1;
-                    (ResolvedEntity::Clean(entity_to_region_with_content(ours, &region_content(ours, ours_region_content))), ResolutionStrategy::Unchanged)
+                    (
+                        ResolvedEntity::Clean(entity_to_region_with_content(
+                            ours,
+                            &region_content(ours, ours_region_content),
+                        )),
+                        ResolutionStrategy::Unchanged,
+                    )
                 }
                 (true, false) => {
                     // Only ours changed
                     stats.entities_ours_only += 1;
-                    (ResolvedEntity::Clean(entity_to_region_with_content(ours, &region_content(ours, ours_region_content))), ResolutionStrategy::OursOnly)
+                    (
+                        ResolvedEntity::Clean(entity_to_region_with_content(
+                            ours,
+                            &region_content(ours, ours_region_content),
+                        )),
+                        ResolutionStrategy::OursOnly,
+                    )
                 }
                 (false, true) => {
                     // Only theirs changed
                     stats.entities_theirs_only += 1;
-                    (ResolvedEntity::Clean(entity_to_region_with_content(theirs, &region_content(theirs, theirs_region_content))), ResolutionStrategy::TheirsOnly)
+                    (
+                        ResolvedEntity::Clean(entity_to_region_with_content(
+                            theirs,
+                            &region_content(theirs, theirs_region_content),
+                        )),
+                        ResolutionStrategy::TheirsOnly,
+                    )
                 }
                 (true, true) => {
                     // Both changed — try intra-entity merge
                     if ours.content_hash == theirs.content_hash {
                         // Same change in both — take ours
                         stats.entities_both_changed_merged += 1;
-                        (ResolvedEntity::Clean(entity_to_region_with_content(ours, &region_content(ours, ours_region_content))), ResolutionStrategy::ContentEqual)
+                        (
+                            ResolvedEntity::Clean(entity_to_region_with_content(
+                                ours,
+                                &region_content(ours, ours_region_content),
+                            )),
+                            ResolutionStrategy::ContentEqual,
+                        )
                     } else {
                         // Try diffy 3-way merge on region content (preserves full syntax)
                         let base_rc = region_content(base, base_region_content);
@@ -733,13 +827,20 @@ fn resolve_entity(
                         let (merge_base_rc, merge_ours_rc, merge_theirs_rc, _final_name) =
                             if ours_renamed && !theirs_renamed {
                                 // Ours renamed: normalize base+theirs to use ours' name
-                                let nb = replace_at_word_boundaries(&base_rc, &base.name, &ours.name);
-                                let nt = replace_at_word_boundaries(&theirs_rc, &theirs.name, &ours.name);
+                                let nb =
+                                    replace_at_word_boundaries(&base_rc, &base.name, &ours.name);
+                                let nt = replace_at_word_boundaries(
+                                    &theirs_rc,
+                                    &theirs.name,
+                                    &ours.name,
+                                );
                                 (nb, ours_rc.clone(), nt, Some(&ours.name))
                             } else if theirs_renamed && !ours_renamed {
                                 // Theirs renamed: normalize base+ours to use theirs' name
-                                let nb = replace_at_word_boundaries(&base_rc, &base.name, &theirs.name);
-                                let no = replace_at_word_boundaries(&ours_rc, &ours.name, &theirs.name);
+                                let nb =
+                                    replace_at_word_boundaries(&base_rc, &base.name, &theirs.name);
+                                let no =
+                                    replace_at_word_boundaries(&ours_rc, &ours.name, &theirs.name);
                                 (nb, no, theirs_rc.clone(), Some(&theirs.name))
                             } else {
                                 (base_rc.clone(), ours_rc.clone(), theirs_rc.clone(), None)
@@ -769,7 +870,10 @@ fn resolve_entity(
                                 theirs_content: Some(theirs_rc),
                                 base_content: Some(base_rc),
                             };
-                            return (ResolvedEntity::Conflict(conflict), ResolutionStrategy::ConflictRenameModify);
+                            return (
+                                ResolvedEntity::Conflict(conflict),
+                                ResolutionStrategy::ConflictRenameModify,
+                            );
                         }
 
                         // Whitespace-aware shortcut: if one side only changed
@@ -778,43 +882,67 @@ fn resolve_entity(
                         // another makes semantic changes.
                         if is_whitespace_only_diff(&base_rc, &ours_rc) {
                             stats.entities_theirs_only += 1;
-                            return (ResolvedEntity::Clean(entity_to_region_with_content(theirs, &theirs_rc)), ResolutionStrategy::TheirsOnly);
+                            return (
+                                ResolvedEntity::Clean(entity_to_region_with_content(
+                                    theirs, &theirs_rc,
+                                )),
+                                ResolutionStrategy::TheirsOnly,
+                            );
                         }
                         if is_whitespace_only_diff(&base_rc, &theirs_rc) {
                             stats.entities_ours_only += 1;
-                            return (ResolvedEntity::Clean(entity_to_region_with_content(ours, &ours_rc)), ResolutionStrategy::OursOnly);
+                            return (
+                                ResolvedEntity::Clean(entity_to_region_with_content(
+                                    ours, &ours_rc,
+                                )),
+                                ResolutionStrategy::OursOnly,
+                            );
                         }
 
                         // Pick the renamed entity for output (prefer the side that did the rename)
-                        let output_entity = if ours_renamed { ours } else if theirs_renamed { theirs } else { ours };
+                        let output_entity = if ours_renamed {
+                            ours
+                        } else if theirs_renamed {
+                            theirs
+                        } else {
+                            ours
+                        };
 
                         match diffy_merge(&merge_base_rc, &merge_ours_rc, &merge_theirs_rc) {
                             Some(merged) => {
                                 stats.entities_both_changed_merged += 1;
                                 stats.resolved_via_diffy += 1;
-                                (ResolvedEntity::Clean(EntityRegion {
-                                    entity_id: output_entity.id.clone(),
-                                    entity_name: output_entity.name.clone(),
-                                    entity_type: output_entity.entity_type.clone(),
-                                    content: merged,
-                                    start_line: output_entity.start_line,
-                                    end_line: output_entity.end_line,
-                                }), ResolutionStrategy::DiffyMerged)
+                                (
+                                    ResolvedEntity::Clean(EntityRegion {
+                                        entity_id: output_entity.id.clone(),
+                                        entity_name: output_entity.name.clone(),
+                                        entity_type: output_entity.entity_type.clone(),
+                                        content: merged,
+                                        start_line: output_entity.start_line,
+                                        end_line: output_entity.end_line,
+                                    }),
+                                    ResolutionStrategy::DiffyMerged,
+                                )
                             }
                             None => {
                                 // Strategy 1: decorator/annotation-aware merge
                                 // Decorators are unordered annotations — merge them commutatively
-                                if let Some(merged) = try_decorator_aware_merge(&base_rc, &ours_rc, &theirs_rc) {
+                                if let Some(merged) =
+                                    try_decorator_aware_merge(&base_rc, &ours_rc, &theirs_rc)
+                                {
                                     stats.entities_both_changed_merged += 1;
                                     stats.resolved_via_diffy += 1;
-                                    return (ResolvedEntity::Clean(EntityRegion {
-                                        entity_id: ours.id.clone(),
-                                        entity_name: ours.name.clone(),
-                                        entity_type: ours.entity_type.clone(),
-                                        content: merged,
-                                        start_line: ours.start_line,
-                                        end_line: ours.end_line,
-                                    }), ResolutionStrategy::DecoratorMerged);
+                                    return (
+                                        ResolvedEntity::Clean(EntityRegion {
+                                            entity_id: ours.id.clone(),
+                                            entity_name: ours.name.clone(),
+                                            entity_type: ours.entity_type.clone(),
+                                            content: merged,
+                                            start_line: ours.start_line,
+                                            end_line: ours.end_line,
+                                        }),
+                                        ResolutionStrategy::DecoratorMerged,
+                                    );
                                 }
 
                                 // Strategy 2: inner entity merge for container types
@@ -831,9 +959,15 @@ fn resolve_entity(
                                     let ours_start = ours.start_line;
                                     let theirs_start = in_theirs.map(|t| t.start_line).unwrap_or(1);
                                     if let Some(inner) = try_inner_entity_merge(
-                                        &base_rc, &ours_rc, &theirs_rc,
-                                        &base_children, &ours_children, &theirs_children,
-                                        base_start, ours_start, theirs_start,
+                                        &base_rc,
+                                        &ours_rc,
+                                        &theirs_rc,
+                                        &base_children,
+                                        &ours_children,
+                                        &theirs_children,
+                                        base_start,
+                                        ours_start,
+                                        theirs_start,
                                         marker_format,
                                     ) {
                                         if inner.has_conflicts {
@@ -842,44 +976,61 @@ fn resolve_entity(
                                             // members; clean members are merged normally.
                                             stats.entities_conflicted += 1;
                                             stats.resolved_via_inner_merge += 1;
-                                            let complexity = classify_conflict(Some(&base_rc), Some(&ours_rc), Some(&theirs_rc));
-                                            return (ResolvedEntity::ScopedConflict {
-                                                content: inner.content,
-                                                conflict: EntityConflict {
-                                                    entity_name: ours.name.clone(),
-                                                    entity_type: ours.entity_type.clone(),
-                                                    kind: ConflictKind::BothModified,
-                                                    complexity,
-                                                    ours_content: Some(ours_rc),
-                                                    theirs_content: Some(theirs_rc),
-                                                    base_content: Some(base_rc),
+                                            let complexity = classify_conflict(
+                                                Some(&base_rc),
+                                                Some(&ours_rc),
+                                                Some(&theirs_rc),
+                                            );
+                                            return (
+                                                ResolvedEntity::ScopedConflict {
+                                                    content: inner.content,
+                                                    conflict: EntityConflict {
+                                                        entity_name: ours.name.clone(),
+                                                        entity_type: ours.entity_type.clone(),
+                                                        kind: ConflictKind::BothModified,
+                                                        complexity,
+                                                        ours_content: Some(ours_rc),
+                                                        theirs_content: Some(theirs_rc),
+                                                        base_content: Some(base_rc),
+                                                    },
                                                 },
-                                            }, ResolutionStrategy::InnerMerged);
+                                                ResolutionStrategy::InnerMerged,
+                                            );
                                         } else {
                                             stats.entities_both_changed_merged += 1;
                                             stats.resolved_via_inner_merge += 1;
-                                            return (ResolvedEntity::Clean(EntityRegion {
-                                                entity_id: ours.id.clone(),
-                                                entity_name: ours.name.clone(),
-                                                entity_type: ours.entity_type.clone(),
-                                                content: inner.content,
-                                                start_line: ours.start_line,
-                                                end_line: ours.end_line,
-                                            }), ResolutionStrategy::InnerMerged);
+                                            return (
+                                                ResolvedEntity::Clean(EntityRegion {
+                                                    entity_id: ours.id.clone(),
+                                                    entity_name: ours.name.clone(),
+                                                    entity_type: ours.entity_type.clone(),
+                                                    content: inner.content,
+                                                    start_line: ours.start_line,
+                                                    end_line: ours.end_line,
+                                                }),
+                                                ResolutionStrategy::InnerMerged,
+                                            );
                                         }
                                     }
                                 }
                                 stats.entities_conflicted += 1;
-                                let complexity = classify_conflict(Some(&base_rc), Some(&ours_rc), Some(&theirs_rc));
-                                (ResolvedEntity::Conflict(EntityConflict {
-                                    entity_name: ours.name.clone(),
-                                    entity_type: ours.entity_type.clone(),
-                                    kind: ConflictKind::BothModified,
-                                    complexity,
-                                    ours_content: Some(ours_rc),
-                                    theirs_content: Some(theirs_rc),
-                                    base_content: Some(base_rc),
-                                }), ResolutionStrategy::ConflictBothModified)
+                                let complexity = classify_conflict(
+                                    Some(&base_rc),
+                                    Some(&ours_rc),
+                                    Some(&theirs_rc),
+                                );
+                                (
+                                    ResolvedEntity::Conflict(EntityConflict {
+                                        entity_name: ours.name.clone(),
+                                        entity_type: ours.entity_type.clone(),
+                                        kind: ConflictKind::BothModified,
+                                        complexity,
+                                        ours_content: Some(ours_rc),
+                                        theirs_content: Some(theirs_rc),
+                                        base_content: Some(base_rc),
+                                    }),
+                                    ResolutionStrategy::ConflictBothModified,
+                                )
                             }
                         }
                     }
@@ -896,17 +1047,20 @@ fn resolve_entity(
                 let ours_rc = region_content(ours, ours_region_content);
                 let base_rc = region_content(_base, base_region_content);
                 let complexity = classify_conflict(Some(&base_rc), Some(&ours_rc), None);
-                (ResolvedEntity::Conflict(EntityConflict {
-                    entity_name: ours.name.clone(),
-                    entity_type: ours.entity_type.clone(),
-                    kind: ConflictKind::ModifyDelete {
-                        modified_in_ours: true,
-                    },
-                    complexity,
-                    ours_content: Some(ours_rc),
-                    theirs_content: None,
-                    base_content: Some(base_rc),
-                }), ResolutionStrategy::ConflictModifyDelete)
+                (
+                    ResolvedEntity::Conflict(EntityConflict {
+                        entity_name: ours.name.clone(),
+                        entity_type: ours.entity_type.clone(),
+                        kind: ConflictKind::ModifyDelete {
+                            modified_in_ours: true,
+                        },
+                        complexity,
+                        ours_content: Some(ours_rc),
+                        theirs_content: None,
+                        base_content: Some(base_rc),
+                    }),
+                    ResolutionStrategy::ConflictModifyDelete,
+                )
             } else {
                 // Theirs deleted, ours unchanged → accept deletion
                 stats.entities_deleted += 1;
@@ -923,17 +1077,20 @@ fn resolve_entity(
                 let theirs_rc = region_content(theirs, theirs_region_content);
                 let base_rc = region_content(_base, base_region_content);
                 let complexity = classify_conflict(Some(&base_rc), None, Some(&theirs_rc));
-                (ResolvedEntity::Conflict(EntityConflict {
-                    entity_name: theirs.name.clone(),
-                    entity_type: theirs.entity_type.clone(),
-                    kind: ConflictKind::ModifyDelete {
-                        modified_in_ours: false,
-                    },
-                    complexity,
-                    ours_content: None,
-                    theirs_content: Some(theirs_rc),
-                    base_content: Some(base_rc),
-                }), ResolutionStrategy::ConflictModifyDelete)
+                (
+                    ResolvedEntity::Conflict(EntityConflict {
+                        entity_name: theirs.name.clone(),
+                        entity_type: theirs.entity_type.clone(),
+                        kind: ConflictKind::ModifyDelete {
+                            modified_in_ours: false,
+                        },
+                        complexity,
+                        ours_content: None,
+                        theirs_content: Some(theirs_rc),
+                        base_content: Some(base_rc),
+                    }),
+                    ResolutionStrategy::ConflictModifyDelete,
+                )
             } else {
                 // Ours deleted, theirs unchanged → accept deletion
                 stats.entities_deleted += 1;
@@ -944,13 +1101,25 @@ fn resolve_entity(
         // Entity only in ours (added by ours)
         (None, Some(ours), None) => {
             stats.entities_added_ours += 1;
-            (ResolvedEntity::Clean(entity_to_region_with_content(ours, &region_content(ours, ours_region_content))), ResolutionStrategy::AddedOurs)
+            (
+                ResolvedEntity::Clean(entity_to_region_with_content(
+                    ours,
+                    &region_content(ours, ours_region_content),
+                )),
+                ResolutionStrategy::AddedOurs,
+            )
         }
 
         // Entity only in theirs (added by theirs)
         (None, None, Some(theirs)) => {
             stats.entities_added_theirs += 1;
-            (ResolvedEntity::Clean(entity_to_region_with_content(theirs, &region_content(theirs, theirs_region_content))), ResolutionStrategy::AddedTheirs)
+            (
+                ResolvedEntity::Clean(entity_to_region_with_content(
+                    theirs,
+                    &region_content(theirs, theirs_region_content),
+                )),
+                ResolutionStrategy::AddedTheirs,
+            )
         }
 
         // Entity in both ours and theirs but not base (both added)
@@ -958,22 +1127,31 @@ fn resolve_entity(
             if ours.content_hash == theirs.content_hash {
                 // Same content added by both → take ours
                 stats.entities_added_ours += 1;
-                (ResolvedEntity::Clean(entity_to_region_with_content(ours, &region_content(ours, ours_region_content))), ResolutionStrategy::ContentEqual)
+                (
+                    ResolvedEntity::Clean(entity_to_region_with_content(
+                        ours,
+                        &region_content(ours, ours_region_content),
+                    )),
+                    ResolutionStrategy::ContentEqual,
+                )
             } else {
                 // Different content → conflict
                 stats.entities_conflicted += 1;
                 let ours_rc = region_content(ours, ours_region_content);
                 let theirs_rc = region_content(theirs, theirs_region_content);
                 let complexity = classify_conflict(None, Some(&ours_rc), Some(&theirs_rc));
-                (ResolvedEntity::Conflict(EntityConflict {
-                    entity_name: ours.name.clone(),
-                    entity_type: ours.entity_type.clone(),
-                    kind: ConflictKind::BothAdded,
-                    complexity,
-                    ours_content: Some(ours_rc),
-                    theirs_content: Some(theirs_rc),
-                    base_content: None,
-                }), ResolutionStrategy::ConflictBothAdded)
+                (
+                    ResolvedEntity::Conflict(EntityConflict {
+                        entity_name: ours.name.clone(),
+                        entity_type: ours.entity_type.clone(),
+                        kind: ConflictKind::BothAdded,
+                        complexity,
+                        ours_content: Some(ours_rc),
+                        theirs_content: Some(theirs_rc),
+                        base_content: None,
+                    }),
+                    ResolutionStrategy::ConflictBothAdded,
+                )
             }
         }
 
@@ -1018,8 +1196,16 @@ fn is_whitespace_only_diff(a: &str, b: &str) -> bool {
     if a == b {
         return true; // identical, not really a "whitespace-only diff" but safe
     }
-    let a_normalized: Vec<&str> = a.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
-    let b_normalized: Vec<&str> = b.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let a_normalized: Vec<&str> = a
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let b_normalized: Vec<&str> = b
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
     a_normalized == b_normalized
 }
 
@@ -1048,7 +1234,11 @@ fn split_decorators(content: &str) -> (Vec<&str>, &str) {
     }
     // Trim trailing empty lines from decorator section
     let lines: Vec<&str> = content.lines().collect();
-    while decorator_end > 0 && lines.get(decorator_end - 1).map_or(false, |l| l.trim().is_empty()) {
+    while decorator_end > 0
+        && lines
+            .get(decorator_end - 1)
+            .map_or(false, |l| l.trim().is_empty())
+    {
         byte_offset -= lines[decorator_end - 1].len() + 1;
         decorator_end -= 1;
     }
@@ -1238,7 +1428,8 @@ fn merge_interstitials(
                 || is_import_region(theirs_content)
             {
                 // Commutative merge: treat import lines as a set
-                let result = merge_imports_commutatively(base_content, ours_content, theirs_content);
+                let result =
+                    merge_imports_commutatively(base_content, ours_content, theirs_content);
                 merged.insert(key.to_string(), result);
             } else {
                 // Regular line-level merge
@@ -1278,10 +1469,7 @@ fn merge_interstitials(
 /// Handles both single-line imports and multi-line import blocks
 /// (e.g. `import { type a, type b } from "..."` spread across lines).
 fn is_import_region(content: &str) -> bool {
-    let lines: Vec<&str> = content
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
     if lines.is_empty() {
         return false;
     }
@@ -1300,7 +1488,9 @@ fn is_import_region(content: &str) -> bool {
             // Detect start of multi-line import: `import {` or `import (` without closing on same line
             if (trimmed.contains('{') && !trimmed.contains('}'))
                 || (trimmed.starts_with("import (") && !trimmed.contains(')'))
-                || (trimmed.starts_with("from ") && trimmed.contains("import (") && !trimmed.contains(')'))
+                || (trimmed.starts_with("from ")
+                    && trimmed.contains("import (")
+                    && !trimmed.contains(')'))
             {
                 in_multiline_import = true;
             }
@@ -1476,7 +1666,9 @@ fn parse_import_statements(content: &str) -> (Vec<ImportStatement>, Vec<String>)
             // Check for multi-line import: `import {` without `}` on same line
             let starts_multiline = (trimmed.contains('{') && !trimmed.contains('}'))
                 || (trimmed.starts_with("import (") && !trimmed.contains(')'))
-                || (trimmed.starts_with("from ") && trimmed.contains("import (") && !trimmed.contains(')'));
+                || (trimmed.starts_with("from ")
+                    && trimmed.contains("import (")
+                    && !trimmed.contains(')'));
 
             if starts_multiline {
                 let mut block_lines = vec![line.to_string()];
@@ -1546,17 +1738,29 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
         || theirs_imports.iter().any(|i| i.is_multiline);
 
     if has_multiline {
-        return merge_imports_with_multiline(base, ours, theirs,
-            &base_imports, &ours_imports, &theirs_imports);
+        return merge_imports_with_multiline(
+            base,
+            ours,
+            theirs,
+            &base_imports,
+            &ours_imports,
+            &theirs_imports,
+        );
     }
 
     // Original single-line-only logic
     let base_lines: HashSet<&str> = base.lines().filter(|l| is_import_line(l)).collect();
     let ours_lines: HashSet<&str> = ours.lines().filter(|l| is_import_line(l)).collect();
 
-    let theirs_deleted: HashSet<&str> = base_lines.difference(
-        &theirs.lines().filter(|l| is_import_line(l)).collect::<HashSet<&str>>()
-    ).copied().collect();
+    let theirs_deleted: HashSet<&str> = base_lines
+        .difference(
+            &theirs
+                .lines()
+                .filter(|l| is_import_line(l))
+                .collect::<HashSet<&str>>(),
+        )
+        .copied()
+        .collect();
 
     let theirs_added: Vec<&str> = theirs
         .lines()
@@ -1586,11 +1790,16 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
 
     for add in &theirs_added {
         let prefix = import_source_prefix(add);
-        let mut best_group = if groups.is_empty() { 0 } else { groups.len() - 1 };
+        let mut best_group = if groups.is_empty() {
+            0
+        } else {
+            groups.len() - 1
+        };
         for (i, group) in groups.iter().enumerate() {
-            if group.iter().any(|l| {
-                is_import_line(l) && import_source_prefix(l) == prefix
-            }) {
+            if group
+                .iter()
+                .any(|l| is_import_line(l) && import_source_prefix(l) == prefix)
+            {
                 best_group = i;
                 break;
             }
@@ -1660,26 +1869,35 @@ fn merge_imports_with_multiline(
     theirs_imports: &[ImportStatement],
 ) -> String {
     // Build source → specifier sets for base and theirs
-    let base_specs: HashMap<&str, HashSet<&str>> = base_imports.iter().map(|imp| {
-        let specs: HashSet<&str> = imp.specifiers.iter().map(|s| s.as_str()).collect();
-        (imp.source.as_str(), specs)
-    }).collect();
+    let base_specs: HashMap<&str, HashSet<&str>> = base_imports
+        .iter()
+        .map(|imp| {
+            let specs: HashSet<&str> = imp.specifiers.iter().map(|s| s.as_str()).collect();
+            (imp.source.as_str(), specs)
+        })
+        .collect();
 
-    let theirs_specs: HashMap<&str, HashSet<&str>> = theirs_imports.iter().map(|imp| {
-        let specs: HashSet<&str> = imp.specifiers.iter().map(|s| s.as_str()).collect();
-        (imp.source.as_str(), specs)
-    }).collect();
+    let theirs_specs: HashMap<&str, HashSet<&str>> = theirs_imports
+        .iter()
+        .map(|imp| {
+            let specs: HashSet<&str> = imp.specifiers.iter().map(|s| s.as_str()).collect();
+            (imp.source.as_str(), specs)
+        })
+        .collect();
 
     // Single-line import tracking: base lines and theirs-deleted
-    let base_single: HashSet<String> = base_imports.iter()
+    let base_single: HashSet<String> = base_imports
+        .iter()
         .filter(|i| !i.is_multiline)
         .map(|i| i.lines[0].clone())
         .collect();
-    let theirs_single: HashSet<String> = theirs_imports.iter()
+    let theirs_single: HashSet<String> = theirs_imports
+        .iter()
         .filter(|i| !i.is_multiline)
         .map(|i| i.lines[0].clone())
         .collect();
-    let theirs_deleted_single: HashSet<&str> = base_single.iter()
+    let theirs_deleted_single: HashSet<&str> = base_single
+        .iter()
         .filter(|l| !theirs_single.contains(l.as_str()))
         .map(|l| l.as_str())
         .collect();
@@ -1706,7 +1924,9 @@ fn merge_imports_with_multiline(
             let trimmed = line.trim();
             let starts_multiline = (trimmed.contains('{') && !trimmed.contains('}'))
                 || (trimmed.starts_with("import (") && !trimmed.contains(')'))
-                || (trimmed.starts_with("from ") && trimmed.contains("import (") && !trimmed.contains(')'));
+                || (trimmed.starts_with("from ")
+                    && trimmed.contains("import (")
+                    && !trimmed.contains(')'));
 
             if starts_multiline && ours_imp_idx < ours_imports.len() {
                 let imp = &ours_imports[ours_imp_idx];
@@ -1718,12 +1938,20 @@ fn merge_imports_with_multiline(
                 let base_spec_set = base_specs.get(source).cloned().unwrap_or_default();
                 let theirs_spec_set = theirs_specs.get(source).cloned().unwrap_or_default();
                 // Added by theirs: in theirs but not in base
-                let theirs_added: HashSet<&str> = theirs_spec_set.difference(&base_spec_set).copied().collect();
+                let theirs_added: HashSet<&str> = theirs_spec_set
+                    .difference(&base_spec_set)
+                    .copied()
+                    .collect();
                 // Deleted by theirs: in base but not in theirs
-                let theirs_removed: HashSet<&str> = base_spec_set.difference(&theirs_spec_set).copied().collect();
+                let theirs_removed: HashSet<&str> = base_spec_set
+                    .difference(&theirs_spec_set)
+                    .copied()
+                    .collect();
 
                 // Final set: ours (in original order) + theirs_added - theirs_removed
-                let mut final_specs: Vec<&str> = imp.specifiers.iter()
+                let mut final_specs: Vec<&str> = imp
+                    .specifiers
+                    .iter()
                     .map(|s| s.as_str())
                     .filter(|s| !theirs_removed.contains(s))
                     .collect();
@@ -1774,7 +2002,10 @@ fn merge_imports_with_multiline(
                     // Check if theirs has a multi-line version with more specifiers
                     if let Some(theirs_spec_set) = theirs_specs.get(source) {
                         let base_spec_set = base_specs.get(source).cloned().unwrap_or_default();
-                        let theirs_added: HashSet<&str> = theirs_spec_set.difference(&base_spec_set).copied().collect();
+                        let theirs_added: HashSet<&str> = theirs_spec_set
+                            .difference(&base_spec_set)
+                            .copied()
+                            .collect();
 
                         if !theirs_added.is_empty() {
                             // Parse ours single-line specifier from the line text
@@ -1800,7 +2031,9 @@ fn merge_imports_with_multiline(
                                     }
                                 }
                                 // Find theirs import to get formatting
-                                if let Some(theirs_imp) = theirs_imports.iter().find(|ti| ti.source == source) {
+                                if let Some(theirs_imp) =
+                                    theirs_imports.iter().find(|ti| ti.source == source)
+                                {
                                     if theirs_imp.is_multiline {
                                         // Use theirs's multi-line formatting
                                         let indent = if theirs_imp.lines.len() > 1 {
@@ -1823,7 +2056,8 @@ fn merge_imports_with_multiline(
                                 }
                                 // Theirs not multi-line but has more specifiers: reconstruct single-line
                                 // e.g. "from X import A, B, C"
-                                let prefix = &trimmed_line[..trimmed_line.find(" import ").unwrap() + 8];
+                                let prefix =
+                                    &trimmed_line[..trimmed_line.find(" import ").unwrap() + 8];
                                 result_parts.push(format!("{}{}", prefix, final_specs.join(", ")));
                                 i += 1;
                                 continue;
@@ -1866,9 +2100,7 @@ fn merge_imports_with_multiline(
             .filter(|l| {
                 let t = l.trim();
                 // Exclude multi-line import continuation lines (specifiers, closing parens/braces)
-                !(t.ends_with(',') && !t.contains('='))
-                    && t != ")"
-                    && t != "}"
+                !(t.ends_with(',') && !t.contains('=')) && t != ")" && t != "}"
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -1989,7 +2221,10 @@ fn line_level_fallback(base: &str, ours: &str, theirs: &str, file_path: &str) ->
                     audit: vec![],
                 }),
                 Err(conflicted) => {
-                    let _markers = conflicted.lines().filter(|l| l.starts_with("<<<<<<<")).count();
+                    let _markers = conflicted
+                        .lines()
+                        .filter(|l| l.starts_with("<<<<<<<"))
+                        .count();
                     let mut s = stats.clone();
                     s.entities_conflicted = 1;
                     Some(MergeResult {
@@ -2023,9 +2258,21 @@ fn line_level_fallback(base: &str, ours: &str, theirs: &str, file_path: &str) ->
         }
         Some(sesame) if !sesame.conflicts.is_empty() && !git_result.conflicts.is_empty() => {
             // Both conflicted: use whichever has fewer markers
-            let sesame_markers = sesame.content.lines().filter(|l| l.starts_with("<<<<<<<")).count();
-            let git_markers = git_result.content.lines().filter(|l| l.starts_with("<<<<<<<")).count();
-            if sesame_markers <= git_markers { sesame } else { git_result }
+            let sesame_markers = sesame
+                .content
+                .lines()
+                .filter(|l| l.starts_with("<<<<<<<"))
+                .count();
+            let git_markers = git_result
+                .content
+                .lines()
+                .filter(|l| l.starts_with("<<<<<<<"))
+                .count();
+            if sesame_markers <= git_markers {
+                sesame
+            } else {
+                git_result
+            }
         }
         _ => git_result,
     }
@@ -2062,9 +2309,12 @@ fn git_merge_file(base: &str, ours: &str, theirs: &str, stats: &mut MergeStats) 
         .arg("merge-file")
         .arg("-p") // print to stdout instead of modifying ours in place
         .arg("--diff3") // include ||||||| base section for jj compatibility
-        .arg("-L").arg("ours")
-        .arg("-L").arg("base")
-        .arg("-L").arg("theirs")
+        .arg("-L")
+        .arg("ours")
+        .arg("-L")
+        .arg("base")
+        .arg("-L")
+        .arg("theirs")
         .arg(&ours_path)
         .arg(&base_path)
         .arg(&theirs_path)
@@ -2170,7 +2420,9 @@ fn filter_nested_entities(mut entities: Vec<SemanticEntity>) -> Vec<SemanticEnti
     // Sort by start_line ASC, then by end_line DESC (widest span first).
     // A parent entity always appears before its children in this order.
     entities.sort_by(|a, b| {
-        a.start_line.cmp(&b.start_line).then(b.end_line.cmp(&a.end_line))
+        a.start_line
+            .cmp(&b.start_line)
+            .then(b.end_line.cmp(&a.end_line))
     });
 
     // Stack-based filter: track the end_line of the current outermost entity.
@@ -2221,7 +2473,11 @@ fn token_jaccard(a: &str, b: &str) -> f64 {
     }
     let intersection = tokens_a.intersection(&tokens_b).count();
     let union = tokens_a.union(&tokens_b).count();
-    if union == 0 { 1.0 } else { intersection as f64 / union as f64 }
+    if union == 0 {
+        1.0
+    } else {
+        intersection as f64 / union as f64
+    }
 }
 
 /// Uses word-boundary matching to avoid partial replacements (e.g. replacing
@@ -2258,8 +2514,7 @@ fn replace_at_word_boundaries(content: &str, needle: &str, replacement: &str) ->
             };
             let after_idx = i + needle.len();
             let after_ok = after_idx >= content.len()
-                || (content.is_char_boundary(after_idx)
-                    && !is_ident_char(bytes[after_idx]));
+                || (content.is_char_boundary(after_idx) && !is_ident_char(bytes[after_idx]));
             if before_ok && after_ok {
                 result.push_str(replacement);
                 i += needle.len();
@@ -2298,14 +2553,20 @@ fn build_rename_map(
     // Build body_hash → base entities (multiple can have same hash)
     let mut base_by_body: HashMap<u64, Vec<&SemanticEntity>> = HashMap::new();
     for entity in base_entities {
-        base_by_body.entry(body_hash(entity)).or_default().push(entity);
+        base_by_body
+            .entry(body_hash(entity))
+            .or_default()
+            .push(entity);
     }
 
     // Also keep structural_hash index as fallback
     let mut base_by_structural: HashMap<&str, Vec<&SemanticEntity>> = HashMap::new();
     for entity in base_entities {
         if let Some(ref sh) = entity.structural_hash {
-            base_by_structural.entry(sh.as_str()).or_default().push(entity);
+            base_by_structural
+                .entry(sh.as_str())
+                .or_default()
+                .push(entity);
         }
     }
 
@@ -2334,7 +2595,11 @@ fn build_rename_map(
                     (true, false) => 0.8,
                     (false, _) => 0.6,
                 };
-                candidates.push(RenameCandidate { branch: branch_entity, base: base_entity, confidence });
+                candidates.push(RenameCandidate {
+                    branch: branch_entity,
+                    base: base_entity,
+                    confidence,
+                });
             }
         }
 
@@ -2343,10 +2608,17 @@ fn build_rename_map(
             if let Some(base_entities_for_sh) = base_by_structural.get(sh.as_str()) {
                 for &base_entity in base_entities_for_sh {
                     // Skip if already covered by body hash match
-                    if candidates.iter().any(|c| c.branch.id == branch_entity.id && c.base.id == base_entity.id) {
+                    if candidates
+                        .iter()
+                        .any(|c| c.branch.id == branch_entity.id && c.base.id == base_entity.id)
+                    {
                         continue;
                     }
-                    candidates.push(RenameCandidate { branch: branch_entity, base: base_entity, confidence: 0.6 });
+                    candidates.push(RenameCandidate {
+                        branch: branch_entity,
+                        base: base_entity,
+                        confidence: 0.6,
+                    });
                 }
             }
         }
@@ -2371,14 +2643,22 @@ fn build_rename_map(
                 if similarity >= 0.7 {
                     let same_parent = base_entity.parent_id == branch_entity.parent_id;
                     let confidence = if same_parent { 0.75 } else { 0.65 };
-                    candidates.push(RenameCandidate { branch: branch_entity, base: base_entity, confidence });
+                    candidates.push(RenameCandidate {
+                        branch: branch_entity,
+                        base: base_entity,
+                        confidence,
+                    });
                 }
             }
         }
     }
 
     // Sort by confidence descending, assign greedily
-    candidates.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut used_base_ids: HashSet<String> = HashSet::new();
     let mut used_branch_ids: HashSet<String> = HashSet::new();
@@ -2387,7 +2667,9 @@ fn build_rename_map(
         if candidate.confidence < 0.6 {
             break;
         }
-        if used_base_ids.contains(&candidate.base.id) || used_branch_ids.contains(&candidate.branch.id) {
+        if used_base_ids.contains(&candidate.base.id)
+            || used_branch_ids.contains(&candidate.branch.id)
+        {
             continue;
         }
         // Don't rename if the base entity's ID still exists in branch (it wasn't actually renamed)
@@ -2407,9 +2689,21 @@ fn build_rename_map(
 fn is_container_entity_type(entity_type: &str) -> bool {
     matches!(
         entity_type,
-        "class" | "interface" | "enum" | "impl" | "trait" | "module" | "impl_item" | "trait_item"
-            | "struct" | "union" | "namespace" | "struct_item" | "struct_specifier"
-            | "variable" | "export"
+        "class"
+            | "interface"
+            | "enum"
+            | "impl"
+            | "trait"
+            | "module"
+            | "impl_item"
+            | "trait_item"
+            | "struct"
+            | "union"
+            | "namespace"
+            | "struct_item"
+            | "struct_specifier"
+            | "variable"
+            | "export"
     )
 }
 
@@ -2464,7 +2758,10 @@ fn children_to_chunks(
 
         // Determine the earliest line we can claim (after previous child's end, or body start)
         let floor = if i > 0 {
-            children[i - 1].end_line.saturating_sub(container_start_line) + 1
+            children[i - 1]
+                .end_line
+                .saturating_sub(container_start_line)
+                + 1
         } else {
             // First child: start after the container header line (the `{` or `:` line)
             // For Python-style containers, find the declaration line ending with `:`
@@ -2474,7 +2771,9 @@ fn children_to_chunks(
                     .iter()
                     .position(|l| {
                         let t = l.trim();
-                        (t.starts_with("class ") || t.starts_with("def ") || t.starts_with("async def "))
+                        (t.starts_with("class ")
+                            || t.starts_with("def ")
+                            || t.starts_with("async def "))
                             && t.ends_with(':')
                     })
                     .map(|p| p + 1)
@@ -2759,7 +3058,15 @@ fn try_inner_entity_merge(
                     } else {
                         // Emit per-member conflict markers
                         has_conflict = true;
-                        merged_members.push(scoped_conflict_marker(name, Some(b), Some(o), Some(t), false, false, marker_format));
+                        merged_members.push(scoped_conflict_marker(
+                            name,
+                            Some(b),
+                            Some(o),
+                            Some(t),
+                            false,
+                            false,
+                            marker_format,
+                        ));
                     }
                 }
             }
@@ -2770,7 +3077,15 @@ fn try_inner_entity_merge(
                 } else {
                     // Ours modified, theirs deleted → per-member conflict
                     has_conflict = true;
-                    merged_members.push(scoped_conflict_marker(name, Some(b), Some(o), None, false, true, marker_format));
+                    merged_members.push(scoped_conflict_marker(
+                        name,
+                        Some(b),
+                        Some(o),
+                        None,
+                        false,
+                        true,
+                        marker_format,
+                    ));
                 }
             }
             // Deleted by ours, theirs unchanged or not in base
@@ -2780,7 +3095,15 @@ fn try_inner_entity_merge(
                 } else {
                     // Theirs modified, ours deleted → per-member conflict
                     has_conflict = true;
-                    merged_members.push(scoped_conflict_marker(name, Some(b), None, Some(t), true, false, marker_format));
+                    merged_members.push(scoped_conflict_marker(
+                        name,
+                        Some(b),
+                        None,
+                        Some(t),
+                        true,
+                        false,
+                        marker_format,
+                    ));
                 }
             }
             // Added by ours only
@@ -2797,7 +3120,15 @@ fn try_inner_entity_merge(
                     merged_members.push(o.to_string());
                 } else {
                     has_conflict = true;
-                    merged_members.push(scoped_conflict_marker(name, None, Some(o), Some(t), false, false, marker_format));
+                    merged_members.push(scoped_conflict_marker(
+                        name,
+                        None,
+                        Some(o),
+                        Some(t),
+                        false,
+                        false,
+                        marker_format,
+                    ));
                 }
             }
             // Deleted by both
@@ -2828,7 +3159,11 @@ fn try_inner_entity_merge(
             result.push('\n');
         }
         // Add blank line between multi-line members only if the original had them
-        if i < merged_members.len() - 1 && has_multiline_members && original_has_blank_separators && !member.ends_with("\n\n") {
+        if i < merged_members.len() - 1
+            && has_multiline_members
+            && original_has_blank_separators
+            && !member.ends_with("\n\n")
+        {
             result.push('\n');
         }
     }
@@ -2849,8 +3184,14 @@ fn try_inner_entity_merge(
         ) {
             if !bc.is_empty() || !oc.is_empty() || !tc.is_empty() {
                 let fallback = try_inner_merge_with_chunks(
-                    &bc, &oc, &tc, ours, ours_header, ours_footer,
-                    has_multiline_members, marker_format,
+                    &bc,
+                    &oc,
+                    &tc,
+                    ours,
+                    ours_header,
+                    ours_footer,
+                    has_multiline_members,
+                    marker_format,
                 );
                 if let Some(fb) = fallback {
                     if !fb.has_conflicts {
@@ -2878,9 +3219,18 @@ fn try_inner_merge_with_chunks(
     has_multiline_hint: bool,
     marker_format: &MarkerFormat,
 ) -> Option<InnerMergeResult> {
-    let base_map: HashMap<&str, &str> = base_chunks.iter().map(|c| (c.name.as_str(), c.content.as_str())).collect();
-    let ours_map: HashMap<&str, &str> = ours_chunks.iter().map(|c| (c.name.as_str(), c.content.as_str())).collect();
-    let theirs_map: HashMap<&str, &str> = theirs_chunks.iter().map(|c| (c.name.as_str(), c.content.as_str())).collect();
+    let base_map: HashMap<&str, &str> = base_chunks
+        .iter()
+        .map(|c| (c.name.as_str(), c.content.as_str()))
+        .collect();
+    let ours_map: HashMap<&str, &str> = ours_chunks
+        .iter()
+        .map(|c| (c.name.as_str(), c.content.as_str()))
+        .collect();
+    let theirs_map: HashMap<&str, &str> = theirs_chunks
+        .iter()
+        .map(|c| (c.name.as_str(), c.content.as_str()))
+        .collect();
 
     let mut all_names: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -2917,14 +3267,26 @@ fn try_inner_merge_with_chunks(
                     merged_members.push(merged);
                 } else {
                     has_conflict = true;
-                    merged_members.push(scoped_conflict_marker(name, Some(b), Some(o), Some(t), false, false, marker_format));
+                    merged_members.push(scoped_conflict_marker(
+                        name,
+                        Some(b),
+                        Some(o),
+                        Some(t),
+                        false,
+                        false,
+                        marker_format,
+                    ));
                 }
             }
             (Some(b), Some(o), None) => {
-                if *b != *o { merged_members.push(o.to_string()); }
+                if *b != *o {
+                    merged_members.push(o.to_string());
+                }
             }
             (Some(b), None, Some(t)) => {
-                if *b != *t { merged_members.push(t.to_string()); }
+                if *b != *t {
+                    merged_members.push(t.to_string());
+                }
             }
             (None, Some(o), None) => merged_members.push(o.to_string()),
             (None, None, Some(t)) => merged_members.push(t.to_string()),
@@ -2933,26 +3295,41 @@ fn try_inner_merge_with_chunks(
                     merged_members.push(o.to_string());
                 } else {
                     has_conflict = true;
-                    merged_members.push(scoped_conflict_marker(name, None, Some(o), Some(t), false, false, marker_format));
+                    merged_members.push(scoped_conflict_marker(
+                        name,
+                        None,
+                        Some(o),
+                        Some(t),
+                        false,
+                        false,
+                        marker_format,
+                    ));
                 }
             }
             (Some(_), None, None) | (None, None, None) => {}
         }
     }
 
-    let has_multiline_members = has_multiline_hint || merged_members.iter().any(|m| m.contains('\n'));
+    let has_multiline_members =
+        has_multiline_hint || merged_members.iter().any(|m| m.contains('\n'));
     let mut result = String::new();
     result.push_str(ours_header);
-    if !ours_header.ends_with('\n') { result.push('\n'); }
+    if !ours_header.ends_with('\n') {
+        result.push('\n');
+    }
     for (i, member) in merged_members.iter().enumerate() {
         result.push_str(member);
-        if !member.ends_with('\n') { result.push('\n'); }
+        if !member.ends_with('\n') {
+            result.push('\n');
+        }
         if i < merged_members.len() - 1 && has_multiline_members && !member.ends_with("\n\n") {
             result.push('\n');
         }
     }
     result.push_str(ours_footer);
-    if !ours_footer.ends_with('\n') && ours.ends_with('\n') { result.push('\n'); }
+    if !ours_footer.ends_with('\n') && ours.ends_with('\n') {
+        result.push('\n');
+    }
 
     Some(InnerMergeResult {
         content: result,
@@ -3004,10 +3381,7 @@ fn extract_container_wrapper(content: &str) -> Option<(&str, &str)> {
     if is_python_style {
         // Python: header is the `class Foo:` line, no footer
         let header_end = lines.iter().position(|l| l.trim().ends_with(':'))?;
-        let header_byte_end: usize = lines[..=header_end]
-            .iter()
-            .map(|l| l.len() + 1)
-            .sum();
+        let header_byte_end: usize = lines[..=header_end].iter().map(|l| l.len() + 1).sum();
         let header = &content[..header_byte_end.min(content.len())];
         // No closing brace in Python — footer is empty
         let footer = &content[content.len()..];
@@ -3026,10 +3400,7 @@ fn extract_container_wrapper(content: &str) -> Option<(&str, &str)> {
             trimmed == "}" || trimmed == "};"
         })?;
 
-        let footer_byte_start: usize = lines[..footer_start]
-            .iter()
-            .map(|l| l.len() + 1)
-            .sum();
+        let footer_byte_start: usize = lines[..footer_start].iter().map(|l| l.len() + 1).sum();
         let footer = &content[footer_byte_start.min(content.len())..];
 
         Some((header, footer))
@@ -3107,7 +3478,10 @@ fn extract_member_chunks(content: &str) -> Option<Vec<MemberChunk>> {
             // Save previous chunk
             if let Some(name) = current_name.take() {
                 // Trim trailing blank lines
-                while current_chunk_lines.last().map_or(false, |l| l.trim().is_empty()) {
+                while current_chunk_lines
+                    .last()
+                    .map_or(false, |l| l.trim().is_empty())
+                {
                     current_chunk_lines.pop();
                 }
                 if !current_chunk_lines.is_empty() {
@@ -3135,7 +3509,10 @@ fn extract_member_chunks(content: &str) -> Option<Vec<MemberChunk>> {
 
     // Save last chunk
     if let Some(name) = current_name {
-        while current_chunk_lines.last().map_or(false, |l| l.trim().is_empty()) {
+        while current_chunk_lines
+            .last()
+            .map_or(false, |l| l.trim().is_empty())
+        {
             current_chunk_lines.pop();
         }
         if !current_chunk_lines.is_empty() {
@@ -3213,9 +3590,21 @@ fn extract_member_name(line: &str) -> String {
     // strip keywords and take the first identifier.
     let mut s = trimmed;
     for keyword in &[
-        "export ", "public ", "private ", "protected ", "static ",
-        "abstract ", "async ", "override ", "readonly ",
-        "pub ", "pub(crate) ", "fn ", "def ", "get ", "set ",
+        "export ",
+        "public ",
+        "private ",
+        "protected ",
+        "static ",
+        "abstract ",
+        "async ",
+        "override ",
+        "readonly ",
+        "pub ",
+        "pub(crate) ",
+        "fn ",
+        "def ",
+        "get ",
+        "set ",
     ] {
         if s.starts_with(keyword) {
             s = &s[keyword.len()..];
@@ -3277,10 +3666,27 @@ fn skip_sesame(file_path: &str) -> bool {
     let path_lower = file_path.to_lowercase();
     let extensions = [
         // Data/config formats
-        ".json", ".yaml", ".yml", ".toml", ".lock", ".xml", ".csv", ".tsv",
-        ".ini", ".cfg", ".conf", ".properties", ".env",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".lock",
+        ".xml",
+        ".csv",
+        ".tsv",
+        ".ini",
+        ".cfg",
+        ".conf",
+        ".properties",
+        ".env",
         // Markup/document formats
-        ".md", ".markdown", ".txt", ".rst", ".svg", ".html", ".htm",
+        ".md",
+        ".markdown",
+        ".txt",
+        ".rst",
+        ".svg",
+        ".html",
+        ".htm",
     ];
     extensions.iter().any(|ext| path_lower.ends_with(ext))
 }
@@ -3388,10 +3794,19 @@ mod tests {
     #[test]
     fn test_replace_at_word_boundaries() {
         // Should replace standalone occurrences
-        assert_eq!(replace_at_word_boundaries("fn get() {}", "get", "__E__"), "fn __E__() {}");
+        assert_eq!(
+            replace_at_word_boundaries("fn get() {}", "get", "__E__"),
+            "fn __E__() {}"
+        );
         // Should NOT replace inside longer identifiers
-        assert_eq!(replace_at_word_boundaries("fn getAll() {}", "get", "__E__"), "fn getAll() {}");
-        assert_eq!(replace_at_word_boundaries("fn _get() {}", "get", "__E__"), "fn _get() {}");
+        assert_eq!(
+            replace_at_word_boundaries("fn getAll() {}", "get", "__E__"),
+            "fn getAll() {}"
+        );
+        assert_eq!(
+            replace_at_word_boundaries("fn _get() {}", "get", "__E__"),
+            "fn _get() {}"
+        );
         // Should replace multiple standalone occurrences
         assert_eq!(
             replace_at_word_boundaries("pub enum Source { Source }", "Source", "__E__"),
@@ -3549,9 +3964,18 @@ export function agentB() {
         let code = "function foo() { return 1; }";
         let expanded = expand_separators(code);
         // Separators should be on their own lines
-        assert!(expanded.contains("{\n"), "Opening brace should have newline after");
-        assert!(expanded.contains(";\n"), "Semicolons should have newline after");
-        assert!(expanded.contains("\n}"), "Closing brace should have newline before");
+        assert!(
+            expanded.contains("{\n"),
+            "Opening brace should have newline after"
+        );
+        assert!(
+            expanded.contains(";\n"),
+            "Semicolons should have newline after"
+        );
+        assert!(
+            expanded.contains("\n}"),
+            "Closing brace should have newline before"
+        );
     }
 
     #[test]
@@ -3568,11 +3992,15 @@ export function agentB() {
 
     #[test]
     fn test_is_import_region() {
-        assert!(is_import_region("import foo from 'foo';\nimport bar from 'bar';\n"));
+        assert!(is_import_region(
+            "import foo from 'foo';\nimport bar from 'bar';\n"
+        ));
         assert!(is_import_region("use std::io;\nuse std::fs;\n"));
         assert!(!is_import_region("let x = 1;\nlet y = 2;\n"));
         // Mixed: 1 import + 2 non-imports → not import region
-        assert!(!is_import_region("import foo from 'foo';\nlet x = 1;\nlet y = 2;\n"));
+        assert!(!is_import_region(
+            "import foo from 'foo';\nlet x = 1;\nlet y = 2;\n"
+        ));
         // Empty → not import region
         assert!(!is_import_region(""));
     }
@@ -3615,7 +4043,10 @@ export function agentB() {
         let theirs = "import a from 'a';\nimport b from 'b';\nimport c from 'c';\n";
         let result = merge_imports_commutatively(base, ours, theirs);
         assert!(result.contains("import a from 'a';"));
-        assert!(!result.contains("import b from 'b';"), "Removed import should stay removed");
+        assert!(
+            !result.contains("import b from 'b';"),
+            "Removed import should stay removed"
+        );
         assert!(result.contains("import c from 'c';"));
     }
 
@@ -3674,8 +4105,14 @@ export function agentB() {
             "Different methods modified should auto-merge via inner entity merge. Conflicts: {:?}",
             result.conflicts,
         );
-        assert!(result.content.contains("console.log"), "Should contain ours changes");
-        assert!(result.content.contains("negative"), "Should contain theirs changes");
+        assert!(
+            result.content.contains("console.log"),
+            "Should contain ours changes"
+        );
+        assert!(
+            result.content.contains("negative"),
+            "Should contain theirs changes"
+        );
     }
 
     #[test]
@@ -3713,8 +4150,14 @@ export function agentB() {
             "Both adding different methods should auto-merge. Conflicts: {:?}",
             result.conflicts,
         );
-        assert!(result.content.contains("multiply"), "Should contain ours's new method");
-        assert!(result.content.contains("divide"), "Should contain theirs's new method");
+        assert!(
+            result.content.contains("multiply"),
+            "Should contain ours's new method"
+        );
+        assert!(
+            result.content.contains("divide"),
+            "Should contain theirs's new method"
+        );
     }
 
     #[test]
@@ -3770,7 +4213,12 @@ export function agentB() {
 }
 "#;
         let chunks = extract_member_chunks(class_body).unwrap();
-        assert_eq!(chunks.len(), 2, "Should find 2 members, found {:?}", chunks.iter().map(|c| &c.name).collect::<Vec<_>>());
+        assert_eq!(
+            chunks.len(),
+            2,
+            "Should find 2 members, found {:?}",
+            chunks.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
         assert_eq!(chunks[0].name, "bar");
         assert_eq!(chunks[1].name, "baz");
     }
@@ -3780,7 +4228,10 @@ export function agentB() {
         assert_eq!(extract_member_name("add(a, b) {"), "add");
         assert_eq!(extract_member_name("fn add(&self, a: i32) -> i32 {"), "add");
         assert_eq!(extract_member_name("def add(self, a, b):"), "add");
-        assert_eq!(extract_member_name("public static getValue(): number {"), "getValue");
+        assert_eq!(
+            extract_member_name("public static getValue(): number {"),
+            "getValue"
+        );
         assert_eq!(extract_member_name("async fetchData() {"), "fetchData");
     }
 
@@ -3830,7 +4281,11 @@ export function agentB() {
         let ours = "interface Config {\n    name: string;\n    age: number;\n}\n";
         let theirs = "interface Config {\n    name: string;\n    email: string;\n}\n";
         let result = entity_merge(base, ours, theirs, "test.ts");
-        eprintln!("TS interface: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "TS interface: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content: {:?}", result.content);
         assert!(
             result.is_clean(),
@@ -3847,7 +4302,11 @@ export function agentB() {
         let ours = "enum Color {\n    Red,\n    Blue,\n    Green,\n}\n";
         let theirs = "enum Color {\n    Red,\n    Blue,\n    Yellow,\n}\n";
         let result = entity_merge(base, ours, theirs, "test.rs");
-        eprintln!("Rust enum: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "Rust enum: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content: {:?}", result.content);
         assert!(
             result.is_clean(),
@@ -3993,16 +4452,29 @@ export function agentB() {
 }
 "#;
         let result = entity_merge(base, ours, theirs, "test.ts");
-        eprintln!("Method reorder: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "Method reorder: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
         assert!(
             result.is_clean(),
             "Method reordering + modification should merge. Conflicts: {:?}",
             result.conflicts,
         );
-        assert!(result.content.contains("console.log(\"fetching\""), "Should contain theirs modification");
-        assert!(result.content.contains("deleteUser"), "Should have deleteUser");
-        assert!(result.content.contains("createUser"), "Should have createUser");
+        assert!(
+            result.content.contains("console.log(\"fetching\""),
+            "Should contain theirs modification"
+        );
+        assert!(
+            result.content.contains("deleteUser"),
+            "Should have deleteUser"
+        );
+        assert!(
+            result.content.contains("createUser"),
+            "Should have createUser"
+        );
     }
 
     #[test]
@@ -4029,7 +4501,11 @@ export function calculate(a: number, b: number): number {
 }
 "#;
         let result = entity_merge(base, ours, theirs, "test.ts");
-        eprintln!("Doc comment + body: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "Doc comment + body: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
         // This tests whether weave can merge doc comment additions with body changes
     }
@@ -4055,7 +4531,11 @@ export function calculate(a: number, b: number): number {
 }
 "#;
         let result = entity_merge(base, ours, theirs, "test.ts");
-        eprintln!("Guard clauses: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "Guard clauses: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
         // Both add at same position — diffy may struggle since they're at the same insertion point
     }
@@ -4083,15 +4563,25 @@ export function calculate(a: number, b: number): number {
 }
 "#;
         let result = entity_merge(base, ours, theirs, "test.ts");
-        eprintln!("Enum modify+add: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "Enum modify+add: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
         assert!(
             result.is_clean(),
             "Modify variant + add new variant should merge. Conflicts: {:?}",
             result.conflicts,
         );
-        assert!(result.content.contains("\"disabled\""), "Should have modified Inactive");
-        assert!(result.content.contains("Deleted"), "Should have new Deleted variant");
+        assert!(
+            result.content.contains("\"disabled\""),
+            "Should have modified Inactive"
+        );
+        assert!(
+            result.content.contains("Deleted"),
+            "Should have new Deleted variant"
+        );
     }
 
     #[test]
@@ -4115,7 +4605,11 @@ export function calculate(a: number, b: number): number {
 };
 "#;
         let result = entity_merge(base, ours, theirs, "test.ts");
-        eprintln!("Config fields: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "Config fields: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
         // This tests whether inner entity merge handles object literals
         // (it probably won't since object fields aren't extracted as members the same way)
@@ -4151,7 +4645,11 @@ export function calculate(a: number, b: number): number {
 }
 "#;
         let result = entity_merge(base, ours, theirs, "test.rs");
-        eprintln!("Rust impl: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "Rust impl: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
         assert!(
             result.is_clean(),
@@ -4232,10 +4730,22 @@ fn other() {}
             "Same trait, different types should not conflict. Conflicts: {:?}",
             result.conflicts,
         );
-        assert!(result.content.contains("impl Stream for Foo"), "Should have Foo impl");
-        assert!(result.content.contains("impl Stream for Bar"), "Should have Bar impl");
-        assert!(result.content.contains("compute()"), "Should have ours' Foo change");
-        assert!(result.content.contains("format!"), "Should have theirs' Bar change");
+        assert!(
+            result.content.contains("impl Stream for Foo"),
+            "Should have Foo impl"
+        );
+        assert!(
+            result.content.contains("impl Stream for Bar"),
+            "Should have Bar impl"
+        );
+        assert!(
+            result.content.contains("compute()"),
+            "Should have ours' Foo change"
+        );
+        assert!(
+            result.content.contains("format!"),
+            "Should have theirs' Bar change"
+        );
     }
 
     #[test]
@@ -4273,8 +4783,14 @@ fn subtract(a: i32, b: i32) -> i32 {
             "Rust doc comment + body change should merge. Conflicts: {:?}",
             result.conflicts,
         );
-        assert!(result.content.contains("/// Adds two numbers"), "Should have ours doc comment");
-        assert!(result.content.contains("a - b - 1"), "Should have theirs body change");
+        assert!(
+            result.content.contains("/// Adds two numbers"),
+            "Should have ours doc comment"
+        );
+        assert!(
+            result.content.contains("a - b - 1"),
+            "Should have theirs body change"
+        );
     }
 
     #[test]
@@ -4312,8 +4828,14 @@ fn subtract(a: i32, b: i32) -> i32 {
             "Both adding doc comments to different functions should merge. Conflicts: {:?}",
             result.conflicts,
         );
-        assert!(result.content.contains("/// Adds two numbers"), "Should have add's doc comment");
-        assert!(result.content.contains("/// Subtracts b from a"), "Should have subtract's doc comment");
+        assert!(
+            result.content.contains("/// Adds two numbers"),
+            "Should have add's doc comment"
+        );
+        assert!(
+            result.content.contains("/// Subtracts b from a"),
+            "Should have subtract's doc comment"
+        );
     }
 
     #[test]
@@ -4323,7 +4845,11 @@ fn subtract(a: i32, b: i32) -> i32 {
         let ours = "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"strings\"\n)\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n";
         let theirs = "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"io\"\n)\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n";
         let result = entity_merge(base, ours, theirs, "main.go");
-        eprintln!("Go import block: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "Go import block: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
         // This tests whether Go import blocks (a single entity) get inner-merged
     }
@@ -4335,7 +4861,11 @@ fn subtract(a: i32, b: i32) -> i32 {
         let ours = "class Calculator:\n    def add(self, a, b):\n        return a + b\n\n    def multiply(self, a, b):\n        return a * b\n";
         let theirs = "class Calculator:\n    def add(self, a, b):\n        return a + b\n\n    def divide(self, a, b):\n        return a / b\n";
         let result = entity_merge(base, ours, theirs, "test.py");
-        eprintln!("Python class: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "Python class: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
         assert!(
             result.is_clean(),
@@ -4389,7 +4919,9 @@ export { beta } from "./beta";
                 !result.is_clean(),
                 "BUG: is_clean()=true but merged content has conflict markers!\n\
                  stats: {}\nconflicts: {:?}\ncontent:\n{}",
-                result.stats, result.conflicts, result.content
+                result.stats,
+                result.conflicts,
+                result.content
             );
             assert!(
                 result.stats.entities_conflicted > 0,
@@ -4431,7 +4963,8 @@ export * from "./types";
             !result.is_clean(),
             "Pre-conflicted input must not be reported as clean!\n\
              stats: {}\nconflicts: {:?}",
-            result.stats, result.conflicts,
+            result.stats,
+            result.conflicts,
         );
         assert!(result.stats.entities_conflicted > 0);
         assert!(!result.conflicts.is_empty());
@@ -4464,29 +4997,43 @@ export * from "./types";
         let blank_idx = lines.iter().position(|l| l.trim().is_empty());
         let defaultdict_idx = lines.iter().position(|l| l.contains("defaultdict"));
         assert!(json_idx.is_some(), "json import should be present");
-        assert!(blank_idx.is_some(), "blank line separator should be present");
-        assert!(defaultdict_idx.is_some(), "defaultdict import should be present");
+        assert!(
+            blank_idx.is_some(),
+            "blank line separator should be present"
+        );
+        assert!(
+            defaultdict_idx.is_some(),
+            "defaultdict import should be present"
+        );
         // json should come before the blank line, defaultdict after
-        assert!(json_idx.unwrap() < blank_idx.unwrap(), "json should be in first group");
-        assert!(defaultdict_idx.unwrap() > blank_idx.unwrap(), "defaultdict should be in second group");
+        assert!(
+            json_idx.unwrap() < blank_idx.unwrap(),
+            "json should be in first group"
+        );
+        assert!(
+            defaultdict_idx.unwrap() > blank_idx.unwrap(),
+            "defaultdict should be in second group"
+        );
     }
 
     #[test]
     fn test_configurable_duplicate_threshold() {
         // Create entities with 15 same-name entities
-        let entities: Vec<SemanticEntity> = (0..15).map(|i| SemanticEntity {
-            id: format!("test::function::test_{}", i),
-            file_path: "test.ts".to_string(),
-            entity_type: "function".to_string(),
-            name: "test".to_string(),
-            parent_id: None,
-            content: format!("function test() {{ return {}; }}", i),
-            content_hash: format!("hash_{}", i),
-            structural_hash: None,
-            start_line: i * 3 + 1,
-            end_line: i * 3 + 3,
-            metadata: None,
-        }).collect();
+        let entities: Vec<SemanticEntity> = (0..15)
+            .map(|i| SemanticEntity {
+                id: format!("test::function::test_{}", i),
+                file_path: "test.ts".to_string(),
+                entity_type: "function".to_string(),
+                name: "test".to_string(),
+                parent_id: None,
+                content: format!("function test() {{ return {}; }}", i),
+                content_hash: format!("hash_{}", i),
+                structural_hash: None,
+                start_line: i * 3 + 1,
+                end_line: i * 3 + 3,
+                metadata: None,
+            })
+            .collect();
         // Default threshold (10): should trigger
         assert!(has_excessive_duplicates(&entities));
         // Set threshold to 20: should not trigger
@@ -4525,13 +5072,29 @@ export function bar() {
 }
 ";
         let result = entity_merge(base, ours, theirs, "test.ts");
-        eprintln!("TS import consolidation: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "TS import consolidation: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
         // Theirs is the only change, result should match theirs exactly
-        assert!(result.content.contains("import {"), "import {{ must not be dropped");
-        assert!(result.content.contains("type Foo,"), "type Foo must be present");
-        assert!(result.content.contains("} from \"./foo\""), "closing must be present");
-        assert!(!result.content.contains("import type { Foo }"), "old separate import should be removed");
+        assert!(
+            result.content.contains("import {"),
+            "import {{ must not be dropped"
+        );
+        assert!(
+            result.content.contains("type Foo,"),
+            "type Foo must be present"
+        );
+        assert!(
+            result.content.contains("} from \"./foo\""),
+            "closing must be present"
+        );
+        assert!(
+            !result.content.contains("import type { Foo }"),
+            "old separate import should be removed"
+        );
     }
 
     #[test]
@@ -4578,13 +5141,32 @@ export function bar() {
 }
 ";
         let result = entity_merge(base, ours, theirs, "test.ts");
-        eprintln!("TS import both modify: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "TS import both modify: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
-        assert!(result.content.contains("import {"), "import {{ must not be dropped");
-        assert!(result.content.contains("type Foo,"), "type Foo must be present");
-        assert!(result.content.contains("type d,"), "ours addition must be present");
-        assert!(result.content.contains("type e,"), "theirs addition must be present");
-        assert!(result.content.contains("} from \"./foo\""), "closing must be present");
+        assert!(
+            result.content.contains("import {"),
+            "import {{ must not be dropped"
+        );
+        assert!(
+            result.content.contains("type Foo,"),
+            "type Foo must be present"
+        );
+        assert!(
+            result.content.contains("type d,"),
+            "ours addition must be present"
+        );
+        assert!(
+            result.content.contains("type e,"),
+            "theirs addition must be present"
+        );
+        assert!(
+            result.content.contains("} from \"./foo\""),
+            "closing must be present"
+        );
     }
 
     #[test]
@@ -4608,10 +5190,20 @@ import {
 } from \"./foo\"
 ";
         let result = entity_merge(base, ours, theirs, "test.ts");
-        eprintln!("TS import no entities: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "TS import no entities: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
-        assert!(result.content.contains("import {"), "import {{ must not be dropped");
-        assert!(result.content.contains("type Foo,"), "type Foo must be present");
+        assert!(
+            result.content.contains("import {"),
+            "import {{ must not be dropped"
+        );
+        assert!(
+            result.content.contains("type Foo,"),
+            "type Foo must be present"
+        );
     }
 
     #[test]
@@ -4661,9 +5253,16 @@ export function bar() {
 }
 ";
         let result = entity_merge(base, ours, theirs, "test.ts");
-        eprintln!("TS import + export var: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "TS import + export var: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
-        assert!(result.content.contains("import {"), "import {{ must not be dropped");
+        assert!(
+            result.content.contains("import {"),
+            "import {{ must not be dropped"
+        );
     }
 
     #[test]
@@ -4693,10 +5292,20 @@ export function bar() {
 }
 ";
         let result = entity_merge(base, ours, theirs, "test.ts");
-        eprintln!("TS import adjacent: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "TS import adjacent: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
-        assert!(result.content.contains("import {"), "import {{ must not be dropped");
-        assert!(result.content.contains("type Foo,"), "type Foo must be present");
+        assert!(
+            result.content.contains("import {"),
+            "import {{ must not be dropped"
+        );
+        assert!(
+            result.content.contains("type Foo,"),
+            "type Foo must be present"
+        );
     }
 
     #[test]
@@ -4738,11 +5347,24 @@ export function bar() {
 }
 ";
         let result = entity_merge(base, ours, theirs, "test.ts");
-        eprintln!("TS both consolidate: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "TS both consolidate: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
-        assert!(result.content.contains("import {"), "import {{ must not be dropped");
-        assert!(result.content.contains("type Foo,"), "type Foo must be present");
-        assert!(result.content.contains("} from \"./foo\""), "closing must be present");
+        assert!(
+            result.content.contains("import {"),
+            "import {{ must not be dropped"
+        );
+        assert!(
+            result.content.contains("type Foo,"),
+            "type Foo must be present"
+        );
+        assert!(
+            result.content.contains("} from \"./foo\""),
+            "closing must be present"
+        );
     }
 
     #[test]
@@ -4788,11 +5410,24 @@ export function bar() {
 }
 ";
         let result = entity_merge(base, ours, theirs, "test.ts");
-        eprintln!("TS import ours-adds theirs-consolidates: clean={}, conflicts={:?}", result.is_clean(), result.conflicts);
+        eprintln!(
+            "TS import ours-adds theirs-consolidates: clean={}, conflicts={:?}",
+            result.is_clean(),
+            result.conflicts
+        );
         eprintln!("Content:\n{}", result.content);
-        assert!(result.content.contains("import {"), "import {{ must not be dropped");
-        assert!(result.content.contains("type d,"), "ours addition must be present");
-        assert!(result.content.contains("} from \"./foo\""), "closing must be present");
+        assert!(
+            result.content.contains("import {"),
+            "import {{ must not be dropped"
+        );
+        assert!(
+            result.content.contains("type d,"),
+            "ours addition must be present"
+        );
+        assert!(
+            result.content.contains("} from \"./foo\""),
+            "closing must be present"
+        );
     }
 
     #[test]
@@ -4831,14 +5466,30 @@ export function bar() {
 "#;
         let result = entity_merge(base, ours, theirs, "cubeQueryTool.ts");
         // Rename + modify should conflict (developer who modified didn't know about rename)
-        assert_eq!(result.conflicts.len(), 1, "Should have exactly one conflict");
+        assert_eq!(
+            result.conflicts.len(),
+            1,
+            "Should have exactly one conflict"
+        );
         assert!(
-            matches!(result.conflicts[0].kind, ConflictKind::RenameModify { renamed_in_ours: true, .. }),
+            matches!(
+                result.conflicts[0].kind,
+                ConflictKind::RenameModify {
+                    renamed_in_ours: true,
+                    ..
+                }
+            ),
             "Should be a RenameModify conflict, got: {:?}",
             result.conflicts[0].kind
         );
         // Both versions should be present in the conflict
-        assert!(result.content.contains("cubeQueryTool"), "Ours (renamed) should be in conflict markers");
-        assert!(result.content.contains("unit inference"), "Theirs (modified) should be in conflict markers");
+        assert!(
+            result.content.contains("cubeQueryTool"),
+            "Ours (renamed) should be in conflict markers"
+        );
+        assert!(
+            result.content.contains("unit inference"),
+            "Theirs (modified) should be in conflict markers"
+        );
     }
 }

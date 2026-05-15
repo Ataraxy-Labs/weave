@@ -5,14 +5,11 @@ use std::process::Command;
 use colored::Colorize;
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.jsx", "*.py", "*.go", "*.rs",
-    "*.java", "*.c", "*.h", "*.cpp", "*.cc", "*.cxx", "*.hpp", "*.hh", "*.hxx",
-    "*.rb", "*.cs", "*.php", "*.swift", "*.ex", "*.exs", "*.sh",
-    "*.f90", "*.f95", "*.f03", "*.f08",
-    "*.xml", "*.plist", "*.svg", "*.csproj", "*.fsproj", "*.vbproj",
-    "*.json", "*.yaml", "*.yml", "*.toml", "*.md",
-    "*.scala", "*.sc", "*.sbt", "*.kojo", "*.mill",
-    "*.dart",
+    "*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.jsx", "*.py", "*.go", "*.rs", "*.java", "*.c",
+    "*.h", "*.cpp", "*.cc", "*.cxx", "*.hpp", "*.hh", "*.hxx", "*.rb", "*.cs", "*.php", "*.swift",
+    "*.ex", "*.exs", "*.sh", "*.f90", "*.f95", "*.f03", "*.f08", "*.xml", "*.plist", "*.svg",
+    "*.csproj", "*.fsproj", "*.vbproj", "*.json", "*.yaml", "*.yml", "*.toml", "*.md", "*.scala",
+    "*.sc", "*.sbt", "*.kojo", "*.mill", "*.dart",
 ];
 
 pub fn run(driver_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -31,9 +28,12 @@ pub fn run(driver_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> 
     };
 
     // Verify driver exists
-    if !Path::new(&driver).exists() && Command::new("which").arg(&driver).output()
-        .map(|o| !o.status.success())
-        .unwrap_or(true)
+    if !Path::new(&driver).exists()
+        && Command::new("which")
+            .arg(&driver)
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
     {
         eprintln!(
             "{} Driver binary '{}' not found. Build with `cargo build --release` first.",
@@ -93,10 +93,7 @@ pub fn run(driver_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> 
             added
         );
     } else {
-        println!(
-            "{} .gitattributes already configured",
-            "✓".green().bold(),
-        );
+        println!("{} .gitattributes already configured", "✓".green().bold(),);
     }
 
     println!(

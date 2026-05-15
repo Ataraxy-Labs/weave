@@ -63,10 +63,7 @@ struct CheckRunOutput {
 
 impl GitHubClient {
     /// Create a client authenticated as a GitHub App installation.
-    pub async fn for_installation(
-        config: &Config,
-        installation_id: u64,
-    ) -> Result<Self, String> {
+    pub async fn for_installation(config: &Config, installation_id: u64) -> Result<Self, String> {
         let jwt = create_jwt(config)?;
         let client = reqwest::Client::new();
 
@@ -105,15 +102,9 @@ impl GitHubClient {
             "Authorization",
             format!("Bearer {}", self.token).parse().unwrap(),
         );
-        headers.insert(
-            "Accept",
-            "application/vnd.github+json".parse().unwrap(),
-        );
+        headers.insert("Accept", "application/vnd.github+json".parse().unwrap());
         headers.insert("User-Agent", "weave-github".parse().unwrap());
-        headers.insert(
-            "X-GitHub-Api-Version",
-            "2022-11-28".parse().unwrap(),
-        );
+        headers.insert("X-GitHub-Api-Version", "2022-11-28".parse().unwrap());
         headers
     }
 
@@ -125,9 +116,7 @@ impl GitHubClient {
         base: &str,
         head: &str,
     ) -> Result<CompareResponse, String> {
-        let url = format!(
-            "https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}"
-        );
+        let url = format!("https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}");
         let resp = self
             .client
             .get(&url)
@@ -155,9 +144,7 @@ impl GitHubClient {
         path: &str,
         ref_: &str,
     ) -> Result<Option<String>, String> {
-        let url = format!(
-            "https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref_}"
-        );
+        let url = format!("https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref_}");
         let resp = self
             .client
             .get(&url)
@@ -204,9 +191,8 @@ impl GitHubClient {
         pr_number: u64,
         body: &str,
     ) -> Result<(), String> {
-        let url = format!(
-            "https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
-        );
+        let url =
+            format!("https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments");
         let resp = self
             .client
             .post(&url)
@@ -272,9 +258,7 @@ impl GitHubClient {
         repo: &str,
         pr_number: u64,
     ) -> Result<Option<bool>, String> {
-        let url = format!(
-            "https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
-        );
+        let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}");
         let resp = self
             .client
             .get(&url)

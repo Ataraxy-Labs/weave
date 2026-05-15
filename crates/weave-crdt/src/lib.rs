@@ -17,7 +17,10 @@ pub use ops::{
     PotentialConflict,
 };
 pub use state::EntityStateDoc;
-pub use sync::{extract_entity_ids, merge_file_entities, reconstruct_file_from_crdt, resolve_entity_id, sync_from_files};
+pub use sync::{
+    extract_entity_ids, merge_file_entities, reconstruct_file_from_crdt, resolve_entity_id,
+    sync_from_files,
+};
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub use content::set_entity_conflict;

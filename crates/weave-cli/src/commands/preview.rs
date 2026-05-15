@@ -3,10 +3,7 @@ use sem_core::parser::plugins::create_default_registry;
 use weave_core::entity_merge_with_registry;
 use weave_core::git;
 
-pub fn run(
-    branch: &str,
-    file_path: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(branch: &str, file_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let head = "HEAD";
     let merge_base = git::find_merge_base(head, branch)?;
 
@@ -17,7 +14,10 @@ pub fn run(
     };
 
     if files.is_empty() {
-        println!("{} No files with changes in both branches.", "✓".green().bold());
+        println!(
+            "{} No files with changes in both branches.",
+            "✓".green().bold()
+        );
         return Ok(());
     }
 
@@ -30,7 +30,10 @@ pub fn run(
         let ours_content = git::git_show(head, file).unwrap_or_default();
         let theirs_content = git::git_show(branch, file).unwrap_or_default();
 
-        if ours_content == theirs_content || base_content == ours_content || base_content == theirs_content {
+        if ours_content == theirs_content
+            || base_content == ours_content
+            || base_content == theirs_content
+        {
             continue;
         }
 
@@ -48,7 +51,10 @@ pub fn run(
             format!("{}", "auto-resolved".green())
         } else {
             total_conflicts += result.conflicts.len();
-            format!("{} conflict(s)", result.conflicts.len().to_string().red().bold())
+            format!(
+                "{} conflict(s)",
+                result.conflicts.len().to_string().red().bold()
+            )
         };
 
         println!("  {} — {}", file, status);

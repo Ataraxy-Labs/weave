@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use automerge::{ObjType, ReadDoc, Value, transaction::Transactable};
+use automerge::{transaction::Transactable, ObjType, ReadDoc, Value};
 use sem_core::parser::registry::ParserRegistry;
 use weave_core::region::{extract_regions, FileRegion};
 
@@ -52,11 +52,15 @@ pub fn sync_from_files(
             // Store entity content
             let entities_map = state.entities_id()?;
             if let Ok(Some((_, entity_obj))) = state.doc.get(&entities_map, entity.id.as_str()) {
-                state.doc.put(&entity_obj, "content", entity.content.as_str())?;
+                state
+                    .doc
+                    .put(&entity_obj, "content", entity.content.as_str())?;
                 // Set base_content on initial sync if empty
                 let base = get_str(&state.doc, &entity_obj, "base_content").unwrap_or_default();
                 if base.is_empty() {
-                    state.doc.put(&entity_obj, "base_content", entity.content.as_str())?;
+                    state
+                        .doc
+                        .put(&entity_obj, "base_content", entity.content.as_str())?;
                 }
             }
 
@@ -65,7 +69,9 @@ pub fn sync_from_files(
 
         // Store file entity ordering
         let entity_order = state.file_entity_order_id()?;
-        let order_list = state.doc.put_object(&entity_order, file_path.as_str(), ObjType::List)?;
+        let order_list = state
+            .doc
+            .put_object(&entity_order, file_path.as_str(), ObjType::List)?;
         for (i, entity) in entities.iter().enumerate() {
             state.doc.insert(&order_list, i, entity.id.as_str())?;
         }
@@ -76,7 +82,9 @@ pub fn sync_from_files(
         for region in &regions {
             if let FileRegion::Interstitial(inter) = region {
                 let key = format!("{}::{}", file_path, inter.position_key);
-                state.doc.put(&interstitials_map, key.as_str(), inter.content.as_str())?;
+                state
+                    .doc
+                    .put(&interstitials_map, key.as_str(), inter.content.as_str())?;
             }
         }
     }
@@ -208,10 +216,7 @@ pub fn merge_file_entities(
 ///
 /// Reads file_entity_order for ordering, file_interstitials for non-entity
 /// content, and entity content (clean or conflict markers).
-pub fn reconstruct_file_from_crdt(
-    state: &EntityStateDoc,
-    file_path: &str,
-) -> Result<String> {
+pub fn reconstruct_file_from_crdt(state: &EntityStateDoc, file_path: &str) -> Result<String> {
     let entity_order = read_file_entity_order(state, file_path);
     let interstitials = read_file_interstitials(state, file_path);
 
@@ -238,8 +243,10 @@ pub fn reconstruct_file_from_crdt(
             Ok(status) => {
                 if status.merge_state == "conflict" {
                     // Emit conflict markers
-                    output.push_str(&format!("<<<<<<< {}\n",
-                        status.conflict_ours_agent.as_deref().unwrap_or("ours")));
+                    output.push_str(&format!(
+                        "<<<<<<< {}\n",
+                        status.conflict_ours_agent.as_deref().unwrap_or("ours")
+                    ));
                     if let Some(ref ours) = status.conflict_ours {
                         output.push_str(ours);
                         if !ours.ends_with('\n') {
@@ -253,8 +260,10 @@ pub fn reconstruct_file_from_crdt(
                             output.push('\n');
                         }
                     }
-                    output.push_str(&format!(">>>>>>> {}\n",
-                        status.conflict_theirs_agent.as_deref().unwrap_or("theirs")));
+                    output.push_str(&format!(
+                        ">>>>>>> {}\n",
+                        status.conflict_theirs_agent.as_deref().unwrap_or("theirs")
+                    ));
                 } else {
                     output.push_str(&status.content);
                     if !status.content.is_empty() && !status.content.ends_with('\n') {

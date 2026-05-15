@@ -20,7 +20,13 @@ pub fn find_repo_root_from_path(path: &Path) -> Result<PathBuf, Box<dyn std::err
         path.to_path_buf()
     } else {
         path.parent()
-            .map(|p| if p.as_os_str().is_empty() { Path::new(".") } else { p })
+            .map(|p| {
+                if p.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    p
+                }
+            })
             .unwrap_or(Path::new("."))
             .to_path_buf()
     };

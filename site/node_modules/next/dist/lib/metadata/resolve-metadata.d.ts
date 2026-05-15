@@ -1,0 +1,25 @@
+import type { Metadata, ResolvedMetadata, ResolvedViewport, Viewport } from './types/metadata-interface';
+import type { GetDynamicParamFromSegment } from '../../server/app-render/app-render';
+import type { MetadataContext } from './types/resolvers';
+import type { LoaderTree } from '../../server/lib/app-dir-module';
+import type { ParsedUrlQuery } from 'querystring';
+import type { StaticMetadata } from './types/icons';
+import type { WorkStore } from '../../server/app-render/work-async-storage.external';
+import 'server-only';
+type Resolved<T> = T extends Metadata ? ResolvedMetadata : ResolvedViewport;
+type InstrumentedResolver<TData> = ((parent: Promise<Resolved<TData>>) => TData | Promise<TData>) & {
+    $$original: (props: unknown, parent: Promise<Resolved<TData>>) => TData | Promise<TData>;
+};
+type MetadataResolver = InstrumentedResolver<Metadata>;
+type ViewportResolver = InstrumentedResolver<Viewport>;
+export type MetadataErrorType = 'not-found' | 'forbidden' | 'unauthorized';
+export type MetadataItems = Array<[
+    Metadata | MetadataResolver | null,
+    StaticMetadata
+]>;
+export type ViewportItems = Array<Viewport | ViewportResolver | null>;
+export declare function accumulateMetadata(route: string, metadataItems: MetadataItems, pathname: Promise<string>, metadataContext: MetadataContext): Promise<ResolvedMetadata>;
+export declare function accumulateViewport(viewportItems: ViewportItems): Promise<ResolvedViewport>;
+export declare function resolveMetadata(tree: LoaderTree, pathname: Promise<string>, searchParams: Promise<ParsedUrlQuery>, errorConvention: MetadataErrorType | undefined, getDynamicParamFromSegment: GetDynamicParamFromSegment, workStore: WorkStore, metadataContext: MetadataContext): Promise<ResolvedMetadata>;
+export declare function resolveViewport(tree: LoaderTree, searchParams: Promise<ParsedUrlQuery>, errorConvention: MetadataErrorType | undefined, getDynamicParamFromSegment: GetDynamicParamFromSegment, workStore: WorkStore): Promise<ResolvedViewport>;
+export {};

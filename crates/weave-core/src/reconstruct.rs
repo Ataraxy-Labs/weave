@@ -29,8 +29,7 @@ pub fn reconstruct(
     let theirs_only: Vec<&SemanticEntity> = theirs_entities
         .iter()
         .filter(|e| {
-            !ours_entity_map.contains_key(e.id.as_str())
-                && !theirs_rename_base_ids.contains(&e.id)
+            !ours_entity_map.contains_key(e.id.as_str()) && !theirs_rename_base_ids.contains(&e.id)
         })
         .collect();
 
@@ -84,9 +83,7 @@ pub fn reconstruct(
                 } else {
                     // Entity not in resolved map — keep ours content
                     output.push_str(&entity_region.content);
-                    if !entity_region.content.is_empty()
-                        && !entity_region.content.ends_with('\n')
-                    {
+                    if !entity_region.content.is_empty() && !entity_region.content.ends_with('\n') {
                         output.push('\n');
                     }
                 }
@@ -124,7 +121,8 @@ pub fn reconstruct(
                                     }
                                     ResolvedEntity::Conflict(conflict) => {
                                         output.push('\n');
-                                        output.push_str(&conflict.to_conflict_markers(marker_format));
+                                        output
+                                            .push_str(&conflict.to_conflict_markers(marker_format));
                                     }
                                     ResolvedEntity::ScopedConflict { content, .. } => {
                                         output.push('\n');

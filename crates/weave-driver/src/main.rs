@@ -106,7 +106,10 @@ fn main() {
 
     // Detect binary content (null bytes in first 8KB)
     if is_binary(&base) || is_binary(&ours) || is_binary(&theirs) {
-        eprintln!("weave: binary file detected, skipping entity merge for '{}'", file_path);
+        eprintln!(
+            "weave: binary file detected, skipping entity merge for '{}'",
+            file_path
+        );
         process::exit(2);
     }
 
@@ -135,7 +138,10 @@ fn main() {
             "entities": result.audit,
         });
         let audit_path = format!("{}.weave-audit.json", write_path);
-        if let Err(e) = fs::write(&audit_path, serde_json::to_string_pretty(&audit_json).unwrap_or_default()) {
+        if let Err(e) = fs::write(
+            &audit_path,
+            serde_json::to_string_pretty(&audit_json).unwrap_or_default(),
+        ) {
             eprintln!("weave: failed to write audit to '{}': {}", audit_path, e);
         }
     }

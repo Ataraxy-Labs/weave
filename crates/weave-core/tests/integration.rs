@@ -154,10 +154,7 @@ fn ts_modify_delete_conflict() {
     let theirs = "";
 
     let result = entity_merge(base, ours, theirs, "conflict.ts");
-    assert!(
-        !result.is_clean(),
-        "Modify + delete should be a conflict"
-    );
+    assert!(!result.is_clean(), "Modify + delete should be a conflict");
     assert_eq!(result.conflicts.len(), 1);
     assert!(
         result.content.contains("<<<<<<< ours"),
@@ -265,9 +262,18 @@ fn json_multiple_keys_added_at_end() {
         "JSON: modify value + add keys at end should auto-resolve. Conflicts: {:?}",
         result.conflicts
     );
-    assert!(result.content.contains("\"BBB\""), "Should keep ours modification");
-    assert!(result.content.contains("\"key.xxx\""), "Should include first added key");
-    assert!(result.content.contains("\"key.yyy\""), "Should include second added key");
+    assert!(
+        result.content.contains("\"BBB\""),
+        "Should keep ours modification"
+    );
+    assert!(
+        result.content.contains("\"key.xxx\""),
+        "Should include first added key"
+    );
+    assert!(
+        result.content.contains("\"key.yyy\""),
+        "Should include second added key"
+    );
 
     // Closing brace must come after ALL added keys, not just the first
     let brace_pos = result.content.rfind('}').unwrap();
@@ -324,10 +330,22 @@ export function main() {
         "Both adding different imports should auto-resolve. Conflicts: {:?}",
         result.conflicts
     );
-    assert!(result.content.contains("validate"), "Should contain ours import");
-    assert!(result.content.contains("format"), "Should contain theirs import");
-    assert!(result.content.contains("config"), "Should keep base imports");
-    assert!(result.content.contains("logger"), "Should keep base imports");
+    assert!(
+        result.content.contains("validate"),
+        "Should contain ours import"
+    );
+    assert!(
+        result.content.contains("format"),
+        "Should contain theirs import"
+    );
+    assert!(
+        result.content.contains("config"),
+        "Should keep base imports"
+    );
+    assert!(
+        result.content.contains("logger"),
+        "Should keep base imports"
+    );
 }
 
 #[test]
@@ -363,7 +381,10 @@ fn main() {
         result.conflicts
     );
     assert!(result.content.contains("Path"), "Should contain ours use");
-    assert!(result.content.contains("HashMap"), "Should contain theirs use");
+    assert!(
+        result.content.contains("HashMap"),
+        "Should contain theirs use"
+    );
 }
 
 #[test]
@@ -395,8 +416,14 @@ def main():
         "Python: both adding different imports should auto-resolve. Conflicts: {:?}",
         result.conflicts
     );
-    assert!(result.content.contains("json"), "Should contain ours import");
-    assert!(result.content.contains("pathlib"), "Should contain theirs import");
+    assert!(
+        result.content.contains("json"),
+        "Should contain ours import"
+    );
+    assert!(
+        result.content.contains("pathlib"),
+        "Should contain theirs import"
+    );
 }
 
 // =============================================================================
@@ -459,9 +486,18 @@ fn ts_class_different_methods_modified_auto_resolves() {
         "Different class methods modified by different agents should auto-merge. Conflicts: {:?}",
         result.conflicts,
     );
-    assert!(result.content.contains("cache.get"), "Should contain ours's caching change");
-    assert!(result.content.contains("email required"), "Should contain theirs's validation change");
-    assert!(result.content.contains("deleteUser"), "Should preserve unchanged method");
+    assert!(
+        result.content.contains("cache.get"),
+        "Should contain ours's caching change"
+    );
+    assert!(
+        result.content.contains("email required"),
+        "Should contain theirs's validation change"
+    );
+    assert!(
+        result.content.contains("deleteUser"),
+        "Should preserve unchanged method"
+    );
 }
 
 #[test]
@@ -497,8 +533,14 @@ fn ts_class_one_adds_method_other_modifies_existing() {
         "One modifying, other adding should auto-merge. Conflicts: {:?}",
         result.conflicts,
     );
-    assert!(result.content.contains("console.log"), "Should contain modified add");
-    assert!(result.content.contains("multiply"), "Should contain new method");
+    assert!(
+        result.content.contains("console.log"),
+        "Should contain modified add"
+    );
+    assert!(
+        result.content.contains("multiply"),
+        "Should contain new method"
+    );
 }
 
 // =============================================================================
@@ -542,9 +584,15 @@ export function farewell(name: string): string {
         result.conflicts,
     );
     // Should have the renamed function
-    assert!(result.content.contains("sayHello"), "Should have renamed function");
+    assert!(
+        result.content.contains("sayHello"),
+        "Should have renamed function"
+    );
     // Should have the modified farewell
-    assert!(result.content.contains("See you later"), "Should have modified farewell");
+    assert!(
+        result.content.contains("See you later"),
+        "Should have modified farewell"
+    );
 }
 
 // =============================================================================
@@ -606,7 +654,8 @@ fn empty_base_json_both_add_different_keys() {
     // The merged output must not contain content after the closing brace
     assert!(
         !result.content.contains("}\n\""),
-        "Must not append content after closing brace: {}", result.content
+        "Must not append content after closing brace: {}",
+        result.content
     );
 }
 
@@ -800,9 +849,18 @@ fn py_class_different_methods_modified_auto_resolves() {
         "Python class: different methods modified should auto-merge. Conflicts: {:?}",
         result.conflicts,
     );
-    assert!(result.content.contains("raise ValueError"), "Should contain ours's validation");
-    assert!(result.content.contains("self.cache.get"), "Should contain theirs's caching");
-    assert!(result.content.contains("def update"), "Should preserve unchanged methods");
+    assert!(
+        result.content.contains("raise ValueError"),
+        "Should contain ours's validation"
+    );
+    assert!(
+        result.content.contains("self.cache.get"),
+        "Should contain theirs's caching"
+    );
+    assert!(
+        result.content.contains("def update"),
+        "Should preserve unchanged methods"
+    );
 }
 
 #[test]
@@ -831,7 +889,10 @@ fn ts_one_reformats_other_modifies_no_conflict() {
         "Whitespace-only change vs real change should not conflict. Conflicts: {:?}",
         result.conflicts,
     );
-    assert!(result.content.contains("toUpperCase"), "Should take the real change (theirs)");
+    assert!(
+        result.content.contains("toUpperCase"),
+        "Should take the real change (theirs)"
+    );
 }
 
 #[test]
@@ -902,8 +963,14 @@ fn java_different_methods_modified_auto_resolves() {
         "Different Java methods modified should auto-resolve. Conflicts: {:?}",
         result.conflicts,
     );
-    assert!(result.content.contains("logger.info"), "Should contain ours change");
-    assert!(result.content.contains("validateUser"), "Should contain theirs change");
+    assert!(
+        result.content.contains("logger.info"),
+        "Should contain ours change"
+    );
+    assert!(
+        result.content.contains("validateUser"),
+        "Should contain theirs change"
+    );
 }
 
 #[test]
@@ -934,8 +1001,14 @@ fn java_both_add_different_annotations() {
         "Both adding different annotations should auto-resolve. Conflicts: {:?}",
         result.conflicts,
     );
-    assert!(result.content.contains("@Cacheable"), "Should contain ours annotation");
-    assert!(result.content.contains("@RateLimit"), "Should contain theirs annotation");
+    assert!(
+        result.content.contains("@Cacheable"),
+        "Should contain ours annotation"
+    );
+    assert!(
+        result.content.contains("@RateLimit"),
+        "Should contain theirs annotation"
+    );
 }
 
 // =============================================================================
@@ -976,8 +1049,14 @@ int process(Data* data) {
         "Different C functions modified should auto-resolve. Conflicts: {:?}",
         result.conflicts,
     );
-    assert!(result.content.contains("log_debug"), "Should contain ours change");
-    assert!(result.content.contains("NULL"), "Should contain theirs change");
+    assert!(
+        result.content.contains("log_debug"),
+        "Should contain ours change"
+    );
+    assert!(
+        result.content.contains("NULL"),
+        "Should contain theirs change"
+    );
 }
 
 // =============================================================================
@@ -1036,9 +1115,18 @@ fn ts_method_reorder_plus_modification_auto_resolves() {
         "Method reorder + modification should auto-resolve. Conflicts: {:?}",
         result.conflicts,
     );
-    assert!(result.content.contains("console.log(\"fetching\""), "Should have theirs modification");
-    assert!(result.content.contains("deleteUser"), "Should have all methods");
-    assert!(result.content.contains("createUser"), "Should have all methods");
+    assert!(
+        result.content.contains("console.log(\"fetching\""),
+        "Should have theirs modification"
+    );
+    assert!(
+        result.content.contains("deleteUser"),
+        "Should have all methods"
+    );
+    assert!(
+        result.content.contains("createUser"),
+        "Should have all methods"
+    );
 }
 
 // =============================================================================
@@ -1056,8 +1144,14 @@ fn python_class_both_add_methods_auto_resolves() {
         "Both adding methods to Python class should auto-resolve. Conflicts: {:?}",
         result.conflicts,
     );
-    assert!(result.content.contains("multiply"), "Should have ours method");
-    assert!(result.content.contains("divide"), "Should have theirs method");
+    assert!(
+        result.content.contains("multiply"),
+        "Should have ours method"
+    );
+    assert!(
+        result.content.contains("divide"),
+        "Should have theirs method"
+    );
 }
 
 // =============================================================================
@@ -1098,8 +1192,14 @@ fn rust_impl_both_add_methods_auto_resolves() {
         "Both adding methods to Rust impl should auto-resolve. Conflicts: {:?}",
         result.conflicts,
     );
-    assert!(result.content.contains("multiply"), "Should have ours method");
-    assert!(result.content.contains("divide"), "Should have theirs method");
+    assert!(
+        result.content.contains("multiply"),
+        "Should have ours method"
+    );
+    assert!(
+        result.content.contains("divide"),
+        "Should have theirs method"
+    );
 }
 
 // =============================================================================
@@ -1140,8 +1240,14 @@ func HandleDelete(w http.ResponseWriter, r *http.Request) {
         "Both adding Go functions should auto-resolve. Conflicts: {:?}",
         result.conflicts,
     );
-    assert!(result.content.contains("HandlePost"), "Should have ours function");
-    assert!(result.content.contains("HandleDelete"), "Should have theirs function");
+    assert!(
+        result.content.contains("HandlePost"),
+        "Should have ours function"
+    );
+    assert!(
+        result.content.contains("HandleDelete"),
+        "Should have theirs function"
+    );
 }
 
 // =============================================================================
@@ -1159,8 +1265,14 @@ fn ts_enum_modify_variant_plus_add_variant_auto_resolves() {
         "Enum modify + add should auto-resolve. Conflicts: {:?}",
         result.conflicts,
     );
-    assert!(result.content.contains("\"disabled\""), "Should have modified variant");
-    assert!(result.content.contains("Deleted"), "Should have new variant");
+    assert!(
+        result.content.contains("\"disabled\""),
+        "Should have modified variant"
+    );
+    assert!(
+        result.content.contains("Deleted"),
+        "Should have new variant"
+    );
 }
 
 // =============================================================================
@@ -1312,7 +1424,10 @@ fn java_class_conflict_scoped_to_method() {
     }
 
     // The conflict should exist (both modified same method)
-    assert!(!result.is_clean(), "Should have a conflict on the add method");
+    assert!(
+        !result.is_clean(),
+        "Should have a conflict on the add method"
+    );
 
     // The subtract method should NOT be inside conflict markers
     // (it was not modified by either branch)
@@ -1369,7 +1484,10 @@ fn java_throws_vs_param_change() {
         "subtract should NOT be inside conflict markers"
     );
     // Verify subtract appears cleanly
-    assert!(result.content.contains("public int subtract"), "subtract should be in output");
+    assert!(
+        result.content.contains("public int subtract"),
+        "subtract should be in output"
+    );
 }
 
 #[test]
@@ -1406,7 +1524,11 @@ fn java_param_vs_annotation() {
     let result = entity_merge(base, ours, theirs, "Service.java");
     eprintln!("--- java param vs annotation ---");
     eprintln!("content:\n{}", result.content);
-    eprintln!("clean: {}, conflicts: {}", result.is_clean(), result.conflicts.len());
+    eprintln!(
+        "clean: {}, conflicts: {}",
+        result.is_clean(),
+        result.conflicts.len()
+    );
 
     // deleteUser should never be in conflict
     assert!(
@@ -1478,9 +1600,14 @@ fn java_large_class_one_conflict() {
     for method in &["methodA", "methodB", "methodC"] {
         assert!(
             !is_inside_conflict_markers(&result.content, method),
-            "{} should NOT be inside conflict markers", method
+            "{} should NOT be inside conflict markers",
+            method
         );
-        assert!(result.content.contains(method), "{} should be in output", method);
+        assert!(
+            result.content.contains(method),
+            "{} should be in output",
+            method
+        );
     }
 }
 
@@ -1535,7 +1662,8 @@ fn ts_class_scoped_conflict() {
     for method in &["createUser", "deleteUser"] {
         assert!(
             !is_inside_conflict_markers(&result.content, method),
-            "{} should NOT be inside conflict markers", method
+            "{} should NOT be inside conflict markers",
+            method
         );
     }
 }
@@ -1583,7 +1711,8 @@ fn python_class_scoped_conflict() {
     for method in &["def create", "def delete"] {
         assert!(
             !is_inside_conflict_markers(&result.content, method),
-            "{} should NOT be inside conflict markers", method
+            "{} should NOT be inside conflict markers",
+            method
         );
     }
 }
@@ -1639,7 +1768,8 @@ fn rust_impl_scoped_conflict() {
     for method in &["handle_post", "handle_delete"] {
         assert!(
             !is_inside_conflict_markers(&result.content, method),
-            "{} should NOT be inside conflict markers", method
+            "{} should NOT be inside conflict markers",
+            method
         );
     }
 }
@@ -1942,7 +2072,10 @@ fn dart_both_modify_same_method_incompatibly() {
 "#;
 
     let result = entity_merge(base, ours, theirs, "processor.dart");
-    assert!(!result.is_clean(), "Incompatible changes to the same function must conflict");
+    assert!(
+        !result.is_clean(),
+        "Incompatible changes to the same function must conflict"
+    );
     assert!(is_inside_conflict_markers(&result.content, "toLowerCase()"));
     assert!(is_inside_conflict_markers(&result.content, "toUpperCase()"));
 }
