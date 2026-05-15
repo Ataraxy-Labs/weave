@@ -1,2 +1,7 @@
 /target
 .weave/
+node_modules/
+.DS_Store
+.sem/
+*.o
+*.rcgu.o

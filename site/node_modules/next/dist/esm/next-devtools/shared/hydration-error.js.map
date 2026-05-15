@@ -1,1 +1,0 @@
-{"version":3,"sources":["../../../../src/next-devtools/shared/hydration-error.ts"],"sourcesContent":["export type HydrationErrorState = {\n  // Hydration warning template format: <message> <serverContent> <clientContent>\n  warning?: string\n  reactOutputComponentDiff?: string\n}\n"],"names":[],"mappings":"AAAA,WAIC","ignoreList":[0]}
