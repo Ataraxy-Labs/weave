@@ -1,3 +1,7 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::nonminimal_bool)]
+
 pub mod conflict;
 pub mod git;
 pub mod merge;

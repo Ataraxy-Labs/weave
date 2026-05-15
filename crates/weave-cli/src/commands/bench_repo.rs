@@ -306,6 +306,7 @@ pub fn run(
 }
 
 /// Save a test case to disk: base, ours, theirs, human, weave
+#[allow(clippy::too_many_arguments)]
 fn save_case(
     save_dir: &str,
     commit: &str,

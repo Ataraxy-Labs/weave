@@ -349,7 +349,7 @@ export function world() {
         let interstitials: Vec<_> = regions.iter().filter(|r| !r.is_entity()).collect();
         for inter in &interstitials {
             assert!(
-                !inter.content().contains("/**") || inter.content().contains("@param") == false,
+                !inter.content().contains("/**") || !inter.content().contains("@param"),
                 "Interstitial should not contain the bundled JSDoc. Key: {:?}, Content: {:?}",
                 inter.key(),
                 inter.content(),

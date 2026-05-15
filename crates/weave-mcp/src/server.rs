@@ -45,6 +45,7 @@ pub struct WeaveServer {
     context: Arc<Mutex<Option<RepoContext>>>,
     registry: Arc<ParserRegistry>,
     entity_cache: Arc<Mutex<EntityCache>>,
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
@@ -234,11 +235,10 @@ impl WeaveServer {
         let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
 
         let entities = self.cached_extract_entities(&content, &rel_path).await;
-        if entities.is_empty() {
-            if self.registry.get_plugin(&rel_path).is_none() {
+        if entities.is_empty()
+            && self.registry.get_plugin(&rel_path).is_none() {
                 return Err(internal_err(format!("No parser for file: {}", rel_path)));
             }
-        }
         let result: Vec<serde_json::Value> = entities
             .iter()
             .map(|e| {
@@ -402,7 +402,7 @@ impl WeaveServer {
         let _ = sync_from_files(
             &mut state,
             &ctx.repo_root,
-            &[rel_path.clone()],
+            std::slice::from_ref(&rel_path),
             &self.registry,
         );
 
@@ -1247,7 +1247,7 @@ impl WeaveServer {
         let _ = sync_from_files(
             &mut state,
             &ctx.repo_root,
-            &[rel_path.clone()],
+            std::slice::from_ref(&rel_path),
             &self.registry,
         );
 

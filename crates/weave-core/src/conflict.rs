@@ -679,6 +679,40 @@ impl MergeStats {
     }
 }
 
+impl fmt::Display for MergeStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unchanged: {}", self.entities_unchanged)?;
+        if self.entities_ours_only > 0 {
+            write!(f, ", ours-only: {}", self.entities_ours_only)?;
+        }
+        if self.entities_theirs_only > 0 {
+            write!(f, ", theirs-only: {}", self.entities_theirs_only)?;
+        }
+        if self.entities_both_changed_merged > 0 {
+            write!(f, ", auto-merged: {}", self.entities_both_changed_merged)?;
+        }
+        if self.entities_added_ours > 0 {
+            write!(f, ", added-ours: {}", self.entities_added_ours)?;
+        }
+        if self.entities_added_theirs > 0 {
+            write!(f, ", added-theirs: {}", self.entities_added_theirs)?;
+        }
+        if self.entities_deleted > 0 {
+            write!(f, ", deleted: {}", self.entities_deleted)?;
+        }
+        if self.entities_conflicted > 0 {
+            write!(f, ", CONFLICTS: {}", self.entities_conflicted)?;
+        }
+        if self.semantic_warnings > 0 {
+            write!(f, ", semantic-warnings: {}", self.semantic_warnings)?;
+        }
+        if self.used_fallback {
+            write!(f, " (line-level fallback)")?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,39 +940,5 @@ mod tests {
         assert!(markers.starts_with("<<<<<<<<<<<")); // 11 <'s
         assert!(markers.contains("===========")); // 11 ='s
         assert!(markers.contains(">>>>>>>>>>>")); // 11 >'s
-    }
-}
-
-impl fmt::Display for MergeStats {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "unchanged: {}", self.entities_unchanged)?;
-        if self.entities_ours_only > 0 {
-            write!(f, ", ours-only: {}", self.entities_ours_only)?;
-        }
-        if self.entities_theirs_only > 0 {
-            write!(f, ", theirs-only: {}", self.entities_theirs_only)?;
-        }
-        if self.entities_both_changed_merged > 0 {
-            write!(f, ", auto-merged: {}", self.entities_both_changed_merged)?;
-        }
-        if self.entities_added_ours > 0 {
-            write!(f, ", added-ours: {}", self.entities_added_ours)?;
-        }
-        if self.entities_added_theirs > 0 {
-            write!(f, ", added-theirs: {}", self.entities_added_theirs)?;
-        }
-        if self.entities_deleted > 0 {
-            write!(f, ", deleted: {}", self.entities_deleted)?;
-        }
-        if self.entities_conflicted > 0 {
-            write!(f, ", CONFLICTS: {}", self.entities_conflicted)?;
-        }
-        if self.semantic_warnings > 0 {
-            write!(f, ", semantic-warnings: {}", self.semantic_warnings)?;
-        }
-        if self.used_fallback {
-            write!(f, " (line-level fallback)")?;
-        }
-        Ok(())
     }
 }

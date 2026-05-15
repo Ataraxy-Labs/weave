@@ -92,7 +92,7 @@ pub async fn handle_pull_request(state: &AppState, pr: &PrEvent) -> Result<(), S
                 &ours,
                 &theirs,
                 &file_path,
-                &*reg,
+                &reg,
                 &weave_core::MarkerFormat::default(),
             )
         })

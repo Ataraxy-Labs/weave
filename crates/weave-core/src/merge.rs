@@ -579,7 +579,7 @@ pub fn entity_merge_with_registry(
         // Entity coverage check: every resolved-clean entity's content should
         // appear in the merged output. If it doesn't, reconstruct dropped it.
         if conflicts.is_empty() {
-            for (_, resolved) in &resolved_entities {
+            for resolved in resolved_entities.values() {
                 if let ResolvedEntity::Clean(region) = resolved {
                     let trimmed = region.content.trim();
                     if !trimmed.is_empty() && trimmed.len() > 20 && !content.contains(trimmed) {
@@ -1237,7 +1237,7 @@ fn split_decorators(content: &str) -> (Vec<&str>, &str) {
     while decorator_end > 0
         && lines
             .get(decorator_end - 1)
-            .map_or(false, |l| l.trim().is_empty())
+            .is_some_and(|l| l.trim().is_empty())
     {
         byte_offset -= lines[decorator_end - 1].len() + 1;
         decorator_end -= 1;
@@ -1321,10 +1321,7 @@ fn try_decorator_aware_merge(base: &str, ours: &str, theirs: &str) -> Option<Str
 /// Try 3-way merge on text using diffy. Returns None if there are conflicts.
 fn diffy_merge(base: &str, ours: &str, theirs: &str) -> Option<String> {
     let result = diffy::merge(base, ours, theirs);
-    match result {
-        Ok(merged) => Some(merged),
-        Err(_conflicted) => None,
-    }
+    result.ok()
 }
 
 /// Try 3-way merge using git merge-file. Returns None on conflict or error.
@@ -2144,18 +2141,18 @@ fn import_source_prefix(line: &str) -> &str {
         }
         // JS/TS closing line: `} from 'Y'` or `} from "Y"`
         if trimmed.starts_with('}') && trimmed.contains("from ") {
-            if let Some(quote_start) = trimmed.find(|c: char| c == '\'' || c == '"') {
+            if let Some(quote_start) = trimmed.find(['\'', '"']) {
                 let after = &trimmed[quote_start + 1..];
-                if let Some(quote_end) = after.find(|c: char| c == '\'' || c == '"') {
+                if let Some(quote_end) = after.find(['\'', '"']) {
                     return &after[..quote_end];
                 }
             }
         }
         // JS/TS: "import X from 'Y'" -> Y (between quotes)
         if trimmed.starts_with("import ") {
-            if let Some(quote_start) = trimmed.find(|c: char| c == '\'' || c == '"') {
+            if let Some(quote_start) = trimmed.find(['\'', '"']) {
                 let after = &trimmed[quote_start + 1..];
-                if let Some(quote_end) = after.find(|c: char| c == '\'' || c == '"') {
+                if let Some(quote_end) = after.find(['\'', '"']) {
                     return &after[..quote_end];
                 }
             }
@@ -3480,7 +3477,7 @@ fn extract_member_chunks(content: &str) -> Option<Vec<MemberChunk>> {
                 // Trim trailing blank lines
                 while current_chunk_lines
                     .last()
-                    .map_or(false, |l| l.trim().is_empty())
+                    .is_some_and(|l| l.trim().is_empty())
                 {
                     current_chunk_lines.pop();
                 }
@@ -3511,7 +3508,7 @@ fn extract_member_chunks(content: &str) -> Option<Vec<MemberChunk>> {
     if let Some(name) = current_name {
         while current_chunk_lines
             .last()
-            .map_or(false, |l| l.trim().is_empty())
+            .is_some_and(|l| l.trim().is_empty())
         {
             current_chunk_lines.pop();
         }
