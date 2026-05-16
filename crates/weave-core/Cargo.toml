@@ -12,7 +12,7 @@ readme = "../../README.md"
 
 [dependencies]
 sem-core = "0.5.3"
-diffy = "0.4"
+diffy = "0.5"
 thiserror = "2"
 tempfile = "3"
 serde = { version = "1", features = ["derive"] }
