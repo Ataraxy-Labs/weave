@@ -163,24 +163,10 @@ To revert back to normal git merging:
 weave unsetup
 ```
 
-To set up for just yourself (without modifying `.gitattributes`), use `.git/info/attributes` instead:
+To set up for just yourself (without modifying `.gitattributes`), write the same supported file type rules to `.git/info/attributes` instead:
 
 ```bash
-git config merge.weave.name "Entity-level semantic merge"
-git config merge.weave.driver "weave-driver %O %A %B %L %P"
-cat >> .git/info/attributes << 'EOF'
-*.ts merge=weave
-*.tsx merge=weave
-*.js merge=weave
-*.py merge=weave
-*.go merge=weave
-*.rs merge=weave
-*.java merge=weave
-*.c merge=weave
-*.cpp merge=weave
-*.rb merge=weave
-*.cs merge=weave
-EOF
+weave setup --local
 ```
 
 ## Jujutsu (jj)

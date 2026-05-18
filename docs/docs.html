@@ -57,8 +57,8 @@
 <span class="d"># Configure your repo</span>
 <span class="cmd">$ cd my-project</span>
 <span class="cmd">$ weave setup</span>
-<span class="g">&#10003;</span> Created .gitattributes with weave merge driver rules
-<span class="g">&#10003;</span> Configured git merge driver 'weave'
+<span class="g">&#10003;</span> Configured git merge driver
+<span class="g">&#10003;</span> Updated .gitattributes
 
 <span class="d"># Preview a merge before doing it</span>
 <span class="cmd">$ weave preview feature-branch</span>
@@ -465,6 +465,7 @@
         </div>
         <div class="cmd-doc-flags">
           <div class="flag"><code>--driver &lt;path&gt;</code> <span>Path to weave-driver binary (auto-detected if omitted)</span></div>
+          <div class="flag"><code>--local</code> <span>Write merge attributes to .git/info/attributes instead of .gitattributes</span></div>
         </div>
       </div>
 
