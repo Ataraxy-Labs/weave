@@ -16,6 +16,9 @@ enum Commands {
         /// Path to weave-driver binary (auto-detected if omitted)
         #[arg(long)]
         driver: Option<String>,
+        /// Write merge attributes to .git/info/attributes instead of .gitattributes
+        #[arg(long)]
+        local: bool,
     },
     /// Remove weave merge driver from the current Git repo
     Unsetup,
@@ -86,7 +89,7 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Setup { ref driver } => commands::setup::run(driver.as_deref()),
+        Commands::Setup { ref driver, local } => commands::setup::run(driver.as_deref(), local),
         Commands::Unsetup => commands::setup::unsetup(),
         Commands::Preview {
             ref branch,
