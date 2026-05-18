@@ -61,6 +61,8 @@ enum Commands {
         #[arg(long)]
         save: Option<String>,
     },
+    /// Show lifetime merge statistics
+    Stats,
     /// Parse weave conflict markers and show a structured summary
     Summary {
         /// Path to a file containing weave conflict markers
@@ -101,6 +103,7 @@ fn main() {
             show_diff,
             ref save,
         } => commands::bench_repo::run(repo, limit, show_diff, save.as_deref()),
+        Commands::Stats => commands::stats::run(),
         Commands::Summary { ref file, json } => commands::summary::run(file, json),
         Commands::Claim {
             ref agent_id,

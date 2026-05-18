@@ -4,5 +4,6 @@ pub mod claim;
 pub mod preview;
 pub mod release;
 pub mod setup;
+pub mod stats;
 pub mod status;
 pub mod summary;

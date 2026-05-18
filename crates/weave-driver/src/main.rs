@@ -1,6 +1,7 @@
 use std::fs;
 use std::process;
 
+use weave_core::stats::WeaveLifetimeStats;
 use weave_core::{entity_merge_fmt, MarkerFormat};
 
 fn main() {
@@ -144,6 +145,19 @@ fn main() {
         ) {
             eprintln!("weave: failed to write audit to '{}': {}", audit_path, e);
         }
+    }
+
+    // Record lifetime stats (best-effort, never fails the merge)
+    let auto_resolved = result.stats.entities_ours_only
+        + result.stats.entities_theirs_only
+        + result.stats.entities_both_changed_merged;
+    let _ = WeaveLifetimeStats::load().record_merge(&result.stats).save();
+    if auto_resolved > 0 {
+        eprintln!(
+            "weave: {} entities auto-resolved ({} confidence)",
+            auto_resolved,
+            result.stats.confidence()
+        );
     }
 
     // Print stats to stderr only when verbose or conflicted

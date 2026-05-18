@@ -7,6 +7,7 @@ pub mod git;
 pub mod merge;
 pub mod reconstruct;
 pub mod region;
+pub mod stats;
 pub mod validate;
 
 pub use conflict::{parse_weave_conflicts, MarkerFormat, ParsedConflict};
