@@ -151,7 +151,9 @@ fn main() {
     let auto_resolved = result.stats.entities_ours_only
         + result.stats.entities_theirs_only
         + result.stats.entities_both_changed_merged;
-    let _ = WeaveLifetimeStats::load().record_merge(&result.stats).save();
+    let _ = WeaveLifetimeStats::load()
+        .record_merge(&result.stats)
+        .save();
     if auto_resolved > 0 {
         eprintln!(
             "weave: {} entities auto-resolved ({} confidence)",

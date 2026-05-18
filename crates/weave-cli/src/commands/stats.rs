@@ -19,7 +19,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("  weave lifetime stats");
     println!("  {}", "─".repeat(36));
     println!("  {:>8}  total merges", stats.total_merges);
-    println!("  {:>8}  conflicts auto-resolved", stats.conflicts_auto_resolved);
+    println!(
+        "  {:>8}  conflicts auto-resolved",
+        stats.conflicts_auto_resolved
+    );
     println!("  {:>8}  conflicts remaining", stats.conflicts_unresolved);
     println!();
     println!(
