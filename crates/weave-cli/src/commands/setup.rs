@@ -209,22 +209,24 @@ fn git_path(requested_path: &str) -> Result<PathBuf, Box<dyn std::error::Error>>
 }
 
 fn which_driver() -> Result<String, Box<dyn std::error::Error>> {
-    // Check if weave-driver is next to current executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("weave-driver");
-            if candidate.exists() {
-                return Ok(candidate.to_string_lossy().to_string());
-            }
-        }
-    }
-
-    // Check PATH
+    // Check PATH first — this returns the stable symlink path on package managers
+    // like Homebrew, avoiding breakage when the versioned Cellar path changes on
+    // upgrade (see https://github.com/Ataraxy-Labs/weave/issues/91).
     if let Ok(output) = Command::new("which").arg("weave-driver").output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
                 return Ok(path);
+            }
+        }
+    }
+
+    // Fall back to checking next to current executable (e.g. local cargo build)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("weave-driver");
+            if candidate.exists() {
+                return Ok(candidate.to_string_lossy().to_string());
             }
         }
     }
