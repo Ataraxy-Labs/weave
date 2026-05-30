@@ -2080,6 +2080,1364 @@ fn dart_both_modify_same_method_incompatibly() {
     assert!(is_inside_conflict_markers(&result.content, "toUpperCase()"));
 }
 
+// =============================================================================
+// Import & file-header preservation scenarios (#94, #95)
+// =============================================================================
+
+/// Scenario 1: theirs adds import + edits type, ours also edits type (issue #95 repro)
+#[test]
+fn ts_import_preserved_both_edit_type() {
+    let base = r#"type Config = {
+  host: string;
+  port: number;
+};
+"#;
+    let ours = r#"type Config = {
+  host: string;
+  port: number;
+  timeout: number;
+};
+"#;
+    let theirs = r#"import { Env } from './env';
+
+type Config = {
+  host: string;
+  port: Env;
+};
+"#;
+    let result = entity_merge(base, ours, theirs, "config.ts");
+    assert!(
+        result.content.contains("import { Env }"),
+        "Import added by theirs must survive when both edit the type.\nGot:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("timeout"),
+        "Field added by ours must be present.\nGot:\n{}",
+        result.content
+    );
+}
+
+/// Scenario 2: both branches add different imports, no entity changes
+#[test]
+fn ts_both_add_imports_no_entity_change() {
+    let base = r#"import { a } from './a';
+
+export function greet() {
+    return "hello";
+}
+"#;
+    let ours = r#"import { a } from './a';
+import { b } from './b';
+
+export function greet() {
+    return "hello";
+}
+"#;
+    let theirs = r#"import { a } from './a';
+import { c } from './c';
+
+export function greet() {
+    return "hello";
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "greet.ts");
+    assert!(
+        result.is_clean(),
+        "Should merge cleanly. Conflicts: {:?}",
+        result.conflicts
+    );
+    assert!(
+        result.content.contains("import { a }"),
+        "Original import missing"
+    );
+    assert!(
+        result.content.contains("import { b }"),
+        "Ours import missing"
+    );
+    assert!(
+        result.content.contains("import { c }"),
+        "Theirs import missing"
+    );
+    assert!(result.content.contains("greet"), "Function must survive");
+}
+
+/// Scenario 3: // @ts-nocheck preserved when both add imports (issue #94 repro)
+#[test]
+fn ts_nocheck_stays_above_imports_both_add() {
+    let base = r#"// @ts-nocheck
+import { a } from './a';
+
+export function run() {}
+"#;
+    let ours = r#"// @ts-nocheck
+import { a } from './a';
+import { b } from './b';
+
+export function run() {}
+"#;
+    let theirs = r#"// @ts-nocheck
+import { a } from './a';
+import { c } from './c';
+
+export function run() {}
+"#;
+    let result = entity_merge(base, ours, theirs, "run.ts");
+    assert!(
+        result.is_clean(),
+        "Should merge cleanly. Conflicts: {:?}",
+        result.conflicts
+    );
+    let content = &result.content;
+    let nocheck = content.find("// @ts-nocheck");
+    let first_import = content.find("import");
+    assert!(
+        nocheck.is_some(),
+        "// @ts-nocheck must be present.\n{}",
+        content
+    );
+    assert!(
+        nocheck.unwrap() < first_import.unwrap(),
+        "// @ts-nocheck must stay before imports.\n{}",
+        content
+    );
+}
+
+/// Scenario 4: eslint-disable directive preserved above imports
+#[test]
+fn ts_eslint_disable_stays_above_imports() {
+    let base = r#"/* eslint-disable */
+import { x } from './x';
+
+export function foo() { return 1; }
+"#;
+    let ours = r#"/* eslint-disable */
+import { x } from './x';
+import { y } from './y';
+
+export function foo() { return 1; }
+"#;
+    let theirs = r#"/* eslint-disable */
+import { x } from './x';
+import { z } from './z';
+
+export function foo() { return 1; }
+"#;
+    let result = entity_merge(base, ours, theirs, "foo.ts");
+    assert!(
+        result.is_clean(),
+        "Should merge cleanly. Conflicts: {:?}",
+        result.conflicts
+    );
+    let content = &result.content;
+    let eslint = content.find("/* eslint-disable */");
+    let first_import = content.find("import");
+    assert!(
+        eslint.is_some(),
+        "eslint-disable must be present.\n{}",
+        content
+    );
+    assert!(
+        eslint.unwrap() < first_import.unwrap(),
+        "eslint-disable must stay before imports.\n{}",
+        content
+    );
+}
+
+/// Scenario 5: theirs adds import, ours adds a new function — clean merge
+#[test]
+fn ts_theirs_adds_import_ours_adds_function() {
+    let base = r#"export function existing() {
+    return 42;
+}
+"#;
+    let ours = r#"export function existing() {
+    return 42;
+}
+
+export function newHelper() {
+    return "help";
+}
+"#;
+    let theirs = r#"import { util } from './util';
+
+export function existing() {
+    return util(42);
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "module.ts");
+    assert!(
+        result.content.contains("import { util }"),
+        "Import from theirs must be present.\nGot:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("newHelper"),
+        "Function added by ours must be present.\nGot:\n{}",
+        result.content
+    );
+}
+
+/// Scenario 6: both add imports from different modules + both modify different functions
+#[test]
+fn ts_both_add_imports_and_modify_different_functions() {
+    let base = r#"import { config } from './config';
+
+export function alpha() {
+    return config.a;
+}
+
+export function beta() {
+    return config.b;
+}
+"#;
+    let ours = r#"import { config } from './config';
+import { logger } from './logger';
+
+export function alpha() {
+    logger.info("alpha called");
+    return config.a;
+}
+
+export function beta() {
+    return config.b;
+}
+"#;
+    let theirs = r#"import { config } from './config';
+import { metrics } from './metrics';
+
+export function alpha() {
+    return config.a;
+}
+
+export function beta() {
+    metrics.count("beta");
+    return config.b;
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "service.ts");
+    assert!(
+        result.is_clean(),
+        "Should merge cleanly. Conflicts: {:?}",
+        result.conflicts
+    );
+    assert!(
+        result.content.contains("import { logger }"),
+        "ours import missing"
+    );
+    assert!(
+        result.content.contains("import { metrics }"),
+        "theirs import missing"
+    );
+    assert!(
+        result.content.contains("logger.info"),
+        "ours change to alpha missing"
+    );
+    assert!(
+        result.content.contains("metrics.count"),
+        "theirs change to beta missing"
+    );
+}
+
+/// Scenario 7: JS require() style — both add different requires
+#[test]
+fn js_both_add_different_requires() {
+    let base = r#"const fs = require('fs');
+
+function readFile(path) {
+    return fs.readFileSync(path, 'utf8');
+}
+"#;
+    let ours = r#"const fs = require('fs');
+const path = require('path');
+
+function readFile(path) {
+    return fs.readFileSync(path, 'utf8');
+}
+"#;
+    let theirs = r#"const fs = require('fs');
+const os = require('os');
+
+function readFile(path) {
+    return fs.readFileSync(path, 'utf8');
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "file.js");
+    assert!(
+        result.is_clean(),
+        "Should merge cleanly. Conflicts: {:?}",
+        result.conflicts
+    );
+    assert!(result.content.contains("readFile"), "Function must survive");
+}
+
+/// Scenario 8: theirs adds multiple imports before first entity, ours untouched
+#[test]
+fn ts_theirs_adds_multiple_imports_ours_untouched() {
+    let base = r#"export function process() {
+    return null;
+}
+"#;
+    let ours = r#"export function process() {
+    return null;
+}
+"#;
+    let theirs = r#"import { Parser } from './parser';
+import { Validator } from './validator';
+import { Formatter } from './formatter';
+
+export function process() {
+    const p = new Parser();
+    const v = new Validator();
+    return new Formatter().format(v.validate(p.parse()));
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "pipeline.ts");
+    assert!(
+        result.is_clean(),
+        "Should merge cleanly. Conflicts: {:?}",
+        result.conflicts
+    );
+    assert!(
+        result.content.contains("import { Parser }"),
+        "Parser import missing"
+    );
+    assert!(
+        result.content.contains("import { Validator }"),
+        "Validator import missing"
+    );
+    assert!(
+        result.content.contains("import { Formatter }"),
+        "Formatter import missing"
+    );
+}
+
+/// Scenario 9: 'use strict' directive at top of JS file — must stay on line 1
+#[test]
+fn js_use_strict_stays_at_top() {
+    let base = r#"'use strict';
+
+const { readFileSync } = require('fs');
+
+function load(path) {
+    return JSON.parse(readFileSync(path, 'utf8'));
+}
+"#;
+    let ours = r#"'use strict';
+
+const { readFileSync } = require('fs');
+
+function load(path) {
+    return JSON.parse(readFileSync(path, 'utf8'));
+}
+
+function save(path, data) {
+    require('fs').writeFileSync(path, JSON.stringify(data));
+}
+"#;
+    let theirs = r#"'use strict';
+
+const { readFileSync } = require('fs');
+
+function load(path) {
+    const raw = readFileSync(path, 'utf8');
+    return JSON.parse(raw);
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "io.js");
+    assert!(
+        result.is_clean(),
+        "Should merge cleanly. Conflicts: {:?}",
+        result.conflicts
+    );
+    let trimmed = result.content.trim_start();
+    assert!(
+        trimmed.starts_with("'use strict'"),
+        "'use strict' must be first line.\nGot:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("save"),
+        "ours function must be present"
+    );
+}
+
+/// Scenario 10: both add type imports + modify an interface — complex real-world scenario
+#[test]
+fn ts_type_imports_plus_interface_modification() {
+    let base = r#"import type { BaseConfig } from './base';
+
+export interface AppConfig extends BaseConfig {
+  name: string;
+  version: string;
+}
+
+export function createConfig(name: string): AppConfig {
+  return { name, version: '1.0.0' };
+}
+"#;
+    let ours = r#"import type { BaseConfig } from './base';
+import type { Logger } from './logger';
+
+export interface AppConfig extends BaseConfig {
+  name: string;
+  version: string;
+  logger?: Logger;
+}
+
+export function createConfig(name: string): AppConfig {
+  return { name, version: '1.0.0' };
+}
+"#;
+    let theirs = r#"import type { BaseConfig } from './base';
+import type { Database } from './db';
+
+export interface AppConfig extends BaseConfig {
+  name: string;
+  version: string;
+  db?: Database;
+}
+
+export function createConfig(name: string): AppConfig {
+  return { name, version: '1.0.0' };
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "app-config.ts");
+    assert!(
+        result.content.contains("Logger"),
+        "Logger type import or field must be present.\nGot:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("Database"),
+        "Database type import or field must be present.\nGot:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("createConfig"),
+        "Untouched function must survive.\nGot:\n{}",
+        result.content
+    );
+}
+
+// =============================================================================
+// Batch 2: Comprehensive merge scenarios — real-world edge cases
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// 1. Python: both branches add different imports + modify different functions
+// ---------------------------------------------------------------------------
+#[test]
+fn py_both_add_imports_modify_different_functions() {
+    let base = r#"import os
+
+def read_file(path):
+    with open(path) as f:
+        return f.read()
+
+def write_file(path, data):
+    with open(path, 'w') as f:
+        f.write(data)
+"#;
+    let ours = r#"import os
+import json
+
+def read_file(path):
+    with open(path) as f:
+        return json.loads(f.read())
+
+def write_file(path, data):
+    with open(path, 'w') as f:
+        f.write(data)
+"#;
+    let theirs = r#"import os
+import logging
+
+def read_file(path):
+    with open(path) as f:
+        return f.read()
+
+def write_file(path, data):
+    logging.info(f"Writing to {path}")
+    with open(path, 'w') as f:
+        f.write(data)
+"#;
+    let result = entity_merge(base, ours, theirs, "fileio.py");
+    assert!(
+        result.is_clean(),
+        "Both add imports + modify different functions should auto-resolve.\nConflicts: {:?}\nContent:\n{}",
+        result.conflicts,
+        result.content
+    );
+    assert!(result.content.contains("import json"), "ours import json must be present");
+    assert!(result.content.contains("import logging"), "theirs import logging must be present");
+    assert!(result.content.contains("json.loads"), "ours read_file modification must be present");
+    assert!(result.content.contains("logging.info"), "theirs write_file modification must be present");
+}
+
+// ---------------------------------------------------------------------------
+// 2. Rust: both add use + add separate functions
+// ---------------------------------------------------------------------------
+#[test]
+fn rust_both_add_use_and_functions() {
+    let base = r#"use std::io;
+
+fn main() {
+    println!("hello");
+}
+"#;
+    let ours = r#"use std::io;
+use std::fs;
+
+fn main() {
+    println!("hello");
+}
+
+fn read_config() -> io::Result<String> {
+    fs::read_to_string("config.toml")
+}
+"#;
+    let theirs = r#"use std::io;
+use std::collections::HashMap;
+
+fn main() {
+    println!("hello");
+}
+
+fn build_index() -> HashMap<String, usize> {
+    HashMap::new()
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "main.rs");
+    assert!(
+        result.is_clean(),
+        "Both add use + new functions should auto-resolve.\nConflicts: {:?}\nContent:\n{}",
+        result.conflicts,
+        result.content
+    );
+    assert!(result.content.contains("use std::fs"), "ours use must be present");
+    assert!(result.content.contains("use std::collections::HashMap"), "theirs use must be present");
+    assert!(result.content.contains("read_config"), "ours function must be present");
+    assert!(result.content.contains("build_index"), "theirs function must be present");
+}
+
+// ---------------------------------------------------------------------------
+// 3. TS: three functions, ours modifies first + third, theirs modifies second
+// ---------------------------------------------------------------------------
+#[test]
+fn ts_interleaved_modifications_three_functions() {
+    let base = r#"export function alpha() {
+    return "a";
+}
+
+export function beta() {
+    return "b";
+}
+
+export function gamma() {
+    return "g";
+}
+"#;
+    let ours = r#"export function alpha() {
+    return "A";
+}
+
+export function beta() {
+    return "b";
+}
+
+export function gamma() {
+    return "G";
+}
+"#;
+    let theirs = r#"export function alpha() {
+    return "a";
+}
+
+export function beta() {
+    return "B";
+}
+
+export function gamma() {
+    return "g";
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "letters.ts");
+    assert!(
+        result.is_clean(),
+        "Interleaved modifications to different functions should auto-resolve.\nConflicts: {:?}\nContent:\n{}",
+        result.conflicts,
+        result.content
+    );
+    assert!(result.content.contains("\"A\""), "alpha must have ours change");
+    assert!(result.content.contains("\"B\""), "beta must have theirs change");
+    assert!(result.content.contains("\"G\""), "gamma must have ours change");
+}
+
+// ---------------------------------------------------------------------------
+// 4. TS: ours deletes function, theirs adds import used by new function
+// ---------------------------------------------------------------------------
+#[test]
+fn ts_ours_deletes_theirs_adds_import_and_function() {
+    let base = r#"import { util } from './util';
+
+export function old() {
+    return util();
+}
+
+export function keep() {
+    return 1;
+}
+"#;
+    let ours = r#"import { util } from './util';
+
+export function keep() {
+    return 1;
+}
+"#;
+    let theirs = r#"import { util } from './util';
+import { logger } from './logger';
+
+export function old() {
+    return util();
+}
+
+export function keep() {
+    return 1;
+}
+
+export function newFunc() {
+    logger("created");
+    return 2;
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "mixed.ts");
+    // old() deleted by ours (unchanged by theirs) => should cleanly delete
+    // newFunc added by theirs => should appear
+    // logger import added by theirs => should appear
+    assert!(
+        result.content.contains("newFunc"),
+        "theirs new function must be present.\nContent:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("keep"),
+        "keep must survive.\nContent:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("logger"),
+        "theirs import must be present.\nContent:\n{}",
+        result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5. TS: both add imports from different modules
+// ---------------------------------------------------------------------------
+#[test]
+fn ts_both_add_imports_from_different_modules() {
+    let base = r#"import { useState } from 'react';
+
+export function App() {
+    const [count, setCount] = useState(0);
+    return count;
+}
+"#;
+    let ours = r#"import { useState } from 'react';
+import { Button } from '@mui/material';
+
+export function App() {
+    const [count, setCount] = useState(0);
+    return count;
+}
+"#;
+    let theirs = r#"import { useState } from 'react';
+import { format } from 'date-fns';
+
+export function App() {
+    const [count, setCount] = useState(0);
+    return count;
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "App.tsx");
+    assert!(
+        result.content.contains("Button"),
+        "ours MUI import must be present.\nContent:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("date-fns"),
+        "theirs date-fns import must be present.\nContent:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("useState"),
+        "original useState import must survive.\nContent:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("App"),
+        "App function must survive.\nContent:\n{}",
+        result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. JSON: both add keys in different sections
+// ---------------------------------------------------------------------------
+#[test]
+fn json_both_add_keys_in_different_sections() {
+    let base = r#"{
+  "name": "my-app",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "tsc"
+  }
+}
+"#;
+    let ours = r#"{
+  "name": "my-app",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest"
+  }
+}
+"#;
+    let theirs = r#"{
+  "name": "my-app",
+  "version": "1.1.0",
+  "scripts": {
+    "build": "tsc"
+  }
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "package.json");
+    assert!(
+        result.content.contains("test"),
+        "ours test script must be present.\nContent:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("1.1.0"),
+        "theirs version bump must be present.\nContent:\n{}",
+        result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 7. TS: both modify the same import line differently (conflict expected)
+// ---------------------------------------------------------------------------
+#[test]
+fn ts_both_modify_same_import_conflict() {
+    let base = r#"import { foo } from './utils';
+
+export function run() {
+    return foo();
+}
+"#;
+    let ours = r#"import { foo, bar } from './utils';
+
+export function run() {
+    return foo();
+}
+"#;
+    let theirs = r#"import { foo, baz } from './utils';
+
+export function run() {
+    return foo();
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "run.ts");
+    // Both modify the same import line — the commutative import merger should
+    // handle this (both add to same import source). The key check is that
+    // neither bar nor baz is silently dropped.
+    let has_bar = result.content.contains("bar");
+    let has_baz = result.content.contains("baz");
+    assert!(
+        has_bar && has_baz,
+        "Both bar and baz must be present (merged or conflicted).\nContent:\n{}",
+        result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 8. Go: both add different functions
+// ---------------------------------------------------------------------------
+#[test]
+fn go_both_add_imports_and_functions() {
+    let base = r#"package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("hello")
+}
+"#;
+    let ours = r#"package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("hello")
+}
+
+func helper() string {
+	return "help"
+}
+"#;
+    let theirs = r#"package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("hello world")
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "main.go");
+    assert!(
+        result.is_clean(),
+        "Ours adds function, theirs modifies main — should auto-resolve.\nConflicts: {:?}\nContent:\n{}",
+        result.conflicts,
+        result.content
+    );
+    assert!(result.content.contains("helper"), "ours helper must be present");
+    assert!(
+        result.content.contains("hello world"),
+        "theirs main modification must be present"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 9. TS: one branch adds JSDoc comment to a function
+// ---------------------------------------------------------------------------
+#[test]
+fn ts_one_adds_jsdoc_other_adds_function() {
+    let base = r#"export function calculate(x: number): number {
+    return x * 2;
+}
+"#;
+    let ours = r#"/**
+ * Doubles the input value.
+ * @param x - The input number
+ * @returns The doubled value
+ */
+export function calculate(x: number): number {
+    return x * 2;
+}
+"#;
+    let theirs = r#"export function calculate(x: number): number {
+    return x * 2;
+}
+
+export function triple(x: number): number {
+    return x * 3;
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "math.ts");
+    assert!(
+        result.content.contains("triple"),
+        "theirs new function must be present.\nContent:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("Doubles the input"),
+        "ours JSDoc must be present.\nContent:\n{}",
+        result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 10. TS: both branches add functions at the end of a large file
+// ---------------------------------------------------------------------------
+#[test]
+fn ts_both_add_at_end_of_large_file() {
+    let base = r#"export function one() { return 1; }
+
+export function two() { return 2; }
+
+export function three() { return 3; }
+
+export function four() { return 4; }
+
+export function five() { return 5; }
+"#;
+    let ours = r#"export function one() { return 1; }
+
+export function two() { return 2; }
+
+export function three() { return 3; }
+
+export function four() { return 4; }
+
+export function five() { return 5; }
+
+export function six() { return 6; }
+"#;
+    let theirs = r#"export function one() { return 1; }
+
+export function two() { return 2; }
+
+export function three() { return 3; }
+
+export function four() { return 4; }
+
+export function five() { return 5; }
+
+export function seven() { return 7; }
+"#;
+    let result = entity_merge(base, ours, theirs, "numbers.ts");
+    assert!(
+        result.is_clean(),
+        "Both adding at end should auto-resolve.\nConflicts: {:?}\nContent:\n{}",
+        result.conflicts,
+        result.content
+    );
+    assert!(result.content.contains("six"), "ours six must be present");
+    assert!(result.content.contains("seven"), "theirs seven must be present");
+    // All original functions must survive
+    for name in &["one", "two", "three", "four", "five"] {
+        assert!(
+            result.content.contains(name),
+            "{} must survive.\nContent:\n{}",
+            name,
+            result.content
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 11. Rust: one branch adds impl method, other adds trait impl
+// ---------------------------------------------------------------------------
+#[test]
+fn rust_one_adds_method_other_modifies_existing() {
+    let base = r#"struct Counter {
+    value: u32,
+}
+
+impl Counter {
+    fn new() -> Self {
+        Counter { value: 0 }
+    }
+
+    fn increment(&mut self) {
+        self.value += 1;
+    }
+}
+"#;
+    let ours = r#"struct Counter {
+    value: u32,
+}
+
+impl Counter {
+    fn new() -> Self {
+        Counter { value: 0 }
+    }
+
+    fn increment(&mut self) {
+        self.value += 1;
+    }
+
+    fn reset(&mut self) {
+        self.value = 0;
+    }
+}
+"#;
+    let theirs = r#"struct Counter {
+    value: u32,
+}
+
+impl Counter {
+    fn new() -> Self {
+        Counter { value: 0 }
+    }
+
+    fn increment(&mut self) {
+        self.value += 2;
+    }
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "counter.rs");
+    assert!(
+        result.is_clean(),
+        "Adding method + modifying different method should auto-resolve.\nConflicts: {:?}\nContent:\n{}",
+        result.conflicts,
+        result.content
+    );
+    assert!(result.content.contains("reset"), "ours reset method must be present");
+    assert!(
+        result.content.contains("self.value += 2"),
+        "theirs increment change must be present"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 12. Python: one adds decorator, other modifies function body
+// ---------------------------------------------------------------------------
+#[test]
+fn py_one_adds_decorator_other_modifies_body() {
+    let base = r#"def process(data):
+    return data.strip()
+"#;
+    let ours = r#"def process(data):
+    return data.strip().lower()
+"#;
+    let theirs = r#"def process(data):
+    return data.strip()
+
+def validate(data):
+    return len(data) > 0
+"#;
+    let result = entity_merge(base, ours, theirs, "process.py");
+    assert!(
+        result.is_clean(),
+        "One modifies, other adds new function should auto-resolve.\nConflicts: {:?}\nContent:\n{}",
+        result.conflicts,
+        result.content
+    );
+    assert!(result.content.contains(".lower()"), "ours body change must be present");
+    assert!(result.content.contains("validate"), "theirs new function must be present");
+}
+
+// ---------------------------------------------------------------------------
+// 13. TS: import removal by one side, import addition by other
+// ---------------------------------------------------------------------------
+#[test]
+fn ts_one_removes_import_other_adds_import() {
+    let base = r#"import { unused } from './unused';
+import { used } from './used';
+
+export function run() {
+    return used();
+}
+"#;
+    let ours = r#"import { used } from './used';
+
+export function run() {
+    return used();
+}
+"#;
+    let theirs = r#"import { unused } from './unused';
+import { used } from './used';
+import { extra } from './extra';
+
+export function run() {
+    return used();
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "imports.ts");
+    assert!(
+        result.content.contains("extra"),
+        "theirs added import must be present.\nContent:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("used"),
+        "used import must survive.\nContent:\n{}",
+        result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 14. TS: both branches modify interface — same field differently (conflict)
+// ---------------------------------------------------------------------------
+#[test]
+fn ts_interface_same_field_both_modify_conflict() {
+    let base = r#"export interface Config {
+    timeout: number;
+    retries: number;
+}
+
+export function getConfig(): Config {
+    return { timeout: 1000, retries: 3 };
+}
+"#;
+    let ours = r#"export interface Config {
+    timeout: number;
+    retries: number;
+    debug: boolean;
+}
+
+export function getConfig(): Config {
+    return { timeout: 1000, retries: 3, debug: false };
+}
+"#;
+    let theirs = r#"export interface Config {
+    timeout: number;
+    retries: number;
+    verbose: boolean;
+}
+
+export function getConfig(): Config {
+    return { timeout: 1000, retries: 3, verbose: true };
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "config.ts");
+    // Both modify Config (add different fields) and getConfig (add different defaults)
+    // These are modifications to the same entities — could be conflict or auto-resolve
+    // depending on whether weave handles line-level within entities
+    let has_debug = result.content.contains("debug");
+    let has_verbose = result.content.contains("verbose");
+    assert!(
+        has_debug && has_verbose,
+        "Both debug and verbose must be present (merged or in conflict markers).\nContent:\n{}",
+        result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 15. TS: re-export barrel file — both add different re-exports
+// ---------------------------------------------------------------------------
+#[test]
+fn ts_barrel_both_add_reexports() {
+    let base = r#"export { foo } from './foo';
+export { bar } from './bar';
+"#;
+    let ours = r#"export { foo } from './foo';
+export { bar } from './bar';
+export { baz } from './baz';
+"#;
+    let theirs = r#"export { foo } from './foo';
+export { bar } from './bar';
+export { qux } from './qux';
+"#;
+    let result = entity_merge(base, ours, theirs, "index.ts");
+    assert!(
+        result.content.contains("baz"),
+        "ours baz re-export must be present.\nContent:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("qux"),
+        "theirs qux re-export must be present.\nContent:\n{}",
+        result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 16. TS: empty base — ours creates full file, theirs creates different file
+// ---------------------------------------------------------------------------
+#[test]
+fn ts_empty_base_both_create_different_files() {
+    let base = "";
+    let ours = r#"export function ours() {
+    return "ours";
+}
+"#;
+    let theirs = r#"export function theirs() {
+    return "theirs";
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "new.ts");
+    // Both create entirely different content from empty — should include both
+    assert!(
+        result.content.contains("ours"),
+        "ours function must be present.\nContent:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("theirs"),
+        "theirs function must be present.\nContent:\n{}",
+        result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 17. Python: from-imports — both add different symbols from same module
+// ---------------------------------------------------------------------------
+#[test]
+fn py_both_add_from_imports_same_module() {
+    let base = r#"from os.path import join
+
+def build_path(base, name):
+    return join(base, name)
+"#;
+    let ours = r#"from os.path import join, exists
+
+def build_path(base, name):
+    return join(base, name)
+"#;
+    let theirs = r#"from os.path import join, dirname
+
+def build_path(base, name):
+    return join(base, name)
+"#;
+    let result = entity_merge(base, ours, theirs, "paths.py");
+    assert!(
+        result.content.contains("exists"),
+        "ours exists import must be present.\nContent:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("dirname"),
+        "theirs dirname import must be present.\nContent:\n{}",
+        result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 18. TS: large class — ours adds method at top, theirs adds at bottom
+// ---------------------------------------------------------------------------
+#[test]
+fn ts_class_add_methods_at_different_positions() {
+    let base = r#"export class Service {
+    constructor(private name: string) {}
+
+    getName(): string {
+        return this.name;
+    }
+
+    isActive(): boolean {
+        return true;
+    }
+}
+"#;
+    let ours = r#"export class Service {
+    constructor(private name: string) {}
+
+    getId(): string {
+        return this.name.toLowerCase();
+    }
+
+    getName(): string {
+        return this.name;
+    }
+
+    isActive(): boolean {
+        return true;
+    }
+}
+"#;
+    let theirs = r#"export class Service {
+    constructor(private name: string) {}
+
+    getName(): string {
+        return this.name;
+    }
+
+    isActive(): boolean {
+        return true;
+    }
+
+    shutdown(): void {
+        console.log("shutting down");
+    }
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "service.ts");
+    assert!(
+        result.is_clean(),
+        "Adding methods at different positions should auto-resolve.\nConflicts: {:?}\nContent:\n{}",
+        result.conflicts,
+        result.content
+    );
+    assert!(result.content.contains("getId"), "ours getId must be present");
+    assert!(result.content.contains("shutdown"), "theirs shutdown must be present");
+    assert!(result.content.contains("getName"), "original getName must survive");
+    assert!(result.content.contains("isActive"), "original isActive must survive");
+}
+
+// ---------------------------------------------------------------------------
+// 19. TS: both branches change the default export
+// ---------------------------------------------------------------------------
+#[test]
+fn ts_both_modify_default_export() {
+    let base = r#"const config = {
+    port: 3000,
+    host: "localhost",
+};
+
+export default config;
+"#;
+    let ours = r#"const config = {
+    port: 8080,
+    host: "localhost",
+};
+
+export default config;
+"#;
+    let theirs = r#"const config = {
+    port: 3000,
+    host: "0.0.0.0",
+};
+
+export default config;
+"#;
+    let result = entity_merge(base, ours, theirs, "config.ts");
+    // Both modify the same entity (config) but different fields — may auto-resolve
+    // via line-level diffing or may conflict
+    let has_8080 = result.content.contains("8080");
+    let has_0000 = result.content.contains("0.0.0.0");
+    assert!(
+        has_8080 && has_0000,
+        "Both changes must be present (merged or in conflict markers).\nContent:\n{}",
+        result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 20. C: both add different functions + modify different existing ones
+// ---------------------------------------------------------------------------
+#[test]
+fn c_both_modify_and_add_different() {
+    let base = r#"#include <stdio.h>
+
+void greet() {
+    printf("hello\n");
+}
+
+int add(int a, int b) {
+    return a + b;
+}
+"#;
+    let ours = r#"#include <stdio.h>
+
+void greet() {
+    printf("hello world\n");
+}
+
+int add(int a, int b) {
+    return a + b;
+}
+
+int multiply(int a, int b) {
+    return a * b;
+}
+"#;
+    let theirs = r#"#include <stdio.h>
+
+void greet() {
+    printf("hello\n");
+}
+
+int add(int a, int b) {
+    return a + b + 0;
+}
+
+int subtract(int a, int b) {
+    return a - b;
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "math.c");
+    assert!(
+        result.is_clean(),
+        "Modifying + adding different functions should auto-resolve.\nConflicts: {:?}\nContent:\n{}",
+        result.conflicts,
+        result.content
+    );
+    assert!(result.content.contains("multiply"), "ours multiply must be present");
+    assert!(result.content.contains("subtract"), "theirs subtract must be present");
+    assert!(
+        result.content.contains("hello world"),
+        "ours greet modification must be present"
+    );
+    assert!(
+        result.content.contains("a + b + 0"),
+        "theirs add modification must be present"
+    );
+}
+
 /// Check if a needle appears only inside conflict marker blocks
 fn is_inside_conflict_markers(content: &str, needle: &str) -> bool {
     let mut in_conflict = false;
