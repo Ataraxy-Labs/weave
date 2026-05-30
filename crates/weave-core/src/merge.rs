@@ -1821,30 +1821,74 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
         import_lines.extend(group);
     }
 
-    let mut result = import_lines.join("\n");
+    let import_block = import_lines.join("\n");
 
-    // Non-import lines: use diffy 3-way merge so adds/deletes/edits on
-    // either side are handled correctly (fixes #60).
-    let extract_non_imports = |content: &str| -> String {
-        content
-            .lines()
-            .filter(|l| !l.trim().is_empty() && !is_import_line(l))
-            .collect::<Vec<_>>()
-            .join("\n")
+    // Split non-import lines into prefix (before first import) and suffix
+    // (after last import) to preserve file-leading directives like
+    // `// @ts-nocheck`, shebangs, or license headers (fixes #94).
+    let extract_prefix_suffix = |content: &str| -> (String, String) {
+        let mut prefix = Vec::new();
+        let mut suffix = Vec::new();
+        let mut seen_import = false;
+        let mut last_import_idx = 0;
+        let all_lines: Vec<&str> = content.lines().collect();
+
+        for (idx, line) in all_lines.iter().enumerate() {
+            if is_import_line(line) {
+                seen_import = true;
+                last_import_idx = idx;
+            }
+        }
+
+        for (idx, line) in all_lines.iter().enumerate() {
+            if is_import_line(line) || line.trim().is_empty() {
+                continue;
+            }
+            if !seen_import
+                || idx
+                    < all_lines
+                        .iter()
+                        .position(|l| is_import_line(l))
+                        .unwrap_or(0)
+            {
+                prefix.push(*line);
+            } else if idx > last_import_idx {
+                suffix.push(*line);
+            }
+        }
+
+        (prefix.join("\n"), suffix.join("\n"))
     };
-    let base_ni = extract_non_imports(base);
-    let ours_ni = extract_non_imports(ours);
-    let theirs_ni = extract_non_imports(theirs);
 
-    if !base_ni.is_empty() || !ours_ni.is_empty() || !theirs_ni.is_empty() {
-        let merged_ni = match diffy::merge(&base_ni, &ours_ni, &theirs_ni) {
+    let (base_prefix, base_suffix) = extract_prefix_suffix(base);
+    let (ours_prefix, ours_suffix) = extract_prefix_suffix(ours);
+    let (theirs_prefix, theirs_suffix) = extract_prefix_suffix(theirs);
+
+    // Merge prefix lines (directives before imports)
+    let mut result = String::new();
+    if !base_prefix.is_empty() || !ours_prefix.is_empty() || !theirs_prefix.is_empty() {
+        let merged_prefix = match diffy::merge(&base_prefix, &ours_prefix, &theirs_prefix) {
             Ok(m) => m,
             Err(conflicted) => conflicted,
         };
-        if !merged_ni.trim().is_empty() {
+        if !merged_prefix.trim().is_empty() {
+            result.push_str(&merged_prefix);
+            result.push('\n');
+        }
+    }
+
+    result.push_str(&import_block);
+
+    // Merge suffix lines (non-import lines after imports)
+    if !base_suffix.is_empty() || !ours_suffix.is_empty() || !theirs_suffix.is_empty() {
+        let merged_suffix = match diffy::merge(&base_suffix, &ours_suffix, &theirs_suffix) {
+            Ok(m) => m,
+            Err(conflicted) => conflicted,
+        };
+        if !merged_suffix.trim().is_empty() {
             result.push('\n');
             result.push('\n');
-            result.push_str(&merged_ni);
+            result.push_str(&merged_suffix);
         }
     }
     let ours_trailing = ours.len() - ours.trim_end_matches('\n').len();
@@ -4056,6 +4100,73 @@ export function agentB() {
         let result = merge_imports_commutatively(base, ours, theirs);
         let count = result.matches("import b from 'b';").count();
         assert_eq!(count, 1, "Duplicate import should be deduplicated");
+    }
+
+    #[test]
+    fn test_commutative_import_merge_preserves_file_directive() {
+        // Issue #94: // @ts-nocheck on line 1 must stay above imports
+        let base = "// @ts-nocheck\nimport { a } from \"./a\";\n";
+        let ours = "// @ts-nocheck\nimport { a } from \"./a\";\nimport { b } from \"./b\";\n";
+        let theirs = "// @ts-nocheck\nimport { a } from \"./a\";\nimport { c } from \"./c\";\n";
+        let result = merge_imports_commutatively(base, ours, theirs);
+        assert!(
+            result.contains("// @ts-nocheck"),
+            "Directive should be preserved. Got: {:?}",
+            result
+        );
+        let nocheck_pos = result.find("// @ts-nocheck").unwrap();
+        let first_import_pos = result.find("import").unwrap();
+        assert!(
+            nocheck_pos < first_import_pos,
+            "// @ts-nocheck must stay before imports. Got: {:?}",
+            result
+        );
+        assert!(result.contains("import { b }"), "ours import missing");
+        assert!(result.contains("import { c }"), "theirs import missing");
+    }
+
+    #[test]
+    fn test_commutative_import_merge_preserves_shebang() {
+        // Shebang must stay on line 1
+        let base = "#!/usr/bin/env node\nimport { a } from \"./a\";\n";
+        let ours = "#!/usr/bin/env node\nimport { a } from \"./a\";\nimport { b } from \"./b\";\n";
+        let theirs =
+            "#!/usr/bin/env node\nimport { a } from \"./a\";\nimport { c } from \"./c\";\n";
+        let result = merge_imports_commutatively(base, ours, theirs);
+        assert!(
+            result.starts_with("#!/usr/bin/env node\n"),
+            "Shebang must be first line. Got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_entity_merge_ts_nocheck_stays_above_imports() {
+        // Issue #94 end-to-end: both branches add a different import,
+        // // @ts-nocheck must stay on line 1.
+        let base = "// @ts-nocheck\nimport { a } from \"./a\";\n\nexport function f() {}\n";
+        let ours =
+            "// @ts-nocheck\nimport { a } from \"./a\";\nimport { b } from \"./b\";\n\nexport function f() {}\n";
+        let theirs =
+            "// @ts-nocheck\nimport { a } from \"./a\";\nimport { c } from \"./c\";\n\nexport function f() {}\n";
+        let result = entity_merge(base, ours, theirs, "src/example.ts");
+        assert!(
+            result.is_clean(),
+            "Should merge cleanly. Conflicts: {:?}",
+            result.conflicts,
+        );
+        let nocheck_pos = result.content.find("// @ts-nocheck");
+        let first_import_pos = result.content.find("import");
+        assert!(
+            nocheck_pos.is_some(),
+            "// @ts-nocheck must be present. Got:\n{}",
+            result.content
+        );
+        assert!(
+            nocheck_pos.unwrap() < first_import_pos.unwrap(),
+            "// @ts-nocheck must be before imports. Got:\n{}",
+            result.content
+        );
     }
 
     #[test]
