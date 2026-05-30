@@ -4170,6 +4170,41 @@ export function agentB() {
     }
 
     #[test]
+    fn test_import_preserved_when_both_edit_declaration() {
+        // Issue #95: theirs adds an import AND modifies a type, ours also
+        // modifies the type. The import must not be dropped.
+        let base = "type T = {\n  a: string;\n  b: string;\n};\n";
+        let ours = "type T = {\n  a: string;\n  b: string;\n  c: string;\n};\n";
+        let theirs = "import { G } from './g';\n\ntype T = {\n  a: G;\n  b: string;\n};\n";
+        let result = entity_merge(base, ours, theirs, "test.ts");
+        assert!(
+            result.content.contains("import { G }"),
+            "Import from theirs must be preserved. Got:\n{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("c: string"),
+            "Field added by ours must be present. Got:\n{}",
+            result.content
+        );
+    }
+
+    #[test]
+    fn test_import_preserved_one_sided_entity_change() {
+        // One-sided import + entity change should work (fast path).
+        // This already works but guard against regressions.
+        let base = "type T = {\n  a: string;\n};\n";
+        let ours = base;
+        let theirs = "import { G } from './g';\n\ntype T = {\n  a: G;\n};\n";
+        let result = entity_merge(base, ours, theirs, "test.ts");
+        assert!(
+            result.content.contains("import { G }"),
+            "Import must be preserved in one-sided case. Got:\n{}",
+            result.content
+        );
+    }
+
+    #[test]
     fn test_inner_entity_merge_different_methods() {
         // Two agents modify different methods in the same class
         // This would normally conflict with diffy because the changes are adjacent
