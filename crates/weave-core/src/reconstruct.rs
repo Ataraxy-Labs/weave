@@ -43,6 +43,30 @@ pub fn reconstruct(
             .push(entity);
     }
 
+    // Collect interstitial keys present in ours_regions so we can detect
+    // merged interstitials that exist only in theirs (fixes #95).
+    let ours_interstitial_keys: std::collections::HashSet<String> = ours_regions
+        .iter()
+        .filter_map(|r| match r {
+            FileRegion::Interstitial(i) => Some(i.position_key.clone()),
+            _ => None,
+        })
+        .collect();
+
+    // Emit merged interstitials that have no corresponding slot in ours.
+    // The most common case is "file_header": theirs added content (e.g. an
+    // import) before the first entity, but ours starts directly with an entity.
+    if !ours_interstitial_keys.contains("file_header") {
+        if let Some(header) = merged_interstitials.get("file_header") {
+            if !header.trim().is_empty() {
+                output.push_str(header);
+                if !header.ends_with('\n') {
+                    output.push('\n');
+                }
+            }
+        }
+    }
+
     // Walk ours regions as skeleton
     for region in ours_regions {
         match region {
