@@ -2569,10 +2569,22 @@ def write_file(path, data):
         result.conflicts,
         result.content
     );
-    assert!(result.content.contains("import json"), "ours import json must be present");
-    assert!(result.content.contains("import logging"), "theirs import logging must be present");
-    assert!(result.content.contains("json.loads"), "ours read_file modification must be present");
-    assert!(result.content.contains("logging.info"), "theirs write_file modification must be present");
+    assert!(
+        result.content.contains("import json"),
+        "ours import json must be present"
+    );
+    assert!(
+        result.content.contains("import logging"),
+        "theirs import logging must be present"
+    );
+    assert!(
+        result.content.contains("json.loads"),
+        "ours read_file modification must be present"
+    );
+    assert!(
+        result.content.contains("logging.info"),
+        "theirs write_file modification must be present"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2615,10 +2627,22 @@ fn build_index() -> HashMap<String, usize> {
         result.conflicts,
         result.content
     );
-    assert!(result.content.contains("use std::fs"), "ours use must be present");
-    assert!(result.content.contains("use std::collections::HashMap"), "theirs use must be present");
-    assert!(result.content.contains("read_config"), "ours function must be present");
-    assert!(result.content.contains("build_index"), "theirs function must be present");
+    assert!(
+        result.content.contains("use std::fs"),
+        "ours use must be present"
+    );
+    assert!(
+        result.content.contains("use std::collections::HashMap"),
+        "theirs use must be present"
+    );
+    assert!(
+        result.content.contains("read_config"),
+        "ours function must be present"
+    );
+    assert!(
+        result.content.contains("build_index"),
+        "theirs function must be present"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2669,9 +2693,18 @@ export function gamma() {
         result.conflicts,
         result.content
     );
-    assert!(result.content.contains("\"A\""), "alpha must have ours change");
-    assert!(result.content.contains("\"B\""), "beta must have theirs change");
-    assert!(result.content.contains("\"G\""), "gamma must have ours change");
+    assert!(
+        result.content.contains("\"A\""),
+        "alpha must have ours change"
+    );
+    assert!(
+        result.content.contains("\"B\""),
+        "beta must have theirs change"
+    );
+    assert!(
+        result.content.contains("\"G\""),
+        "gamma must have ours change"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2902,7 +2935,10 @@ func main() {
         result.conflicts,
         result.content
     );
-    assert!(result.content.contains("helper"), "ours helper must be present");
+    assert!(
+        result.content.contains("helper"),
+        "ours helper must be present"
+    );
     assert!(
         result.content.contains("hello world"),
         "theirs main modification must be present"
@@ -2995,7 +3031,10 @@ export function seven() { return 7; }
         result.content
     );
     assert!(result.content.contains("six"), "ours six must be present");
-    assert!(result.content.contains("seven"), "theirs seven must be present");
+    assert!(
+        result.content.contains("seven"),
+        "theirs seven must be present"
+    );
     // All original functions must survive
     for name in &["one", "two", "three", "four", "five"] {
         assert!(
@@ -3065,7 +3104,10 @@ impl Counter {
         result.conflicts,
         result.content
     );
-    assert!(result.content.contains("reset"), "ours reset method must be present");
+    assert!(
+        result.content.contains("reset"),
+        "ours reset method must be present"
+    );
     assert!(
         result.content.contains("self.value += 2"),
         "theirs increment change must be present"
@@ -3096,8 +3138,14 @@ def validate(data):
         result.conflicts,
         result.content
     );
-    assert!(result.content.contains(".lower()"), "ours body change must be present");
-    assert!(result.content.contains("validate"), "theirs new function must be present");
+    assert!(
+        result.content.contains(".lower()"),
+        "ours body change must be present"
+    );
+    assert!(
+        result.content.contains("validate"),
+        "theirs new function must be present"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3332,10 +3380,22 @@ fn ts_class_add_methods_at_different_positions() {
         result.conflicts,
         result.content
     );
-    assert!(result.content.contains("getId"), "ours getId must be present");
-    assert!(result.content.contains("shutdown"), "theirs shutdown must be present");
-    assert!(result.content.contains("getName"), "original getName must survive");
-    assert!(result.content.contains("isActive"), "original isActive must survive");
+    assert!(
+        result.content.contains("getId"),
+        "ours getId must be present"
+    );
+    assert!(
+        result.content.contains("shutdown"),
+        "theirs shutdown must be present"
+    );
+    assert!(
+        result.content.contains("getName"),
+        "original getName must survive"
+    );
+    assert!(
+        result.content.contains("isActive"),
+        "original isActive must survive"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3426,8 +3486,14 @@ int subtract(int a, int b) {
         result.conflicts,
         result.content
     );
-    assert!(result.content.contains("multiply"), "ours multiply must be present");
-    assert!(result.content.contains("subtract"), "theirs subtract must be present");
+    assert!(
+        result.content.contains("multiply"),
+        "ours multiply must be present"
+    );
+    assert!(
+        result.content.contains("subtract"),
+        "theirs subtract must be present"
+    );
     assert!(
         result.content.contains("hello world"),
         "ours greet modification must be present"
