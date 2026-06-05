@@ -1909,22 +1909,24 @@ fn merge_imports_with_multiline(
     ours_imports: &[ImportStatement],
     theirs_imports: &[ImportStatement],
 ) -> String {
-    // Build source → specifier sets for base and theirs
-    let base_specs: HashMap<&str, HashSet<&str>> = base_imports
-        .iter()
-        .map(|imp| {
-            let specs: HashSet<&str> = imp.specifiers.iter().map(|s| s.as_str()).collect();
-            (imp.source.as_str(), specs)
-        })
-        .collect();
+    // Build source → specifier sets for base and theirs.
+    // Use entry API to merge specifiers when multiple imports share the same source
+    // (e.g. `import type { Foo } from "./foo"` AND `import { type a } from "./foo"`).
+    let mut base_specs: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for imp in base_imports {
+        let entry = base_specs.entry(imp.source.as_str()).or_default();
+        for s in &imp.specifiers {
+            entry.insert(s.as_str());
+        }
+    }
 
-    let theirs_specs: HashMap<&str, HashSet<&str>> = theirs_imports
-        .iter()
-        .map(|imp| {
-            let specs: HashSet<&str> = imp.specifiers.iter().map(|s| s.as_str()).collect();
-            (imp.source.as_str(), specs)
-        })
-        .collect();
+    let mut theirs_specs: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for imp in theirs_imports {
+        let entry = theirs_specs.entry(imp.source.as_str()).or_default();
+        for s in &imp.specifiers {
+            entry.insert(s.as_str());
+        }
+    }
 
     // Single-line import tracking: base lines and theirs-deleted
     let base_single: HashSet<String> = base_imports
@@ -2140,8 +2142,22 @@ fn merge_imports_with_multiline(
             .filter(|l| !l.trim().is_empty() && !is_import_line(l))
             .filter(|l| {
                 let t = l.trim();
-                // Exclude multi-line import continuation lines (specifiers, closing parens/braces)
-                !(t.ends_with(',') && !t.contains('=')) && t != ")" && t != "}"
+                // Exclude multi-line import continuation lines:
+                // - specifier lines ending with comma (but not assignments)
+                // - bare closing parens/braces
+                // - closing lines like `} from "./foo"` or `) from "bar"`
+                if (t.ends_with(',') && !t.contains('=')) || t == ")" || t == "}" {
+                    return false;
+                }
+                // Closing line of JS/TS multi-line import: `} from "..."` or `} from '...'`
+                if t.starts_with('}') && t.contains("from ") {
+                    return false;
+                }
+                // Closing line of Python multi-line import: `) ` at end or just `)`
+                if t.starts_with(')') {
+                    return false;
+                }
+                true
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -5570,6 +5586,99 @@ export function bar() {
         assert!(
             result.content.contains("} from \"./foo\""),
             "closing must be present"
+        );
+    }
+
+    #[test]
+    fn test_ts_multiline_import_multiple_sources_no_closing_leak() {
+        // Issue #24 latest repro: multiple multi-line imports from different sources.
+        // The `} from "..."` closing lines were leaking into the non-import diffy merge,
+        // producing orphaned `} from` lines without their `import {` opening lines.
+        let base = "\
+import {
+    type A,
+} from \"./file1\"
+import {
+    type B,
+} from \"./file2\"
+import {
+    type C,
+} from \"./file3\"
+
+export function main() { return 1; }
+";
+        // Ours: adds a specifier to file1 and a new import from file4
+        let ours = "\
+import {
+    type A,
+    type A2,
+} from \"./file1\"
+import {
+    type B,
+} from \"./file2\"
+import {
+    type C,
+} from \"./file3\"
+import {
+    type D,
+} from \"./file4\"
+
+export function main() { return 1; }
+";
+        // Theirs: adds a specifier to file3
+        let theirs = "\
+import {
+    type A,
+} from \"./file1\"
+import {
+    type B,
+} from \"./file2\"
+import {
+    type C,
+    type C2,
+} from \"./file3\"
+
+export function main() { return 1; }
+";
+        let result = entity_merge(base, ours, theirs, "test.ts");
+        eprintln!("Multiple source imports: clean={}", result.is_clean());
+        eprintln!("Content:\n{}", result.content);
+
+        // All specifiers should be present
+        assert!(result.content.contains("type A,"), "A must be present");
+        assert!(
+            result.content.contains("type A2,"),
+            "A2 (ours addition) must be present"
+        );
+        assert!(result.content.contains("type B,"), "B must be present");
+        assert!(result.content.contains("type C,"), "C must be present");
+        assert!(
+            result.content.contains("type C2,"),
+            "C2 (theirs addition) must be present"
+        );
+        assert!(
+            result.content.contains("type D,"),
+            "D (ours new import) must be present"
+        );
+
+        // Count `import {` vs `} from` — they must be balanced
+        let open_count = result
+            .content
+            .lines()
+            .filter(|l| l.trim().starts_with("import {"))
+            .count();
+        let close_count = result
+            .content
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                t.starts_with('}') && t.contains("from ")
+            })
+            .count();
+        assert_eq!(
+            open_count, close_count,
+            "import {{ and }} from must be balanced: {} opens vs {} closes\n{}",
+            open_count, close_count, result.content
         );
     }
 
