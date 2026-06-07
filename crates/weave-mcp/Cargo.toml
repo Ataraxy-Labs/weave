@@ -27,6 +27,14 @@ schemars = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 openssl = { version = "0.10", features = ["vendored"], optional = true }
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [features]
 default = []
 vendored-openssl = ["openssl"]
