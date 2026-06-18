@@ -1629,12 +1629,14 @@ fn parse_single_line_specifiers(trimmed: &str) -> Vec<String> {
     if trimmed.starts_with("import ") {
         if let Some(brace_start) = trimmed.find('{') {
             if let Some(brace_end) = trimmed.find('}') {
-                let inner = &trimmed[brace_start + 1..brace_end];
-                return inner
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
+                if brace_start < brace_end {
+                    let inner = &trimmed[brace_start + 1..brace_end];
+                    return inner
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
             }
         }
     }
@@ -2188,7 +2190,7 @@ fn named_import_parts(line: &str) -> Option<(&str, &str)> {
     if let Some(open) = trimmed.find('{') {
         let close = trimmed.rfind('}')?;
         let from = trimmed.find(" from ")?;
-        if open < from && close < from {
+        if open < close && close < from {
             return Some((
                 &line[..trimmed_start + open + 1],
                 &line[trimmed_start + close..],
@@ -4145,6 +4147,14 @@ export function agentB() {
         // Not imports
         assert!(!is_import_line("let x = 1;"));
         assert!(!is_import_line("function foo() {}"));
+    }
+
+    #[test]
+    fn test_named_import_parsing_rejects_reversed_braces() {
+        let malformed = "import } foo { from 'bar';";
+        assert!(parse_single_line_specifiers(malformed).is_empty());
+        assert!(named_import_parts(malformed).is_none());
+        assert!(named_import_parts("import { foo } from 'bar';").is_some());
     }
 
     #[test]
