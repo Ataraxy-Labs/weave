@@ -1,4 +1,4 @@
-use weave_core::entity_merge;
+use weave_core::{conflict::ConflictKind, entity_merge};
 
 // =============================================================================
 // Core value prop: independent entity changes auto-resolve
@@ -97,6 +97,33 @@ fn ts_both_modify_same_function_incompatibly() {
     assert_eq!(result.conflicts.len(), 1);
     assert_eq!(result.conflicts[0].entity_name, "process");
     // Should have enhanced conflict markers
+    assert!(result.content.contains("<<<<<<< ours"));
+    assert!(result.content.contains(">>>>>>> theirs"));
+}
+
+#[test]
+fn ts_same_named_function_added_at_different_positions_conflicts() {
+    let base = r#"function first() { return 1; }
+function second() { return 2; }
+"#;
+    let ours = r#"function first() { return 1; }
+function computeKey(input) { return input.id; }
+function second() { return 2; }
+"#;
+    let theirs = r#"function first() { return 1; }
+function second() { return 2; }
+function computeKey(input) { return `${input.kind}:${input.id}`; }
+"#;
+
+    let result = entity_merge(base, ours, theirs, "sample.ts");
+    assert!(
+        !result.is_clean(),
+        "same named additions with different bodies must conflict, not duplicate cleanly. Content:\n{}",
+        result.content
+    );
+    assert_eq!(result.conflicts.len(), 1);
+    assert_eq!(result.conflicts[0].entity_name, "computeKey");
+    assert_eq!(result.conflicts[0].kind, ConflictKind::BothAdded);
     assert!(result.content.contains("<<<<<<< ours"));
     assert!(result.content.contains(">>>>>>> theirs"));
 }

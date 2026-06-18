@@ -679,9 +679,8 @@ pub fn entity_merge_with_registry(
         audit,
     };
 
-    // Floor: never produce more conflict markers than git merge-file.
-    // Entity merge can split one git conflict into multiple per-entity conflicts,
-    // or interstitial merges can produce conflicts not tracked in the conflicts vec.
+    // Floor: when both entity merge and git conflict, prefer the smaller marker set.
+    // Do not let git's clean-but-duplicate output erase a semantic conflict.
     let entity_markers = entity_result
         .content
         .lines()
@@ -694,7 +693,7 @@ pub fn entity_merge_with_registry(
             .lines()
             .filter(|l| l.starts_with("<<<<<<<"))
             .count();
-        if entity_markers > git_markers {
+        if git_markers > 0 && entity_markers > git_markers {
             return git_result;
         }
     }
