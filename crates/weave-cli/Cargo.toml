@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 weave-core = { path = "../weave-core", version = "0.3.6" }
 weave-crdt = { path = "../weave-crdt", version = "0.3.6" }
-sem-core = "0.6.1"
+sem-core = "0.7.0"
 clap = { version = "4", features = ["derive"] }
 colored = "3"
 diffy = "0.5"
