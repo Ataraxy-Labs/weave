@@ -169,6 +169,24 @@ To set up for just yourself (without modifying `.gitattributes`), write the same
 weave setup --local
 ```
 
+### Global (every repo)
+
+To make weave the default merge driver for **all** your repos at once (no per-repo setup, like [mergiraf](https://mergiraf.org/usage.html#registration-as-a-git-merge-driver)):
+
+```bash
+weave setup --global
+```
+
+This writes the driver to your `~/.gitconfig` and the supported file-type rules to git's global attributes file (`~/.config/git/attributes`, or your `core.attributesfile` if set). No git repo required. Make sure `weave-driver` is on your `PATH` (it ships next to the `weave` binary).
+
+The equivalent manual config, if you prefer:
+
+```bash
+git config --global merge.weave.name "Entity-level semantic merge"
+git config --global merge.weave.driver "weave-driver %O %A %B %L %P"
+# then add `*.ts merge=weave` (etc.) to ~/.config/git/attributes
+```
+
 ## Jujutsu (jj)
 
 Add to your jj config (`jj config edit --user`):
