@@ -12,11 +12,18 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
     "*.sc", "*.sbt", "*.kojo", "*.mill", "*.dart",
 ];
 
-pub fn run(driver_path: Option<&str>, local: bool) -> Result<(), Box<dyn std::error::Error>> {
-    // Verify we're in a git repo
-    let git_dir = Path::new(".git");
-    if !git_dir.exists() {
-        return Err("Not in a git repository. Run `weave setup` from the repo root.".into());
+pub fn run(
+    driver_path: Option<&str>,
+    local: bool,
+    global: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Global setup configures git itself, so it doesn't need to run inside a
+    // repo. Per-repo setup does.
+    if !global {
+        let git_dir = Path::new(".git");
+        if !git_dir.exists() {
+            return Err("Not in a git repository. Run `weave setup` from the repo root, or `weave setup --global` to configure git for every repo.".into());
+        }
     }
 
     // Resolve driver binary path
@@ -42,31 +49,34 @@ pub fn run(driver_path: Option<&str>, local: bool) -> Result<(), Box<dyn std::er
         );
     }
 
-    // Configure git merge driver
+    // Configure git merge driver (in ~/.gitconfig when --global).
     let driver_cmd = format!("{} %O %A %B %L %P", driver);
-    let status = Command::new("git")
-        .args(["config", "merge.weave.name", "Entity-level semantic merge"])
-        .status()?;
-    if !status.success() {
+    let git_config = |args: &[&str]| -> std::io::Result<std::process::ExitStatus> {
+        let mut full = vec!["config"];
+        if global {
+            full.push("--global");
+        }
+        full.extend_from_slice(args);
+        Command::new("git").args(&full).status()
+    };
+
+    if !git_config(&["merge.weave.name", "Entity-level semantic merge"])?.success() {
         return Err("Failed to set merge.weave.name".into());
     }
-
-    let status = Command::new("git")
-        .args(["config", "merge.weave.driver", &driver_cmd])
-        .status()?;
-    if !status.success() {
+    if !git_config(&["merge.weave.driver", &driver_cmd])?.success() {
         return Err("Failed to set merge.weave.driver".into());
     }
 
     println!(
-        "{} Configured git merge driver: {}",
+        "{} Configured git merge driver{}: {}",
         "✓".green().bold(),
+        if global { " (global)" } else { "" },
         driver_cmd
     );
 
     // Update git attributes
-    let (attributes_label, attributes_path) = attributes_target(local)?;
-    if local {
+    let (attributes_label, attributes_path) = attributes_target(local, global)?;
+    if local || global {
         if let Some(parent) = attributes_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -134,12 +144,49 @@ pub fn unsetup() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn attributes_target(local: bool) -> Result<(&'static str, PathBuf), Box<dyn std::error::Error>> {
-    if local {
-        Ok((".git/info/attributes", git_path("info/attributes")?))
+fn attributes_target(
+    local: bool,
+    global: bool,
+) -> Result<(String, PathBuf), Box<dyn std::error::Error>> {
+    if global {
+        let path = global_attributes_path()?;
+        Ok((path.display().to_string(), path))
+    } else if local {
+        Ok((
+            ".git/info/attributes".to_string(),
+            git_path("info/attributes")?,
+        ))
     } else {
-        Ok((".gitattributes", PathBuf::from(".gitattributes")))
+        Ok((".gitattributes".to_string(), PathBuf::from(".gitattributes")))
     }
+}
+
+/// The file git reads global attributes from. Respects an existing
+/// `core.attributesfile`; otherwise git's default `~/.config/git/attributes`
+/// (which git reads automatically with no extra config).
+fn global_attributes_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Ok(out) = Command::new("git")
+        .args(["config", "--global", "core.attributesfile"])
+        .output()
+    {
+        if out.status.success() {
+            let configured = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !configured.is_empty() {
+                let expanded = if let Some(rest) = configured.strip_prefix("~/") {
+                    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))?;
+                    PathBuf::from(home).join(rest)
+                } else {
+                    PathBuf::from(configured)
+                };
+                return Ok(expanded);
+            }
+        }
+    }
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))?;
+    Ok(PathBuf::from(home)
+        .join(".config")
+        .join("git")
+        .join("attributes"))
 }
 
 fn add_supported_patterns(existing: &mut String) -> usize {

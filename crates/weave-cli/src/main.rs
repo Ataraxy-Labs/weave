@@ -11,7 +11,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Configure the current Git repo to use weave as merge driver
+    /// Configure Git to use weave as merge driver (this repo, or --global for all repos)
     Setup {
         /// Path to weave-driver binary (auto-detected if omitted)
         #[arg(long)]
@@ -19,6 +19,10 @@ enum Commands {
         /// Write merge attributes to .git/info/attributes instead of .gitattributes
         #[arg(long)]
         local: bool,
+        /// Configure git globally (~/.gitconfig + global attributes) so weave is
+        /// the default driver in every repo. No git repo required.
+        #[arg(long)]
+        global: bool,
     },
     /// Remove weave merge driver from the current Git repo
     Unsetup,
@@ -89,7 +93,11 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Setup { ref driver, local } => commands::setup::run(driver.as_deref(), local),
+        Commands::Setup {
+            ref driver,
+            local,
+            global,
+        } => commands::setup::run(driver.as_deref(), local, global),
         Commands::Unsetup => commands::setup::unsetup(),
         Commands::Preview {
             ref branch,
