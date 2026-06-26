@@ -1,11 +1,27 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
+
+use wait_timeout::ChildExt;
+
+const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run a git command with a timeout. Kills the process if it exceeds GIT_TIMEOUT.
+fn run_git(cmd: &mut Command) -> Result<Output, Box<dyn std::error::Error>> {
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    match child.wait_timeout(GIT_TIMEOUT)? {
+        Some(_) => child.wait_with_output().map_err(Into::into),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(format!("git command timed out after {}s", GIT_TIMEOUT.as_secs()).into())
+        }
+    }
+}
 
 /// Find the root of the git repository by walking up from the current directory.
 pub fn find_repo_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()?;
+    let output = run_git(Command::new("git").args(["rev-parse", "--show-toplevel"]))?;
     if !output.status.success() {
         return Err("Not inside a git repository".into());
     }
@@ -30,9 +46,12 @@ pub fn find_repo_root_from_path(path: &Path) -> Result<PathBuf, Box<dyn std::err
             .unwrap_or(Path::new("."))
             .to_path_buf()
     };
-    let output = Command::new("git")
-        .args(["-C", &dir.to_string_lossy(), "rev-parse", "--show-toplevel"])
-        .output()?;
+    let output = run_git(Command::new("git").args([
+        "-C",
+        &dir.to_string_lossy(),
+        "rev-parse",
+        "--show-toplevel",
+    ]))?;
     if !output.status.success() {
         return Err(format!("Not inside a git repository: {}", dir.display()).into());
     }
@@ -42,9 +61,7 @@ pub fn find_repo_root_from_path(path: &Path) -> Result<PathBuf, Box<dyn std::err
 
 /// Find the merge base between two refs.
 pub fn find_merge_base(head: &str, branch: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let output = Command::new("git")
-        .args(["merge-base", head, branch])
-        .output()?;
+    let output = run_git(Command::new("git").args(["merge-base", head, branch]))?;
     if !output.status.success() {
         return Err(format!(
             "Failed to find merge base between '{}' and '{}'. Are both branches valid?",
@@ -58,7 +75,7 @@ pub fn find_merge_base(head: &str, branch: &str) -> Result<String, Box<dyn std::
 /// Show file content at a given revision.
 pub fn git_show(rev: &str, file: &str) -> Result<String, Box<dyn std::error::Error>> {
     let spec = format!("{}:{}", rev, file);
-    let output = Command::new("git").args(["show", &spec]).output()?;
+    let output = run_git(Command::new("git").args(["show", &spec]))?;
     if !output.status.success() {
         return Err(format!("git show {} failed", spec).into());
     }
@@ -71,18 +88,15 @@ pub fn get_changed_files(
     head: &str,
     branch: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let ours_output = Command::new("git")
-        .args(["diff", "--name-only", merge_base, head])
-        .output()?;
+    let ours_output = run_git(Command::new("git").args(["diff", "--name-only", merge_base, head]))?;
     let ours_files: std::collections::HashSet<String> =
         String::from_utf8_lossy(&ours_output.stdout)
             .lines()
             .map(|s| s.to_string())
             .collect();
 
-    let theirs_output = Command::new("git")
-        .args(["diff", "--name-only", merge_base, branch])
-        .output()?;
+    let theirs_output =
+        run_git(Command::new("git").args(["diff", "--name-only", merge_base, branch]))?;
     let theirs_files: std::collections::HashSet<String> =
         String::from_utf8_lossy(&theirs_output.stdout)
             .lines()
@@ -99,9 +113,7 @@ pub fn diff_files(
     base_ref: &str,
     target_ref: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let output = Command::new("git")
-        .args(["diff", "--name-only", base_ref, target_ref])
-        .output()?;
+    let output = run_git(Command::new("git").args(["diff", "--name-only", base_ref, target_ref]))?;
     let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|s| !s.is_empty())

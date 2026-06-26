@@ -157,7 +157,10 @@ fn attributes_target(
             git_path("info/attributes")?,
         ))
     } else {
-        Ok((".gitattributes".to_string(), PathBuf::from(".gitattributes")))
+        Ok((
+            ".gitattributes".to_string(),
+            PathBuf::from(".gitattributes"),
+        ))
     }
 }
 

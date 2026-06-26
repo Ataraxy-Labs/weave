@@ -2,6 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use lru::LruCache;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -40,11 +41,21 @@ fn content_hash_u64(content: &str) -> u64 {
     hasher.finish()
 }
 
+/// Cached entity graph with TTL-based invalidation.
+struct CachedGraph {
+    graph: Arc<EntityGraph>,
+    file_paths: Vec<String>,
+    built_at: Instant,
+}
+
+const GRAPH_CACHE_TTL: Duration = Duration::from_secs(30);
+
 #[derive(Clone)]
 pub struct WeaveServer {
     context: Arc<Mutex<Option<RepoContext>>>,
     registry: Arc<ParserRegistry>,
     entity_cache: Arc<Mutex<EntityCache>>,
+    graph_cache: Arc<Mutex<Option<CachedGraph>>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -205,6 +216,48 @@ impl WeaveServer {
 
         entities
     }
+
+    /// Get or build the entity graph with TTL-based caching.
+    /// On cache miss, runs the expensive filesystem walk + tree-sitter parse
+    /// inside `spawn_blocking` to avoid stalling the async runtime.
+    async fn get_or_build_graph(
+        &self,
+        repo_root: &Path,
+    ) -> Result<(Arc<EntityGraph>, Vec<String>), String> {
+        // Check cache
+        {
+            let cache = self.graph_cache.lock().await;
+            if let Some(ref cached) = *cache {
+                if cached.built_at.elapsed() < GRAPH_CACHE_TTL {
+                    return Ok((cached.graph.clone(), cached.file_paths.clone()));
+                }
+            }
+        }
+
+        // Cache miss: build graph in a blocking task
+        let root = repo_root.to_path_buf();
+        let registry = self.registry.clone();
+
+        let (graph, file_paths) = tokio::task::spawn_blocking(move || {
+            let file_paths = Self::find_supported_files(&root, &registry);
+            let (graph, _entities) = EntityGraph::build(&root, &file_paths, &registry);
+            (Arc::new(graph), file_paths)
+        })
+        .await
+        .map_err(|e| format!("Graph build task failed: {}", e))?;
+
+        // Store in cache
+        {
+            let mut cache = self.graph_cache.lock().await;
+            *cache = Some(CachedGraph {
+                graph: graph.clone(),
+                file_paths: file_paths.clone(),
+                built_at: Instant::now(),
+            });
+        }
+
+        Ok((graph, file_paths))
+    }
 }
 
 #[tool_router]
@@ -216,6 +269,7 @@ impl WeaveServer {
             entity_cache: Arc::new(Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(500).unwrap(),
             ))),
+            graph_cache: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
         }
     }
@@ -273,36 +327,53 @@ impl WeaveServer {
             Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
                 .map_err(internal_err)?;
 
-        let mut state = ctx.state.lock().await;
-        let entities = self.cached_extract_entities(&content, &rel_path).await;
-        if let Some(e) = entities.iter().find(|e| e.id == entity_id) {
-            let _ = upsert_entity(
-                &mut state,
-                &e.id,
-                &e.name,
-                &e.entity_type,
-                &rel_path,
-                &e.content_hash,
-            );
-        }
+        // Phase 1: Lock state briefly — upsert entity, claim, save — then drop lock
+        let result = {
+            let mut state = ctx.state.lock().await;
+            let entities = self.cached_extract_entities(&content, &rel_path).await;
+            if let Some(e) = entities.iter().find(|e| e.id == entity_id) {
+                let _ = upsert_entity(
+                    &mut state,
+                    &e.id,
+                    &e.name,
+                    &e.entity_type,
+                    &rel_path,
+                    &e.content_hash,
+                );
+            }
 
-        let result = claim_entity(&mut state, &params.agent_id, &entity_id)
-            .map_err(|e| internal_err(e.to_string()))?;
+            let result = claim_entity(&mut state, &params.agent_id, &entity_id)
+                .map_err(|e| internal_err(e.to_string()))?;
 
-        let _ = state.save();
+            let _ = state.save();
+            result
+        };
+        // state lock dropped here
 
-        // Predictive conflict detection: check if any entity in the
-        // dependency chain is claimed by another agent
+        // Phase 2: Build/fetch cached graph (no state lock held)
+        let repo_root = ctx.repo_root.clone();
+        drop(ctx); // release the context lock during expensive graph build
+
+        let (graph, _file_paths) = self
+            .get_or_build_graph(&repo_root)
+            .await
+            .map_err(internal_err)?;
+
+        // Phase 3: Compute dependency warnings, briefly re-lock state for status checks
         let mut dep_warnings: Vec<serde_json::Value> = Vec::new();
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
 
-        // Find graph entity matching our claimed entity
         if let Some(graph_entity) = graph
             .entities
             .values()
             .find(|e| e.name == params.entity_name && e.file_path == rel_path)
         {
+            // Re-acquire context and state lock for status reads
+            let ctx = self
+                .get_context(Some(&params.file_path))
+                .await
+                .map_err(internal_err)?;
+            let state = ctx.state.lock().await;
+
             // Check dependencies (what we call)
             let deps = graph.get_dependencies(&graph_entity.id);
             for dep in &deps {
@@ -540,64 +611,74 @@ impl WeaveServer {
                 .map_err(|e| internal_err(e.to_string()))?
         };
 
-        let mut results = Vec::new();
-        for file in &files {
-            let base = git::git_show(&merge_base, file).unwrap_or_default();
-            let ours = git::git_show(&params.base_branch, file).unwrap_or_default();
-            let theirs = git::git_show(&params.target_branch, file).unwrap_or_default();
+        let registry = self.registry.clone();
+        let base_branch = params.base_branch.clone();
+        let target_branch = params.target_branch.clone();
+        let merge_base_clone = merge_base.clone();
 
-            if ours == theirs || base == ours || base == theirs {
-                continue;
-            }
+        let results = tokio::task::spawn_blocking(move || {
+            let mut results = Vec::new();
+            for file in &files {
+                let base = git::git_show(&merge_base_clone, file).unwrap_or_default();
+                let ours = git::git_show(&base_branch, file).unwrap_or_default();
+                let theirs = git::git_show(&target_branch, file).unwrap_or_default();
 
-            let merge_result = weave_core::entity_merge_with_registry(
-                &base,
-                &ours,
-                &theirs,
-                file,
-                &self.registry,
-                &weave_core::MarkerFormat::default(),
-            );
+                if ours == theirs || base == ours || base == theirs {
+                    continue;
+                }
 
-            let conflicts: Vec<serde_json::Value> = merge_result
-                .conflicts
-                .iter()
-                .map(|c| {
-                    serde_json::json!({
-                        "entity_type": c.entity_type,
-                        "entity_name": c.entity_name,
-                        "kind": format!("{}", c.kind),
-                        "complexity": format!("{}", c.complexity),
+                let merge_result = weave_core::entity_merge_with_registry(
+                    &base,
+                    &ours,
+                    &theirs,
+                    file,
+                    &registry,
+                    &weave_core::MarkerFormat::default(),
+                );
+
+                let conflicts: Vec<serde_json::Value> = merge_result
+                    .conflicts
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "entity_type": c.entity_type,
+                            "entity_name": c.entity_name,
+                            "kind": format!("{}", c.kind),
+                            "complexity": format!("{}", c.complexity),
+                        })
                     })
-                })
-                .collect();
+                    .collect();
 
-            let warnings: Vec<String> = merge_result
-                .warnings
-                .iter()
-                .map(|w| format!("{}", w))
-                .collect();
+                let warnings: Vec<String> = merge_result
+                    .warnings
+                    .iter()
+                    .map(|w| format!("{}", w))
+                    .collect();
 
-            results.push(serde_json::json!({
-                "file": file,
-                "clean": merge_result.is_clean(),
-                "confidence": merge_result.stats.confidence(),
-                "stats": {
-                    "unchanged": merge_result.stats.entities_unchanged,
-                    "ours_only": merge_result.stats.entities_ours_only,
-                    "theirs_only": merge_result.stats.entities_theirs_only,
-                    "auto_merged": merge_result.stats.entities_both_changed_merged,
-                    "added_ours": merge_result.stats.entities_added_ours,
-                    "added_theirs": merge_result.stats.entities_added_theirs,
-                    "deleted": merge_result.stats.entities_deleted,
-                    "conflicted": merge_result.stats.entities_conflicted,
-                    "resolved_via_diffy": merge_result.stats.resolved_via_diffy,
-                    "resolved_via_inner_merge": merge_result.stats.resolved_via_inner_merge,
-                },
-                "conflicts": conflicts,
-                "warnings": warnings,
-            }));
-        }
+                results.push(serde_json::json!({
+                    "file": file,
+                    "clean": merge_result.is_clean(),
+                    "confidence": merge_result.stats.confidence(),
+                    "stats": {
+                        "unchanged": merge_result.stats.entities_unchanged,
+                        "ours_only": merge_result.stats.entities_ours_only,
+                        "theirs_only": merge_result.stats.entities_theirs_only,
+                        "auto_merged": merge_result.stats.entities_both_changed_merged,
+                        "added_ours": merge_result.stats.entities_added_ours,
+                        "added_theirs": merge_result.stats.entities_added_theirs,
+                        "deleted": merge_result.stats.entities_deleted,
+                        "conflicted": merge_result.stats.entities_conflicted,
+                        "resolved_via_diffy": merge_result.stats.resolved_via_diffy,
+                        "resolved_via_inner_merge": merge_result.stats.resolved_via_inner_merge,
+                    },
+                    "conflicts": conflicts,
+                    "warnings": warnings,
+                }));
+            }
+            results
+        })
+        .await
+        .map_err(|e| internal_err(format!("Preview merge task failed: {}", e)))?;
 
         let clean_count = results
             .iter()
@@ -645,10 +726,14 @@ impl WeaveServer {
             .await
             .map_err(internal_err)?;
         let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let repo_root = ctx.repo_root.clone();
+        drop(ctx);
 
-        // Build graph from all supported files in the repo
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        // Build graph from all supported files in the repo (cached)
+        let (graph, _file_paths) = self
+            .get_or_build_graph(&repo_root)
+            .await
+            .map_err(internal_err)?;
 
         // Find the entity by name in the target file
         let entity_id = graph
@@ -704,9 +789,13 @@ impl WeaveServer {
             .await
             .map_err(internal_err)?;
         let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let repo_root = ctx.repo_root.clone();
+        drop(ctx);
 
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let (graph, _file_paths) = self
+            .get_or_build_graph(&repo_root)
+            .await
+            .map_err(internal_err)?;
 
         let entity_id = graph
             .entities
@@ -761,9 +850,13 @@ impl WeaveServer {
             .await
             .map_err(internal_err)?;
         let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let repo_root = ctx.repo_root.clone();
+        drop(ctx);
 
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let (graph, _file_paths) = self
+            .get_or_build_graph(&repo_root)
+            .await
+            .map_err(internal_err)?;
 
         let entity_id = graph
             .entities
@@ -877,44 +970,53 @@ impl WeaveServer {
                 .map_err(|e| internal_err(e.to_string()))?
         };
 
-        let mut all_changes = Vec::new();
+        let registry = self.registry.clone();
+        let base_ref = params.base_ref.clone();
+        let target_ref_owned = target_ref.to_string();
 
-        for file in &files {
-            let plugin = match self.registry.get_plugin(file) {
-                Some(p) => p,
-                None => continue, // skip unsupported files
-            };
+        let all_changes = tokio::task::spawn_blocking(move || {
+            let mut all_changes = Vec::new();
 
-            let base_content = git::git_show(&params.base_ref, file).unwrap_or_default();
-            let target_content = git::git_show(target_ref, file).unwrap_or_default();
+            for file in &files {
+                let plugin = match registry.get_plugin(file) {
+                    Some(p) => p,
+                    None => continue, // skip unsupported files
+                };
 
-            let base_entities = plugin.extract_entities(&base_content, file);
-            let target_entities = plugin.extract_entities(&target_content, file);
+                let base_content = git::git_show(&base_ref, file).unwrap_or_default();
+                let target_content = git::git_show(&target_ref_owned, file).unwrap_or_default();
 
-            let match_result = sem_core::model::identity::match_entities(
-                &base_entities,
-                &target_entities,
-                file,
-                None,
-                None,
-                None,
-            );
+                let base_entities = plugin.extract_entities(&base_content, file);
+                let target_entities = plugin.extract_entities(&target_content, file);
 
-            for change in match_result.changes {
-                all_changes.push(serde_json::json!({
-                    "file": file,
-                    "entity_name": change.entity_name,
-                    "entity_type": change.entity_type,
-                    "change_type": change.change_type.to_string(),
-                }));
+                let match_result = sem_core::model::identity::match_entities(
+                    &base_entities,
+                    &target_entities,
+                    file,
+                    None,
+                    None,
+                    None,
+                );
+
+                for change in match_result.changes {
+                    all_changes.push(serde_json::json!({
+                        "file": file,
+                        "entity_name": change.entity_name,
+                        "entity_type": change.entity_type,
+                        "change_type": change.change_type.to_string(),
+                    }));
+                }
             }
-        }
+            all_changes
+        })
+        .await
+        .map_err(|e| internal_err(format!("Diff task failed: {}", e)))?;
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "base_ref": params.base_ref,
-                "target_ref": target_ref,
-                "files_analyzed": files.len(),
+                "target_ref": params.target_ref.as_deref().unwrap_or("HEAD"),
+                "files_analyzed": all_changes.iter().map(|c| c["file"].as_str().unwrap_or("")).collect::<std::collections::HashSet<_>>().len(),
                 "total_changes": all_changes.len(),
                 "changes": all_changes,
             }))
@@ -985,39 +1087,49 @@ impl WeaveServer {
                 .map_err(|e| internal_err(e.to_string()))?
         };
 
-        let mut results = Vec::new();
-        for file in &files {
-            let base = git::git_show(&merge_base, file).unwrap_or_default();
-            let ours = git::git_show(&params.base_branch, file).unwrap_or_default();
-            let theirs = git::git_show(&params.target_branch, file).unwrap_or_default();
+        let registry = self.registry.clone();
+        let base_branch = params.base_branch.clone();
+        let target_branch = params.target_branch.clone();
+        let merge_base_clone = merge_base.clone();
 
-            if ours == theirs || base == ours || base == theirs {
-                continue;
+        let results = tokio::task::spawn_blocking(move || {
+            let mut results = Vec::new();
+            for file in &files {
+                let base = git::git_show(&merge_base_clone, file).unwrap_or_default();
+                let ours = git::git_show(&base_branch, file).unwrap_or_default();
+                let theirs = git::git_show(&target_branch, file).unwrap_or_default();
+
+                if ours == theirs || base == ours || base == theirs {
+                    continue;
+                }
+
+                let merge_result = weave_core::entity_merge_with_registry(
+                    &base,
+                    &ours,
+                    &theirs,
+                    file,
+                    &registry,
+                    &weave_core::MarkerFormat::default(),
+                );
+
+                let audit: Vec<serde_json::Value> = merge_result
+                    .audit
+                    .iter()
+                    .map(|a| serde_json::to_value(a).unwrap_or_default())
+                    .collect();
+
+                results.push(serde_json::json!({
+                    "file": file,
+                    "clean": merge_result.is_clean(),
+                    "confidence": merge_result.stats.confidence(),
+                    "stats": merge_result.stats,
+                    "entities": audit,
+                }));
             }
-
-            let merge_result = weave_core::entity_merge_with_registry(
-                &base,
-                &ours,
-                &theirs,
-                file,
-                &self.registry,
-                &weave_core::MarkerFormat::default(),
-            );
-
-            let audit: Vec<serde_json::Value> = merge_result
-                .audit
-                .iter()
-                .map(|a| serde_json::to_value(a).unwrap_or_default())
-                .collect();
-
-            results.push(serde_json::json!({
-                "file": file,
-                "clean": merge_result.is_clean(),
-                "confidence": merge_result.stats.confidence(),
-                "stats": merge_result.stats,
-                "entities": audit,
-            }));
-        }
+            results
+        })
+        .await
+        .map_err(|e| internal_err(format!("Merge audit task failed: {}", e)))?;
 
         let summary = serde_json::json!({
             "files_analyzed": results.len(),
@@ -1052,67 +1164,77 @@ impl WeaveServer {
                 .map_err(|e| internal_err(e.to_string()))?
         };
 
-        // Collect modified entities from both branches
-        let mut modified_entities = Vec::new();
-        for file in &files {
-            let base_content = git::git_show(&merge_base, file).unwrap_or_default();
-            let ours_content = git::git_show(&params.base_branch, file).unwrap_or_default();
-            let theirs_content = git::git_show(&params.target_branch, file).unwrap_or_default();
+        let registry = self.registry.clone();
+        let repo_root = ctx.repo_root.clone();
+        drop(ctx);
 
-            if let Some(plugin) = self.registry.get_plugin(file) {
-                let base_entities = plugin.extract_entities(&base_content, file);
-                let ours_entities = plugin.extract_entities(&ours_content, file);
-                let theirs_entities = plugin.extract_entities(&theirs_content, file);
+        let base_branch = params.base_branch.clone();
+        let target_branch = params.target_branch.clone();
+        let merge_base_clone = merge_base.clone();
 
-                // Find entities modified in ours or theirs vs base
-                for entity in ours_entities.iter().chain(theirs_entities.iter()) {
-                    let base_match = base_entities.iter().find(|b| b.name == entity.name);
-                    let is_modified = match base_match {
-                        Some(b) => b.content_hash != entity.content_hash,
-                        None => true, // new entity
-                    };
-                    if is_modified {
-                        modified_entities.push(weave_core::ModifiedEntity {
-                            name: entity.name.clone(),
-                            file_path: file.clone(),
-                        });
+        // Collect modified entities and run validation in spawn_blocking
+        let (modified_count, result) = tokio::task::spawn_blocking(move || {
+            let mut modified_entities = Vec::new();
+            for file in &files {
+                let base_content = git::git_show(&merge_base_clone, file).unwrap_or_default();
+                let ours_content = git::git_show(&base_branch, file).unwrap_or_default();
+                let theirs_content = git::git_show(&target_branch, file).unwrap_or_default();
+
+                if let Some(plugin) = registry.get_plugin(file) {
+                    let base_entities = plugin.extract_entities(&base_content, file);
+                    let ours_entities = plugin.extract_entities(&ours_content, file);
+                    let theirs_entities = plugin.extract_entities(&theirs_content, file);
+
+                    // Find entities modified in ours or theirs vs base
+                    for entity in ours_entities.iter().chain(theirs_entities.iter()) {
+                        let base_match = base_entities.iter().find(|b| b.name == entity.name);
+                        let is_modified = match base_match {
+                            Some(b) => b.content_hash != entity.content_hash,
+                            None => true, // new entity
+                        };
+                        if is_modified {
+                            modified_entities.push(weave_core::ModifiedEntity {
+                                name: entity.name.clone(),
+                                file_path: file.clone(),
+                            });
+                        }
                     }
                 }
             }
-        }
 
-        // Deduplicate
-        modified_entities.sort_by(|a, b| (&a.file_path, &a.name).cmp(&(&b.file_path, &b.name)));
-        modified_entities.dedup_by(|a, b| a.file_path == b.file_path && a.name == b.name);
+            // Deduplicate
+            modified_entities.sort_by(|a, b| (&a.file_path, &a.name).cmp(&(&b.file_path, &b.name)));
+            modified_entities.dedup_by(|a, b| a.file_path == b.file_path && a.name == b.name);
 
-        let all_files = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let warnings = weave_core::validate_merge(
-            &ctx.repo_root,
-            &all_files,
-            &modified_entities,
-            &self.registry,
-        );
+            let all_files = Self::find_supported_files(&repo_root, &registry);
+            let warnings =
+                weave_core::validate_merge(&repo_root, &all_files, &modified_entities, &registry);
 
-        let result: Vec<serde_json::Value> = warnings
-            .iter()
-            .map(|w| {
-                serde_json::json!({
-                    "entity": w.entity_name,
-                    "entity_type": w.entity_type,
-                    "file": w.file_path,
-                    "warning": w.to_string(),
-                    "related": w.related.iter().map(|r| serde_json::json!({
-                        "name": r.name,
-                        "type": r.entity_type,
-                        "file": r.file_path,
-                    })).collect::<Vec<_>>(),
+            let result: Vec<serde_json::Value> = warnings
+                .iter()
+                .map(|w| {
+                    serde_json::json!({
+                        "entity": w.entity_name,
+                        "entity_type": w.entity_type,
+                        "file": w.file_path,
+                        "warning": w.to_string(),
+                        "related": w.related.iter().map(|r| serde_json::json!({
+                            "name": r.name,
+                            "type": r.entity_type,
+                            "file": r.file_path,
+                        })).collect::<Vec<_>>(),
+                    })
                 })
-            })
-            .collect();
+                .collect();
+
+            (modified_entities.len(), result)
+        })
+        .await
+        .map_err(|e| internal_err(format!("Validate merge task failed: {}", e)))?;
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&serde_json::json!({
-                "modified_entities": modified_entities.len(),
+                "modified_entities": modified_count,
                 "warnings": result.len(),
                 "details": result,
             }))
