@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 weave-core = { version = "0.3.6", path = "../weave-core" }
-sem-core = "0.6.1"
+sem-core = "0.10.1"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
