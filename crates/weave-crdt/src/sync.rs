@@ -11,11 +11,44 @@ use crate::merge::CrdtMergeResult;
 use crate::ops::{get_str, upsert_entity};
 use crate::state::EntityStateDoc;
 
+/// The decision for reconciling one entity's file content against the CRDT
+/// during a sync, given the last-synced `base`, the current CRDT `content`
+/// (which may hold an unmaterialized local edit), and the `file` content.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ContentReconcile {
+    /// First time we have seen this entity: seed content and base from the file.
+    Seed,
+    /// File and CRDT already agree (e.g. right after `weave apply`): just move
+    /// the ancestor forward.
+    AdvanceBase,
+    /// File is unchanged since the last sync: keep the local CRDT edit.
+    PreserveLocal,
+    /// File changed externally and there is no local edit: take the file.
+    FastForward,
+    /// Both sides changed since the ancestor: a real conflict.
+    Conflict,
+}
+
+pub(crate) fn reconcile_entity_content(base: &str, crdt: &str, file: &str) -> ContentReconcile {
+    if base.is_empty() {
+        ContentReconcile::Seed
+    } else if file == crdt {
+        ContentReconcile::AdvanceBase
+    } else if file == base {
+        ContentReconcile::PreserveLocal
+    } else if crdt == base {
+        ContentReconcile::FastForward
+    } else {
+        ContentReconcile::Conflict
+    }
+}
+
 /// Sync entities from working tree files into CRDT state.
 ///
 /// Extracts entities from each file using sem-core's parser registry,
-/// then upserts them into the automerge document. Also stores entity
-/// content, file ordering, and interstitial content.
+/// then upserts them into the automerge document. Reconciles each entity's
+/// file content against the CRDT (see [`reconcile_entity_content`]) so a local
+/// edit is never clobbered, and stores file ordering and interstitial content.
 pub fn sync_from_files(
     state: &mut EntityStateDoc,
     repo_root: &Path,
@@ -49,18 +82,34 @@ pub fn sync_from_files(
                 &entity.content_hash,
             )?;
 
-            // Store entity content
+            // Reconcile the file's content against the CRDT with a 3-way rule so
+            // a local (unmaterialized) entity edit is never silently clobbered by
+            // a re-sync. `base` is the content at the last sync (the common
+            // ancestor), the CRDT `content` is the possibly-locally-edited side,
+            // and `entity.content` is the file's current content.
             let entities_map = state.entities_id()?;
             if let Ok(Some((_, entity_obj))) = state.doc.get(&entities_map, entity.id.as_str()) {
-                state
-                    .doc
-                    .put(&entity_obj, "content", entity.content.as_str())?;
-                // Set base_content on initial sync if empty
                 let base = get_str(&state.doc, &entity_obj, "base_content").unwrap_or_default();
-                if base.is_empty() {
-                    state
-                        .doc
-                        .put(&entity_obj, "base_content", entity.content.as_str())?;
+                let crdt_content = get_str(&state.doc, &entity_obj, "content").unwrap_or_default();
+                let file_content = entity.content.as_str();
+
+                match reconcile_entity_content(&base, &crdt_content, file_content) {
+                    ContentReconcile::Seed | ContentReconcile::FastForward => {
+                        state.doc.put(&entity_obj, "content", file_content)?;
+                        state.doc.put(&entity_obj, "base_content", file_content)?;
+                    }
+                    ContentReconcile::AdvanceBase => {
+                        state.doc.put(&entity_obj, "base_content", file_content)?;
+                    }
+                    // File unchanged since last sync: keep the local CRDT edit.
+                    ContentReconcile::PreserveLocal => {}
+                    ContentReconcile::Conflict => {
+                        state.doc.put(&entity_obj, "merge_state", "conflict")?;
+                        state
+                            .doc
+                            .put(&entity_obj, "conflict_ours", crdt_content.as_str())?;
+                        state.doc.put(&entity_obj, "conflict_theirs", file_content)?;
+                    }
                 }
             }
 
@@ -327,4 +376,53 @@ fn read_file_interstitials(state: &EntityStateDoc, file_path: &str) -> HashMap<S
     }
 
     result
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::{reconcile_entity_content, ContentReconcile};
+
+    #[test]
+    fn first_sight_seeds_from_file() {
+        // No ancestor yet: take the file.
+        assert_eq!(
+            reconcile_entity_content("", "", "fn f(){}"),
+            ContentReconcile::Seed
+        );
+    }
+
+    #[test]
+    fn local_edit_survives_resync_when_file_unchanged() {
+        // The exact bug this guards: base==file (file untouched), CRDT holds a
+        // local edit. The edit must be preserved, not clobbered.
+        assert_eq!(
+            reconcile_entity_content("old", "local_edit", "old"),
+            ContentReconcile::PreserveLocal
+        );
+    }
+
+    #[test]
+    fn file_and_crdt_agree_just_advances_base() {
+        // After `weave apply`, file == CRDT; only the ancestor moves.
+        assert_eq!(
+            reconcile_entity_content("old", "applied", "applied"),
+            ContentReconcile::AdvanceBase
+        );
+    }
+
+    #[test]
+    fn external_file_edit_without_local_edit_fast_forwards() {
+        assert_eq!(
+            reconcile_entity_content("old", "old", "external"),
+            ContentReconcile::FastForward
+        );
+    }
+
+    #[test]
+    fn both_sides_changed_is_a_conflict() {
+        assert_eq!(
+            reconcile_entity_content("old", "local_edit", "external_edit"),
+            ContentReconcile::Conflict
+        );
+    }
 }
