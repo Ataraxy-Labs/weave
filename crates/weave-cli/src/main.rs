@@ -26,6 +26,11 @@ enum Commands {
     },
     /// Remove weave merge driver from the current Git repo
     Unsetup,
+    /// Materialize entity edits from the CRDT back onto the working files
+    Apply {
+        /// One or more files to write from the CRDT
+        files: Vec<String>,
+    },
     /// Preview what a merge between branches would look like
     Preview {
         /// The branch to merge into HEAD
@@ -99,6 +104,7 @@ fn main() {
             global,
         } => commands::setup::run(driver.as_deref(), local, global),
         Commands::Unsetup => commands::setup::unsetup(),
+        Commands::Apply { ref files } => commands::apply::run(files),
         Commands::Preview {
             ref branch,
             ref file,
