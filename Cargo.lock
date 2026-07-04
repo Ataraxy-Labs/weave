@@ -2224,13 +2224,14 @@ dependencies = [
 
 [[package]]
 name = "sem-core"
-version = "0.10.1"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71bb95b2e77225bb972dacb4a7a8f2649f5e81c4c0ddb8ecaa7562d54e64c014"
+checksum = "504ea57d3e4d7ae1832ba02e1491d116e895e58117fc620b5186e9a87c953193"
 dependencies = [
  "git2",
  "rayon",
  "regex",
+ "rustc-hash",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2257,16 +2258,17 @@ dependencies = [
  "tree-sitter-kotlin-ng",
  "tree-sitter-nix",
  "tree-sitter-ocaml",
- "tree-sitter-perl-next",
  "tree-sitter-php",
  "tree-sitter-python",
  "tree-sitter-ruby",
  "tree-sitter-rust",
  "tree-sitter-scala",
+ "tree-sitter-sequel",
  "tree-sitter-swift",
  "tree-sitter-typescript",
  "tree-sitter-xml",
  "tree-sitter-zig",
+ "ts-parser-perl",
  "xxhash-rust",
 ]
 
@@ -3094,16 +3096,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tree-sitter-perl-next"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97b02c571f4d63663ade506b1f81dd9f78e37a0014268c521b6e75df0603d911"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
 name = "tree-sitter-php"
 version = "0.23.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3154,6 +3146,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-sequel"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d198ad3c319c02e43c21efa1ec796b837afcb96ffaef1a40c1978fbdcec7d17"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-swift"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3198,6 +3200,16 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "ts-parser-perl"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d125f7bfdd1fd82a7e87d2e85793f486ad1b5f465144e9e22132dbe5bd80e694"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
 
 [[package]]
 name = "typenum"
