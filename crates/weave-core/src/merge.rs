@@ -3425,6 +3425,21 @@ fn is_python_style_container(lines: &[&str]) -> bool {
     }
 }
 
+/// Returns true if a (trimmed) line closes a braced container body.
+///
+/// Matches a leading `}` followed only by closing punctuation, so it accepts
+/// the bare `}` / `};` / `},` forms as well as call- and index-wrapped closers
+/// like `})`, `});`, `}),`, `])`. This lets object literals passed as call
+/// arguments (`configure({ ... })`, `defineConfig({ ... })`) decompose into
+/// per-member chunks instead of collapsing into one whole-entity conflict.
+fn is_container_close_line(trimmed: &str) -> bool {
+    let mut chars = trimmed.chars();
+    if chars.next() != Some('}') {
+        return false;
+    }
+    chars.all(|c| matches!(c, ')' | ']' | ';' | ',' | ' ' | '\t'))
+}
+
 fn extract_container_wrapper(content: &str) -> Option<(&str, &str)> {
     let lines: Vec<&str> = content.lines().collect();
     if lines.len() < 2 {
@@ -3451,10 +3466,7 @@ fn extract_container_wrapper(content: &str) -> Option<(&str, &str)> {
             .sum::<usize>();
         let header = &content[..header_byte_end.min(content.len())];
 
-        let footer_start = lines.iter().rposition(|l| {
-            let trimmed = l.trim();
-            trimmed == "}" || trimmed == "};"
-        })?;
+        let footer_start = lines.iter().rposition(|l| is_container_close_line(l.trim()))?;
 
         let footer_byte_start: usize = lines[..footer_start].iter().map(|l| l.len() + 1).sum();
         let footer = &content[footer_byte_start.min(content.len())..];
@@ -3487,10 +3499,7 @@ fn extract_member_chunks(content: &str) -> Option<Vec<MemberChunk>> {
         // Python: body extends to end of content
         lines.len()
     } else {
-        lines.iter().rposition(|l| {
-            let trimmed = l.trim();
-            trimmed == "}" || trimmed == "};"
-        })?
+        lines.iter().rposition(|l| is_container_close_line(l.trim()))?
     };
 
     if body_start >= body_end {
@@ -4771,6 +4780,38 @@ export function calculate(a: number, b: number): number {
         eprintln!("Content:\n{}", result.content);
         // This tests whether inner entity merge handles object literals
         // (it probably won't since object fields aren't extracted as members the same way)
+    }
+
+    #[test]
+    fn test_call_wrapped_object_scopes_conflict_per_key() {
+        // Issue #127: an object literal passed to a call (`configure({ ... })`)
+        // closes with `})`, which the container-wrapper detection used to miss,
+        // so weave collapsed the whole object into one conflict. It should scope
+        // conflicts to the changed keys and leave untouched keys clean, exactly
+        // like a bare `{ ... }` object.
+        let base =
+            "export const flags = configure({\n  a: 1,\n  b: 2,\n  c: 3,\n  d: 4,\n  e: 5,\n});\n";
+        let ours =
+            "export const flags = configure({\n  a: 10,\n  b: 2,\n  c: 3,\n  d: 4,\n  e: 50,\n});\n";
+        let theirs =
+            "export const flags = configure({\n  a: 11,\n  b: 2,\n  c: 3,\n  d: 4,\n  e: 51,\n});\n";
+        let result = entity_merge(base, ours, theirs, "test.ts");
+
+        // Two scoped conflicts (a and e), not one object-wide conflict.
+        let hunks = result.content.matches("<<<<<<<").count();
+        assert_eq!(
+            hunks, 2,
+            "expected per-key conflicts on `a` and `e`, got {hunks}:\n{}",
+            result.content
+        );
+        // Untouched keys stay outside any conflict marker.
+        for key in ["  b: 2,", "  c: 3,", "  d: 4,"] {
+            assert!(
+                result.content.contains(key),
+                "untouched key {key:?} should survive cleanly:\n{}",
+                result.content
+            );
+        }
     }
 
     #[test]
