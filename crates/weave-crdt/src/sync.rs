@@ -108,7 +108,9 @@ pub fn sync_from_files(
                         state
                             .doc
                             .put(&entity_obj, "conflict_ours", crdt_content.as_str())?;
-                        state.doc.put(&entity_obj, "conflict_theirs", file_content)?;
+                        state
+                            .doc
+                            .put(&entity_obj, "conflict_theirs", file_content)?;
                     }
                 }
             }
