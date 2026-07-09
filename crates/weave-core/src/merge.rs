@@ -3466,7 +3466,9 @@ fn extract_container_wrapper(content: &str) -> Option<(&str, &str)> {
             .sum::<usize>();
         let header = &content[..header_byte_end.min(content.len())];
 
-        let footer_start = lines.iter().rposition(|l| is_container_close_line(l.trim()))?;
+        let footer_start = lines
+            .iter()
+            .rposition(|l| is_container_close_line(l.trim()))?;
 
         let footer_byte_start: usize = lines[..footer_start].iter().map(|l| l.len() + 1).sum();
         let footer = &content[footer_byte_start.min(content.len())..];
@@ -3499,7 +3501,9 @@ fn extract_member_chunks(content: &str) -> Option<Vec<MemberChunk>> {
         // Python: body extends to end of content
         lines.len()
     } else {
-        lines.iter().rposition(|l| is_container_close_line(l.trim()))?
+        lines
+            .iter()
+            .rposition(|l| is_container_close_line(l.trim()))?
     };
 
     if body_start >= body_end {
