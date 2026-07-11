@@ -2224,9 +2224,9 @@ dependencies = [
 
 [[package]]
 name = "sem-core"
-version = "0.13.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "504ea57d3e4d7ae1832ba02e1491d116e895e58117fc620b5186e9a87c953193"
+checksum = "4ee2c5f0a4aa2cc20055606ffb129fc3a2772433e73035223fb755a2436eeb1f"
 dependencies = [
  "git2",
  "rayon",
