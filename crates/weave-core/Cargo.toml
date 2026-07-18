@@ -11,7 +11,7 @@ categories = ["development-tools", "algorithms"]
 readme = "../../README.md"
 
 [dependencies]
-sem-core = "0.14.1"
+sem-core = "0.18.0"
 diffy = "0.5"
 thiserror = "2"
 tempfile = "3"
