@@ -2224,9 +2224,9 @@ dependencies = [
 
 [[package]]
 name = "sem-core"
-version = "0.14.1"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ee2c5f0a4aa2cc20055606ffb129fc3a2772433e73035223fb755a2436eeb1f"
+checksum = "d31ee407f219cc790a2293183dddb0e6b1064fc0081111b6915a1385c39425e2"
 dependencies = [
  "git2",
  "rayon",
@@ -2248,6 +2248,7 @@ dependencies = [
  "tree-sitter-elixir",
  "tree-sitter-elm",
  "tree-sitter-embedded-template",
+ "tree-sitter-fish",
  "tree-sitter-fortran",
  "tree-sitter-go",
  "tree-sitter-haskell",
@@ -2256,6 +2257,7 @@ dependencies = [
  "tree-sitter-java",
  "tree-sitter-javascript",
  "tree-sitter-kotlin-ng",
+ "tree-sitter-lua",
  "tree-sitter-nix",
  "tree-sitter-ocaml",
  "tree-sitter-php",
@@ -2989,6 +2991,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-fish"
+version = "3.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "014e3b299f251e9c2e372e3b5e1b0323ef21196e9aa2e90a5bc1f6130cbe8b18"
+dependencies = [
+ "cc",
+ "tree-sitter",
+]
+
+[[package]]
 name = "tree-sitter-fortran"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3074,6 +3086,16 @@ name = "tree-sitter-language"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+
+[[package]]
+name = "tree-sitter-lua"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8daaf5f4235188a58603c39760d5fa5d4b920d36a299c934adddae757f32a10c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
 
 [[package]]
 name = "tree-sitter-nix"
