@@ -190,7 +190,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Publish weave-core
-        run: cargo publish -p weave-core --no-verify || echo "weave-core already published, skipping"
+        run: |
+          cargo publish -p weave-core --no-verify 2>&1 | tee pub.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            if grep -qi "already exists\|already uploaded" pub.log; then
+              echo "weave-core already on crates.io, continuing"
+            else
+              echo "::error::cargo publish failed for weave-core"; exit $status
+            fi
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -198,7 +207,16 @@ jobs:
         run: sleep 30
 
       - name: Publish weave-crdt
-        run: cargo publish -p weave-crdt --no-verify || echo "weave-crdt already published, skipping"
+        run: |
+          cargo publish -p weave-crdt --no-verify 2>&1 | tee pub.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            if grep -qi "already exists\|already uploaded" pub.log; then
+              echo "weave-crdt already on crates.io, continuing"
+            else
+              echo "::error::cargo publish failed for weave-crdt"; exit $status
+            fi
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -206,16 +224,43 @@ jobs:
         run: sleep 30
 
       - name: Publish weave-cli
-        run: cargo publish -p weave-cli --no-verify || echo "weave-cli already published, skipping"
+        run: |
+          cargo publish -p weave-cli --no-verify 2>&1 | tee pub.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            if grep -qi "already exists\|already uploaded" pub.log; then
+              echo "weave-cli already on crates.io, continuing"
+            else
+              echo "::error::cargo publish failed for weave-cli"; exit $status
+            fi
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish weave-driver
-        run: cargo publish -p weave-driver --no-verify || echo "weave-driver already published, skipping"
+        run: |
+          cargo publish -p weave-driver --no-verify 2>&1 | tee pub.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            if grep -qi "already exists\|already uploaded" pub.log; then
+              echo "weave-driver already on crates.io, continuing"
+            else
+              echo "::error::cargo publish failed for weave-driver"; exit $status
+            fi
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish weave-mcp
-        run: cargo publish -p weave-mcp --no-verify || echo "weave-mcp already published, skipping"
+        run: |
+          cargo publish -p weave-mcp --no-verify 2>&1 | tee pub.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            if grep -qi "already exists\|already uploaded" pub.log; then
+              echo "weave-mcp already on crates.io, continuing"
+            else
+              echo "::error::cargo publish failed for weave-mcp"; exit $status
+            fi
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
