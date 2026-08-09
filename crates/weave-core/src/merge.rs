@@ -1398,7 +1398,6 @@ fn merge_interstitials(
         let base_content = base_map.get(key).copied().unwrap_or("");
         let ours_content = ours_map.get(key).copied().unwrap_or("");
         let theirs_content = theirs_map.get(key).copied().unwrap_or("");
-
         // If all same, no merge needed
         if ours_content == theirs_content {
             merged.insert(key.to_string(), ours_content.to_string());
@@ -1629,12 +1628,14 @@ fn parse_single_line_specifiers(trimmed: &str) -> Vec<String> {
     if trimmed.starts_with("import ") {
         if let Some(brace_start) = trimmed.find('{') {
             if let Some(brace_end) = trimmed.find('}') {
-                let inner = &trimmed[brace_start + 1..brace_end];
-                return inner
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
+                if brace_start < brace_end {
+                    let inner = &trimmed[brace_start + 1..brace_end];
+                    return inner
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
             }
         }
     }
@@ -1764,8 +1765,8 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
         .collect();
 
     // Build import groups from ours (import lines only)
-    let mut groups: Vec<Vec<&str>> = Vec::new();
-    let mut current_group: Vec<&str> = Vec::new();
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    let mut current_group: Vec<String> = Vec::new();
 
     for line in ours.lines() {
         if line.trim().is_empty() {
@@ -1777,7 +1778,7 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
             if theirs_deleted.contains(line) {
                 continue;
             }
-            current_group.push(line);
+            current_group.push(line.to_string());
         }
     }
     if !current_group.is_empty() {
@@ -1791,19 +1792,34 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
         } else {
             groups.len() - 1
         };
+        let mut matching_line = None;
         for (i, group) in groups.iter().enumerate() {
-            if group
+            if let Some(pos) = group
                 .iter()
-                .any(|l| is_import_line(l) && import_source_prefix(l) == prefix)
+                .position(|l| is_import_line(l) && import_source_prefix(l) == prefix)
             {
                 best_group = i;
+                matching_line = Some(pos);
                 break;
             }
         }
+        if let Some(pos) = matching_line {
+            let base_specs: Vec<String> = base_imports
+                .iter()
+                .filter(|i| i.source == prefix)
+                .flat_map(|i| i.specifiers.iter().cloned())
+                .collect();
+            if let Some(merged) =
+                merge_same_source_named_import_line(&groups[best_group][pos], add, &base_specs)
+            {
+                groups[best_group][pos] = merged;
+                continue;
+            }
+        }
         if best_group < groups.len() {
-            groups[best_group].push(add);
+            groups[best_group].push(add.to_string());
         } else {
-            groups.push(vec![add]);
+            groups.push(vec![add.to_string()]);
         }
     }
 
@@ -1812,12 +1828,12 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
         group.sort_unstable();
     }
 
-    let mut import_lines: Vec<&str> = Vec::new();
+    let mut import_lines: Vec<String> = Vec::new();
     for (i, group) in groups.iter().enumerate() {
         if i > 0 {
-            import_lines.push("");
+            import_lines.push(String::new());
         }
-        import_lines.extend(group);
+        import_lines.extend(group.iter().cloned());
     }
 
     let import_block = import_lines.join("\n");
@@ -2136,35 +2152,16 @@ fn merge_imports_with_multiline(
     // Non-import lines: use diffy 3-way merge so adds/deletes/edits on
     // either side are handled correctly (fixes #60).
     let extract_non_imports = |content: &str| -> String {
-        content
-            .lines()
-            .filter(|l| !l.trim().is_empty() && !is_import_line(l))
-            .filter(|l| {
-                let t = l.trim();
-                // Exclude multi-line import continuation lines:
-                // - specifier lines ending with comma (but not assignments)
-                // - bare closing parens/braces
-                // - closing lines like `} from "./foo"` or `) from "bar"`
-                if (t.ends_with(',') && !t.contains('=')) || t == ")" || t == "}" {
-                    return false;
-                }
-                // Closing line of JS/TS multi-line import: `} from "..."` or `} from '...'`
-                if t.starts_with('}') && t.contains("from ") {
-                    return false;
-                }
-                // Closing line of Python multi-line import: `) ` at end or just `)`
-                if t.starts_with(')') {
-                    return false;
-                }
-                true
-            })
+        let (_, non_import_lines) = parse_import_statements(content);
+        non_import_lines
+            .into_iter()
+            .filter(|l| !l.trim().is_empty())
             .collect::<Vec<_>>()
             .join("\n")
     };
     let base_ni = extract_non_imports(_base_raw);
     let ours_ni = extract_non_imports(ours_raw);
     let theirs_ni = extract_non_imports(_theirs_raw);
-
     if !base_ni.is_empty() || !ours_ni.is_empty() || !theirs_ni.is_empty() {
         let merged_ni = match diffy::merge(&base_ni, &ours_ni, &theirs_ni) {
             Ok(m) => m,
@@ -2183,6 +2180,79 @@ fn merge_imports_with_multiline(
         result.push('\n');
     }
     result
+}
+
+fn named_import_parts(line: &str) -> Option<(&str, &str)> {
+    let trimmed_start = line.len() - line.trim_start().len();
+    let trimmed = &line[trimmed_start..];
+
+    if let Some(open) = trimmed.find('{') {
+        let close = trimmed.rfind('}')?;
+        let from = trimmed.find(" from ")?;
+        if open < close && close < from {
+            return Some((
+                &line[..trimmed_start + open + 1],
+                &line[trimmed_start + close..],
+            ));
+        }
+    }
+
+    if trimmed.starts_with("from ") {
+        if let Some(pos) = trimmed.find(" import ") {
+            let prefix_end = trimmed_start + pos + " import ".len();
+            return Some((&line[..prefix_end], ""));
+        }
+    }
+
+    None
+}
+
+fn merge_same_source_named_import_line(
+    ours: &str,
+    theirs: &str,
+    base_specs: &[String],
+) -> Option<String> {
+    let ours_specs = parse_single_line_specifiers(ours.trim());
+    let theirs_specs = parse_single_line_specifiers(theirs.trim());
+    if ours_specs.is_empty() || theirs_specs.is_empty() {
+        return None;
+    }
+
+    let (ours_prefix, ours_suffix) = named_import_parts(ours)?;
+    let (theirs_prefix, theirs_suffix) = named_import_parts(theirs)?;
+    if ours_prefix.trim() != theirs_prefix.trim() || ours_suffix.trim() != theirs_suffix.trim() {
+        return None;
+    }
+
+    let base_set: HashSet<&str> = base_specs.iter().map(String::as_str).collect();
+    let theirs_set: HashSet<&str> = theirs_specs.iter().map(String::as_str).collect();
+    let theirs_removed: HashSet<&str> = base_set.difference(&theirs_set).copied().collect();
+
+    let mut final_specs: Vec<String> = ours_specs
+        .into_iter()
+        .filter(|s| !theirs_removed.contains(s.as_str()))
+        .collect();
+
+    for spec in theirs_specs {
+        if !base_set.contains(spec.as_str()) && !final_specs.contains(&spec) {
+            final_specs.push(spec);
+        }
+    }
+
+    if final_specs.is_empty() {
+        return None;
+    }
+
+    if ours_suffix.is_empty() {
+        Some(format!("{}{}", ours_prefix, final_specs.join(", ")))
+    } else {
+        Some(format!(
+            "{} {} {}",
+            ours_prefix,
+            final_specs.join(", "),
+            ours_suffix.trim_start()
+        ))
+    }
 }
 
 /// Extract the source/module prefix from an import line for group matching.
@@ -4089,6 +4159,14 @@ export function agentB() {
         // Not imports
         assert!(!is_import_line("let x = 1;"));
         assert!(!is_import_line("function foo() {}"));
+    }
+
+    #[test]
+    fn test_named_import_parsing_rejects_reversed_braces() {
+        let malformed = "import } foo { from 'bar';";
+        assert!(parse_single_line_specifiers(malformed).is_empty());
+        assert!(named_import_parts(malformed).is_none());
+        assert!(named_import_parts("import { foo } from 'bar';").is_some());
     }
 
     #[test]

@@ -2887,10 +2887,10 @@ fn json_both_add_keys_in_different_sections() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. TS: both modify the same import line differently (conflict expected)
+// 7. TS: both add different specifiers to the same single-line import (auto-merge)
 // ---------------------------------------------------------------------------
 #[test]
-fn ts_both_modify_same_import_conflict() {
+fn ts_both_modify_same_import_merges_named_specifiers() {
     let base = r#"import { foo } from './utils';
 
 export function run() {
@@ -2910,14 +2910,120 @@ export function run() {
 }
 "#;
     let result = entity_merge(base, ours, theirs, "run.ts");
-    // Both modify the same import line — the commutative import merger should
-    // handle this (both add to same import source). The key check is that
-    // neither bar nor baz is silently dropped.
-    let has_bar = result.content.contains("bar");
-    let has_baz = result.content.contains("baz");
     assert!(
-        has_bar && has_baz,
-        "Both bar and baz must be present (merged or conflicted).\nContent:\n{}",
+        result.is_clean(),
+        "same-source import specifier additions should auto-resolve.\nConflicts: {:?}\nContent:\n{}",
+        result.conflicts,
+        result.content
+    );
+    assert_eq!(
+        result.content.matches("from './utils'").count(),
+        1,
+        "same-source import must not be duplicated.\nContent:\n{}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains("import { foo, bar, baz } from './utils';"),
+        "Both bar and baz must be merged into one import.\nContent:\n{}",
+        result.content
+    );
+}
+
+#[test]
+fn ts_multiline_imports_without_trailing_commas_do_not_leak_specifiers() {
+    fn has_orphan_import_member(content: &str) -> bool {
+        let mut depth = 0_i32;
+        for line in content.lines() {
+            let t = line.trim();
+            let indented = line.starts_with(' ') || line.starts_with('\t');
+            let specifier_like = indented
+                && (t.ends_with(',') || t.starts_with("type "))
+                && !t.contains('=')
+                && !t.contains('(');
+            if depth == 0 && specifier_like {
+                return true;
+            }
+            depth += line.matches('{').count() as i32;
+            depth -= line.matches('}').count() as i32;
+            if depth < 0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    let base = r#"import {
+    type A
+} from "./file1"
+import {
+    type B
+} from "./file2"
+import {
+    type C
+} from "./file3"
+
+export function main() { return 1; }
+"#;
+    let ours = r#"import {
+    type A,
+    type A2
+} from "./file1"
+import {
+    type B
+} from "./file2"
+import {
+    type C
+} from "./file3"
+
+export function main() { return 1; }
+"#;
+    let theirs = r#"import {
+    type A
+} from "./file1"
+import {
+    type B
+} from "./file2"
+import {
+    type C,
+    type C2
+} from "./file3"
+
+export function main() { return 1; }
+"#;
+
+    let result = entity_merge(base, ours, theirs, "imports.ts");
+    assert!(
+        result.is_clean(),
+        "multi-line import additions should auto-resolve.\nConflicts: {:?}\nContent:\n{}",
+        result.conflicts,
+        result.content
+    );
+    assert!(
+        !result.content.contains("<<<<<<<"),
+        "import merge must not introduce conflict markers.\nContent:\n{}",
+        result.content
+    );
+    assert!(
+        !has_orphan_import_member(&result.content),
+        "import specifier/closer leaked outside an import block.\nContent:\n{}",
+        result.content
+    );
+    for source in ["./file1", "./file2", "./file3"] {
+        assert_eq!(
+            result
+                .content
+                .matches(&format!("from \"{source}\""))
+                .count(),
+            1,
+            "source {source} should appear exactly once.\nContent:\n{}",
+            result.content
+        );
+    }
+    assert!(
+        result.content.contains("type A2,") && result.content.contains("type C2,"),
+        "both sides' added specifiers must be present.\nContent:\n{}",
         result.content
     );
 }
