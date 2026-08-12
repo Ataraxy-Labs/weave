@@ -454,7 +454,7 @@ def main():
 }
 
 // =============================================================================
-// Inner entity merge (LastMerge: unordered class members)
+// Inner entity merge (unordered class members)
 // =============================================================================
 
 #[test]
@@ -1639,8 +1639,17 @@ fn java_large_class_one_conflict() {
 }
 
 #[test]
-fn ts_class_scoped_conflict() {
-    // TS version: same member scoping
+fn ts_class_member_edits_inside_one_method_compose() {
+    // Both sides edit `getUser` and nothing else. This used to be a conflict:
+    // the merge scoped down to the member and stopped there, so two edits
+    // landing in the same method body were handed back as a box.
+    //
+    // They now compose, and the expectation below says so. Ours renames the
+    // call `find` -> `findOne`; theirs adds a cache lookup and rewrites the
+    // return to `cached || this.db.find(id)`. The two edits touch the same
+    // return statement but different parts of it, and the composition —
+    // `return cached || this.db.findOne(id);` — is the only program either
+    // side could have meant. Neither side's edit is dropped.
     let base = r#"export class UserService {
     getUser(id: string): User {
         return this.db.find(id);
@@ -1682,21 +1691,39 @@ fn ts_class_scoped_conflict() {
     }
 }"#;
     let result = entity_merge(base, ours, theirs, "UserService.ts");
-    eprintln!("--- ts class scoped conflict ---");
+    eprintln!("--- ts class member edits compose ---");
     eprintln!("content:\n{}", result.content);
 
-    assert!(!result.is_clean(), "Should conflict on getUser");
+    assert!(result.is_clean(), "getUser's two edits should compose");
+    assert!(
+        result
+            .content
+            .contains("const cached = this.cache.get(id);"),
+        "theirs' cache lookup should survive"
+    );
+    assert!(
+        result
+            .content
+            .contains("return cached || this.db.findOne(id);"),
+        "both edits should be present in the merged return statement"
+    );
+    // The methods nobody touched come through untouched.
     for method in &["createUser", "deleteUser"] {
         assert!(
-            !is_inside_conflict_markers(&result.content, method),
-            "{} should NOT be inside conflict markers",
+            result.content.contains(method),
+            "{} should still be in the output",
             method
         );
     }
 }
 
 #[test]
-fn python_class_scoped_conflict() {
+fn python_class_member_edits_inside_one_method_compose() {
+    // The Python reading of the case above, and a simpler one: theirs only
+    // ADDS lines to `read` (the cache lookup) and leaves the final return
+    // alone, while ours edits that return `find` -> `find_one`. The two edits
+    // are disjoint statements in one body, so the merge composes them instead
+    // of conflicting on the method. It used to conflict.
     let base = r#"class Service:
     def create(self, data):
         return self.db.insert(data)
@@ -1731,14 +1758,23 @@ fn python_class_scoped_conflict() {
         self.db.remove(id)
 "#;
     let result = entity_merge(base, ours, theirs, "service.py");
-    eprintln!("--- python class scoped conflict ---");
+    eprintln!("--- python class member edits compose ---");
     eprintln!("content:\n{}", result.content);
 
-    assert!(!result.is_clean(), "Should conflict on read");
+    assert!(result.is_clean(), "read's two edits should compose");
+    assert!(
+        result.content.contains("cached = self.cache.get(id)"),
+        "theirs' cache lookup should survive"
+    );
+    assert!(
+        result.content.contains("return self.db.find_one(id)"),
+        "ours' rename should survive"
+    );
+    // The methods nobody touched come through untouched.
     for method in &["def create", "def delete"] {
         assert!(
-            !is_inside_conflict_markers(&result.content, method),
-            "{} should NOT be inside conflict markers",
+            result.content.contains(method),
+            "{} should still be in the output",
             method
         );
     }

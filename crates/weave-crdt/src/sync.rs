@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use automerge::{transaction::Transactable, ObjType, ReadDoc, Value};
+use automerge::{transaction::Transactable, ObjType, ReadDoc};
 use sem_core::parser::registry::ParserRegistry;
 use weave_core::region::{extract_regions, FileRegion};
 
-use crate::content::get_entity_content;
+use crate::anchor::{ordered_entity_ids, Observation};
+use crate::content::{entity_value, get_entity_content, read_writes};
 use crate::error::Result;
+use crate::join::EntityValue;
 use crate::merge::CrdtMergeResult;
-use crate::ops::{get_str, upsert_entity};
+use crate::ops::{get_str, read_version_vector, upsert_entity};
 use crate::state::EntityStateDoc;
 
 /// The decision for reconciling one entity's file content against the CRDT
@@ -43,12 +45,69 @@ pub(crate) fn reconcile_entity_content(base: &str, crdt: &str, file: &str) -> Co
     }
 }
 
-/// Sync entities from working tree files into CRDT state.
+/// Replace an entity's register with the given writes, made mutually
+/// concurrent, over the given ancestor.
 ///
-/// Extracts entities from each file using sem-core's parser registry,
-/// then upserts them into the automerge document. Reconciles each entity's
-/// file content against the CRDT (see [`reconcile_entity_content`]) so a local
-/// edit is never clobbered, and stores file ordering and interstitial content.
+/// This is how a *local* observation (the working tree, or a test) is injected
+/// into the register: the working tree is not an agent with a causal history, so
+/// its content has to be stated as a write that stands beside the CRDT's rather
+/// than after it. Nothing here is on the join path — the join reads the register
+/// this function writes.
+pub(crate) fn seed_concurrent_writes(
+    state: &mut EntityStateDoc,
+    entity_id: &str,
+    base: &str,
+    writes: &[(&str, &str)],
+) -> Result<()> {
+    let entities = state.entities_id()?;
+    let Some((_, entity_obj)) = state.doc.get(&entities, entity_id)? else {
+        return Err(crate::error::WeaveError::EntityNotFound(
+            entity_id.to_string(),
+        ));
+    };
+    // `base_content` stays a plain register here. It is a smaller instance of
+    // the same shape as `writes` — an ancestor two doors both overwrite — and
+    // moving it off LWW is out of scope for the register fix below; flagged so
+    // the omission is a stated decision, not an oversight.
+    state.doc.put(&entity_obj, "base_content", base)?;
+
+    // The clock each seeding agent has already reached, read once before the
+    // map is touched: a `working-tree` re-sync must supersede its OWN previous
+    // entry ({agent: n} -> {agent: n+1}) while staying concurrent with every
+    // other agent's key, whose counter is never written here.
+    let mut seen = read_version_vector(&state.doc, &entity_obj);
+    for w in read_writes(&state.doc, &entity_obj).values() {
+        seen.merge(&w.vv);
+    }
+
+    // Reuse the existing `writes` object; do not replace it. Replacing the
+    // container with `put_object` is a last-writer-wins overwrite one level up
+    // from the per-key union — two replicas that each reseed drop the other's
+    // entries, which is the one thing a CRDT may not do (state.rs). This is the
+    // same reuse the content door performs (content.rs).
+    let writes_obj = match state.doc.get(&entity_obj, "writes")? {
+        Some((_, id)) => id,
+        None => state.doc.put_object(&entity_obj, "writes", ObjType::Map)?,
+    };
+    for (agent, content) in writes {
+        // One agent id is one causal thread; replacing that agent's own entry
+        // is the agent superseding itself, not a lost update.
+        let w = state.doc.put_object(&writes_obj, *agent, ObjType::Map)?;
+        state.doc.put(&w, "content", *content)?;
+        state.doc.put(&w, "deleted", false)?;
+        state.doc.put(&w, "hash", "")?;
+        let vv = state.doc.put_object(&w, "vv", ObjType::Map)?;
+        // Only this agent's own counter, incremented past whatever it had
+        // reached: dominates this agent's previous write, concurrent with all
+        // others. Multiple agents seeded in one call are therefore mutually
+        // concurrent, which is what a seeded conflict needs.
+        let next = seen.get(agent) + 1;
+        state.doc.put(&vv, *agent, next as i64)?;
+    }
+    Ok(())
+}
+
+/// Sync entities from working tree files into CRDT state.
 pub fn sync_from_files(
     state: &mut EntityStateDoc,
     repo_root: &Path,
@@ -59,19 +118,24 @@ pub fn sync_from_files(
 
     for file_path in file_paths {
         let full_path = repo_root.join(file_path);
+        // A file named for sync that is not on disk is a deletion — skip it.
+        // Any OTHER read failure (a permission error, a non-UTF-8 file, a
+        // directory in its place) is not a deletion and must not be silently
+        // swallowed: it is propagated so the caller learns the sync was partial
+        // rather than reading a hole as "nothing changed" (weave-ka7).
         let content = match std::fs::read_to_string(&full_path) {
             Ok(c) => c,
-            Err(_) => continue, // File may not exist (deleted)
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
         };
 
-        let plugin = match registry.get_plugin(file_path) {
-            Some(p) => p,
-            None => continue, // No parser for this file type
+        // No parser for this file type.
+        let Some(plugin) = registry.get_plugin(file_path) else {
+            continue;
         };
 
         let entities = plugin.extract_entities(&content, file_path);
 
-        // Upsert entities and store content
         for entity in &entities {
             upsert_entity(
                 state,
@@ -82,35 +146,70 @@ pub fn sync_from_files(
                 &entity.content_hash,
             )?;
 
+            // The parser key resolves to the entity it names, which after a
+            // rename announced on the op channel is the entity that already
+            // holds the history rather than a fresh one. Resolved once, here,
+            // and used for every write below — a second lookup by the raw key
+            // is how the old row and the new one came to coexist.
+            let eid = crate::identity::entity_id_for(state, &entity.id);
+
             // Reconcile the file's content against the CRDT with a 3-way rule so
             // a local (unmaterialized) entity edit is never silently clobbered by
             // a re-sync. `base` is the content at the last sync (the common
-            // ancestor), the CRDT `content` is the possibly-locally-edited side,
-            // and `entity.content` is the file's current content.
+            // ancestor), the CRDT's joined value is the possibly-locally-edited
+            // side, and `entity.content` is the file's current content.
             let entities_map = state.entities_id()?;
-            if let Ok(Some((_, entity_obj))) = state.doc.get(&entities_map, entity.id.as_str()) {
+            if let Ok(Some((_, entity_obj))) = state.doc.get(&entities_map, eid.as_str()) {
                 let base = get_str(&state.doc, &entity_obj, "base_content").unwrap_or_default();
-                let crdt_content = get_str(&state.doc, &entity_obj, "content").unwrap_or_default();
-                let file_content = entity.content.as_str();
+                let crdt_content = entity_value(&state.doc, &entity_obj).materialize();
+                let file_content = entity.content.clone();
 
-                match reconcile_entity_content(&base, &crdt_content, file_content) {
-                    ContentReconcile::Seed | ContentReconcile::FastForward => {
-                        state.doc.put(&entity_obj, "content", file_content)?;
-                        state.doc.put(&entity_obj, "base_content", file_content)?;
+                match reconcile_entity_content(&base, &crdt_content, &file_content) {
+                    ContentReconcile::Seed => {
+                        // First sight: the file IS the ancestor.
+                        seed_concurrent_writes(
+                            state,
+                            &eid,
+                            &file_content,
+                            &[("working-tree", &file_content)],
+                        )?;
+                    }
+                    ContentReconcile::FastForward => {
+                        // The working tree moved with no local edit. Record it
+                        // as an ordinary write by the `working-tree` thread over
+                        // the SAME ancestor — do NOT reset the ancestor to the
+                        // new file. A concurrent agent edit on another replica
+                        // shares that ancestor; advancing base to the new file
+                        // here makes the working-tree side of the eventual
+                        // three-way merge equal base and be dropped — silent
+                        // loss (weave-xxs). base advances lawfully via
+                        // AdvanceBase once a sync observes file == crdt. The
+                        // cost is that two external edits with no stabilising
+                        // sync between them surface as a conflict rather than a
+                        // second fast-forward — which weave prefers to a
+                        // vanished write (a conflict is recoverable; a dropped
+                        // write is not).
+                        seed_concurrent_writes(
+                            state,
+                            &eid,
+                            &base,
+                            &[("working-tree", &file_content)],
+                        )?;
                     }
                     ContentReconcile::AdvanceBase => {
-                        state.doc.put(&entity_obj, "base_content", file_content)?;
+                        state
+                            .doc
+                            .put(&entity_obj, "base_content", file_content.as_str())?;
                     }
                     // File unchanged since last sync: keep the local CRDT edit.
                     ContentReconcile::PreserveLocal => {}
                     ContentReconcile::Conflict => {
-                        state.doc.put(&entity_obj, "merge_state", "conflict")?;
-                        state
-                            .doc
-                            .put(&entity_obj, "conflict_ours", crdt_content.as_str())?;
-                        state
-                            .doc
-                            .put(&entity_obj, "conflict_theirs", file_content)?;
+                        seed_concurrent_writes(
+                            state,
+                            &eid,
+                            &base,
+                            &[("crdt", &crdt_content), ("working-tree", &file_content)],
+                        )?;
                     }
                 }
             }
@@ -118,14 +217,18 @@ pub fn sync_from_files(
             count += 1;
         }
 
-        // Store file entity ordering
-        let entity_order = state.file_entity_order_id()?;
-        let order_list = state
-            .doc
-            .put_object(&entity_order, file_path.as_str(), ObjType::List)?;
-        for (i, entity) in entities.iter().enumerate() {
-            state.doc.insert(&order_list, i, entity.id.as_str())?;
-        }
+        // Placement, through the one anchor rule. A sync is the door that saw
+        // the whole file, so it is the door with positional evidence — and
+        // `place` is monotone, so it settles the evidence-free anchors the
+        // other doors wrote rather than overwriting a settled answer. `sync`
+        // used to carry its own second rule (`assign_anchors`) that overwrote
+        // whatever `ops` had decided, letting two placement rules disagree
+        // about the same anchor depending on which door ran last.
+        let ids: Vec<String> = entities
+            .iter()
+            .map(|e| crate::identity::entity_id_for(state, &e.id))
+            .collect();
+        crate::anchor::place(state, file_path, Observation::File(&ids))?;
 
         // Extract and store interstitial regions
         let regions = extract_regions(&content, entities.as_slice());
@@ -143,15 +246,52 @@ pub fn sync_from_files(
     Ok(count)
 }
 
+/// Join every entity of a file and report what the join produced.
+///
+/// This *is* the merge now. The previous implementation counted version-vector
+/// entries, never called `entity_merge`, and took a `&ParserRegistry` it did not
+/// use — it detected that a concurrent write had happened without ever
+/// producing a joined result, which is not a join.
+pub fn merge_file_entities(state: &EntityStateDoc, file_path: &str) -> Result<CrdtMergeResult> {
+    let ids = ordered_entity_ids(state, file_path);
+    if ids.is_empty() {
+        return Ok(CrdtMergeResult {
+            file_path: file_path.to_string(),
+            entities_auto_merged: 0,
+            entities_conflicted: 0,
+            merged_content: None,
+        });
+    }
+    let entities = state.entities_id()?;
+    let mut auto_merged = 0;
+    let mut conflicted = 0;
+    for id in &ids {
+        let Some((_, obj)) = state.doc.get(&entities, id.as_str())? else {
+            continue;
+        };
+        match entity_value(&state.doc, &obj) {
+            EntityValue::Conflict { .. } => conflicted += 1,
+            EntityValue::Content(_) => auto_merged += 1,
+            EntityValue::Absent | EntityValue::Tombstone => {}
+        }
+    }
+
+    Ok(CrdtMergeResult {
+        file_path: file_path.to_string(),
+        entities_auto_merged: auto_merged,
+        entities_conflicted: conflicted,
+        merged_content: Some(reconstruct_file_from_crdt(state, file_path)?),
+    })
+}
+
 /// Extract entity IDs from a single file (for lookups).
 pub fn extract_entity_ids(
     content: &str,
     file_path: &str,
     registry: &ParserRegistry,
 ) -> Vec<(String, String, String)> {
-    let plugin = match registry.get_plugin(file_path) {
-        Some(p) => p,
-        None => return Vec::new(),
+    let Some(plugin) = registry.get_plugin(file_path) else {
+        return Vec::new();
     };
 
     plugin
@@ -175,100 +315,10 @@ pub fn resolve_entity_id(
         .map(|(id, _, _)| id)
 }
 
-/// Merge all entities in a file using CRDT version vectors.
-///
-/// For each entity:
-/// 1. If only one agent wrote it, auto-accept
-/// 2. If version vectors show one dominates, take dominant
-/// 3. If concurrent, try 3-way merge via weave-core
-/// 4. If merge conflicts, mark entity as conflicted
-pub fn merge_file_entities(
-    state: &mut EntityStateDoc,
-    file_path: &str,
-    _registry: &ParserRegistry,
-) -> Result<CrdtMergeResult> {
-    // Get all entities for this file
-    let entity_order = read_file_entity_order(state, file_path);
-    if entity_order.is_empty() {
-        return Ok(CrdtMergeResult {
-            file_path: file_path.to_string(),
-            entities_auto_merged: 0,
-            entities_conflicted: 0,
-            merged_content: None,
-        });
-    }
-
-    let mut auto_merged = 0;
-    let mut conflicted = 0;
-
-    for entity_id in &entity_order {
-        let content_status = match get_entity_content(state, entity_id) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        // Already in conflict or clean with no edits
-        if content_status.merge_state == "conflict" {
-            conflicted += 1;
-            continue;
-        }
-
-        let vv = &content_status.version_vector;
-
-        // Count how many agents have non-zero counters
-        let active_agents: Vec<&String> = vv
-            .counters()
-            .iter()
-            .filter(|(_, &c)| c > 0)
-            .map(|(a, _)| a)
-            .collect();
-
-        if active_agents.len() <= 1 {
-            // Single writer or no writes: auto-accept, no merge needed
-            auto_merged += 1;
-            continue;
-        }
-
-        // Multiple writers: need to check for conflicts via 3-way merge
-        let base = content_status.base_content.clone();
-        let current = content_status.content.clone();
-
-        // For now, the current content IS the merged state if no
-        // concurrent document exists. In a real multi-doc scenario,
-        // we'd compare two replicas. With Automerge, the CRDT layer
-        // handles concurrent writes at the field level, so if content
-        // was set by different agents, the last-writer-wins in Automerge.
-        // We use version vectors to detect this case and let the user
-        // know a merge happened.
-
-        if !base.is_empty() && base != current {
-            // Content diverged from base. Try entity-level merge.
-            // In a two-replica scenario: ours=local content, theirs=remote content.
-            // Since Automerge already resolved the field-level conflict (LWW),
-            // we compare base vs current to detect semantic changes.
-            auto_merged += 1;
-        } else {
-            auto_merged += 1;
-        }
-    }
-
-    // Reconstruct the merged file
-    let merged = reconstruct_file_from_crdt(state, file_path)?;
-
-    Ok(CrdtMergeResult {
-        file_path: file_path.to_string(),
-        entities_auto_merged: auto_merged,
-        entities_conflicted: conflicted,
-        merged_content: Some(merged),
-    })
-}
-
-/// Reconstruct a file from CRDT state: entity order + interstitials + content.
-///
-/// Reads file_entity_order for ordering, file_interstitials for non-entity
-/// content, and entity content (clean or conflict markers).
+/// Reconstruct a file from CRDT state: anchor order + interstitials + the
+/// joined value of every entity.
 pub fn reconstruct_file_from_crdt(state: &EntityStateDoc, file_path: &str) -> Result<String> {
-    let entity_order = read_file_entity_order(state, file_path);
+    let entity_order = ordered_entity_ids(state, file_path);
     let interstitials = read_file_interstitials(state, file_path);
 
     let mut output = String::new();
@@ -289,40 +339,13 @@ pub fn reconstruct_file_from_crdt(state: &EntityStateDoc, file_path: &str) -> Re
             }
         }
 
-        // Entity content
-        match get_entity_content(state, entity_id) {
-            Ok(status) => {
-                if status.merge_state == "conflict" {
-                    // Emit conflict markers
-                    output.push_str(&format!(
-                        "<<<<<<< {}\n",
-                        status.conflict_ours_agent.as_deref().unwrap_or("ours")
-                    ));
-                    if let Some(ref ours) = status.conflict_ours {
-                        output.push_str(ours);
-                        if !ours.ends_with('\n') {
-                            output.push('\n');
-                        }
-                    }
-                    output.push_str("=======\n");
-                    if let Some(ref theirs) = status.conflict_theirs {
-                        output.push_str(theirs);
-                        if !theirs.ends_with('\n') {
-                            output.push('\n');
-                        }
-                    }
-                    output.push_str(&format!(
-                        ">>>>>>> {}\n",
-                        status.conflict_theirs_agent.as_deref().unwrap_or("theirs")
-                    ));
-                } else {
-                    output.push_str(&status.content);
-                    if !status.content.is_empty() && !status.content.ends_with('\n') {
-                        output.push('\n');
-                    }
-                }
-            }
-            Err(_) => continue,
+        // An entity in the anchor order whose content cannot be read is not a
+        // blank line to skip past — dropping it silently reconstructs a file
+        // missing code. Propagate it (weave-ka7).
+        let status = get_entity_content(state, entity_id)?;
+        output.push_str(&status.content);
+        if !status.content.is_empty() && !status.content.ends_with('\n') {
+            output.push('\n');
         }
     }
 
@@ -335,49 +358,19 @@ pub fn reconstruct_file_from_crdt(state: &EntityStateDoc, file_path: &str) -> Re
     Ok(output)
 }
 
-/// Read the entity ordering for a file from the CRDT.
-fn read_file_entity_order(state: &EntityStateDoc, file_path: &str) -> Vec<String> {
-    let order_map = match state.file_entity_order_id() {
-        Ok(id) => id,
-        Err(_) => return Vec::new(),
-    };
-
-    let list_id = match state.doc.get(&order_map, file_path) {
-        Ok(Some((_, id))) => id,
-        _ => return Vec::new(),
-    };
-
-    let len = state.doc.length(&list_id);
-    let mut order = Vec::with_capacity(len);
-    for i in 0..len {
-        if let Ok(Some((Value::Scalar(v), _))) = state.doc.get(&list_id, i) {
-            if let automerge::ScalarValue::Str(s) = v.as_ref() {
-                order.push(s.to_string());
-            }
-        }
-    }
-    order
-}
-
 /// Read all interstitials for a file from the CRDT.
 fn read_file_interstitials(state: &EntityStateDoc, file_path: &str) -> HashMap<String, String> {
-    let inter_map = match state.file_interstitials_id() {
-        Ok(id) => id,
-        Err(_) => return HashMap::new(),
+    let Ok(inter_map) = state.file_interstitials_id() else {
+        return HashMap::new();
     };
 
     let prefix = format!("{}::", file_path);
-    let mut result = HashMap::new();
-
-    for key in state.doc.keys(&inter_map) {
-        if key.starts_with(&prefix) {
-            if let Some(val) = get_str(&state.doc, &inter_map, &key) {
-                result.insert(key, val);
-            }
-        }
-    }
-
-    result
+    state
+        .doc
+        .keys(&inter_map)
+        .filter(|key| key.starts_with(&prefix))
+        .filter_map(|key| get_str(&state.doc, &inter_map, &key).map(|val| (key, val)))
+        .collect()
 }
 
 #[cfg(test)]

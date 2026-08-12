@@ -20,8 +20,10 @@ updates:
       interval: weekly
     cooldown:
       default-days: 10
+  # The npm manifest is the root package.json (the wrapper that fetches the
+  # released binaries). It used to live under site/, which no longer exists.
   - package-ecosystem: npm
-    directory: site
+    directory: /
     schedule:
       interval: weekly
     cooldown:

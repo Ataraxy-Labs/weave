@@ -1,3 +1,5 @@
+mod error;
+mod findings;
 mod server;
 mod tools;
 

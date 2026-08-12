@@ -15,7 +15,8 @@ brew install weave
 weave setup
 ```
 
-Or build from source:
+Or build from source. Two binaries, both required — `weave` (the CLI) and
+`weave-driver` (the binary git itself invokes; `weave setup` needs it on PATH):
 ```
 git clone https://github.com/Ataraxy-Labs/weave
 cd weave && cargo install --path crates/weave-cli
@@ -44,6 +45,20 @@ Full benchmark suite: 11ms. Individual merges: 65-374us.
 4. Per-entity resolution: only-ours, only-theirs, both-identical, or true conflict
 5. Inner entity merge: when both modify the same class, decompose into methods and merge by name
 6. Reconstruct file preserving ours-side ordering
+7. A real conflict leaves a marker box with one `refused_by: <guard> · collision: <line>` line
+   naming why, plus a trailing comment naming `weave explain` and `weave check`
+
+## Resolving a conflict
+
+- `weave explain <file>` — per conflicted entity: which guard refused, and the hunks BOTH
+  sides wrote in. Reads the three merge stages out of git's index.
+- `weave check` — with no arguments, verifies the WORKING TREE (the file as edited) against
+  the three merge stages: leftover markers, unanimous-line loss, duplicated lines/definitions,
+  dangling references. One verdict sentence per file, never a bare empty result. Exit 0 clean,
+  exit 1 findings. With `--base/--ours/--theirs` it instead checks two revisions for cross-file
+  binding breakage (a rename in one file orphaning a caller in another) and emits JSON findings.
+- `weave patch extract/apply` — typed entity ops: extract the ops that turn one file into
+  another, apply them three-way to a target that may have drifted from the base.
 
 ## Key Features
 
@@ -53,7 +68,7 @@ Full benchmark suite: 11ms. Individual merges: 65-374us.
 - Unordered class members (methods added at same position resolve cleanly)
 - Inner entity merge (both modify same class, methods merged independently)
 - Comment/decorator bundling (decorators move with their function)
-- ConGra conflict taxonomy (Text/Syntax/Functional) with resolution hints
+- Conflict classification (Text/Syntax/Functional) with a stated refusal reason, not advice
 - Multi-line signature detection (paren depth tracking)
 - Cosmetic vs structural change detection
 - Post-merge semantic + parse validation
@@ -62,31 +77,36 @@ Full benchmark suite: 11ms. Individual merges: 65-374us.
 
 ## Architecture
 
-Cargo workspace with 5 crates:
+Cargo workspace with 6 crates:
 - weave-core: merge algorithm, entity extraction via sem-core, diffy fallback
 - weave-driver: git merge driver binary (called with %O %A %B %L %P)
-- weave-cli: setup, preview, status, bench, summary commands
+- weave-cli: setup, explain, check, patch, preview, status, bench, summary commands
 - weave-crdt: Automerge-backed agent coordination state
-- weave-mcp: MCP server with 15 tools for AI agent integration
+- weave-mcp: MCP server with 22 tools for AI agent integration
+- weave-github: GitHub integration
 
-## MCP Tools (15)
+## MCP Tools (22)
 
-- weave_extract_entities: list all entities in a file with types and line ranges
-- weave_claim_entity: advisory lock before editing (agent_id, file_path, entity_name)
-- weave_release_entity: release lock after editing
-- weave_status: entity status with claims for a file
-- weave_who_is_editing: check if anyone is editing a specific entity
-- weave_potential_conflicts: detect entities edited by multiple agents
-- weave_preview_merge: dry-run merge analysis between branches
-- weave_validate_merge: semantic risk detection (modified entities that reference each other)
-- weave_agent_register: register agent in coordination state
-- weave_agent_heartbeat: keep-alive with working_on list
-- weave_get_dependencies: what this entity calls/references
-- weave_get_dependents: who calls/references this entity
-- weave_impact_analysis: transitive blast radius via BFS
-- weave_diff: entity-level semantic diff between two refs
-- weave_merge_summary: parse conflict markers into structured JSON
-- weave_merge_audit: per-entity audit trail of merge resolutions
+Merge analysis — read git refs or the working tree directly, no setup needed:
+- weave_findings: typed findings for a merge between two branches (the agent-facing read contract)
+- weave_check: cross-file binding check between two revisions (defaults to HEAD x MERGE_HEAD)
+- weave_preview_merge: dry-run clean/conflict verdict and stats between two branches
+- weave_diff: entity-level diff between two refs (added/modified/deleted/renamed)
+- weave_merge_audit: per-entity resolution-strategy audit trail for a two-branch merge
+- weave_validate_merge: semantic-risk subset of weave_findings (modified entities referencing modified entities)
+- weave_merge_summary: parse an already-conflicted file's markers into structured JSON
+- weave_extract_entities: list entities in a file with type and line range
+- weave_get_dependencies / weave_get_dependents: what an entity calls / who calls it
+- weave_impact_analysis: full transitive blast radius of changing an entity
+
+Live coordination — a shared CRDT (.weave/state.automerge) for agents editing one repo at once;
+call weave_agent_register first:
+- weave_agent_register / weave_agent_heartbeat: announce and keep an agent's presence live
+- weave_claim_entity / weave_release_entity: advisory lock before/after editing an entity
+- weave_status / weave_who_is_editing / weave_potential_conflicts: see claims and live collisions
+- weave_update_entity_content / weave_get_entity_content: write/read an entity's CRDT content
+- weave_merge_file: entity-level merge of one file's CRDT state
+- weave_resolve_conflict: resolve an entity weave_merge_file flagged as conflicted
 
 ## MCP Setup
 

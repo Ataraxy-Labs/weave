@@ -1,10 +1,10 @@
 use std::time::Instant;
 
-use weave_core::entity_merge;
+use weave_core::entity_merge_fmt;
 
 /// Run merge benchmarks comparing weave's entity-level merge against
 /// git's line-level merge (simulated via diffy).
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn run(host: &weave_core::host::Host) -> Result<(), Box<dyn std::error::Error>> {
     println!("weave merge benchmark");
     println!("=====================\n");
 
@@ -1097,11 +1097,13 @@ func HandleDelete(w http.ResponseWriter, r *http.Request) {
 
         // Run weave merge
         let start = Instant::now();
-        let weave_result = entity_merge(
+        let weave_result = entity_merge_fmt(
             scenario.base,
             scenario.ours,
             scenario.theirs,
             scenario.file_path,
+            &weave_core::MarkerFormat::default(),
+            host,
         );
         let weave_time = start.elapsed();
 
@@ -1173,6 +1175,14 @@ func HandleDelete(w http.ResponseWriter, r *http.Request) {
 
 struct Scenario {
     name: &'static str,
+    /// What this scenario is a case of, in one line.
+    ///
+    /// Never printed: `weave bench` reports names and timings, because its job
+    /// is a number a reader can compare across runs. The field is here because
+    /// these are 32 literals in one `vec![]`, where a doc comment cannot go,
+    /// and a scenario whose point has to be reverse-engineered from its three
+    /// input strings is a scenario nobody will maintain. Documentation that
+    /// the compiler keeps next to the thing it documents, not dead code.
     #[allow(dead_code)]
     description: &'static str,
     file_path: &'static str,

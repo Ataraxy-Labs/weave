@@ -45,11 +45,12 @@ struct BenchResults {
     cases: Vec<CaseRecord>,
 }
 
-pub fn run(
+pub(crate) fn run(
     repo_path: &str,
     limit: usize,
     show_diff: bool,
     save_dir: Option<&str>,
+    host: &weave_core::host::Host,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = Path::new(repo_path).canonicalize()?;
     // Support both regular and bare repos
@@ -149,14 +150,14 @@ pub fn run(
             }
 
             // Get all four versions: base, ours (p1), theirs (p2), human (merge commit)
-            let (base_content, ours, theirs, human) = match (
+            // A None anywhere means the file was added/deleted on one side.
+            let (Some(base_content), Some(ours), Some(theirs), Some(human)) = (
                 git_show(&repo, &base, file),
                 git_show(&repo, p1, file),
                 git_show(&repo, p2, file),
                 git_show(&repo, merge_commit, file),
-            ) {
-                (Some(b), Some(o), Some(t), Some(h)) => (b, o, t, h),
-                _ => continue, // file added/deleted on one side
+            ) else {
+                continue;
             };
 
             // Skip large or binary files
@@ -179,13 +180,15 @@ pub fn run(
                 file,
                 &registry,
                 &weave_core::MarkerFormat::default(),
+                host,
             );
-            // Check content for actual weave conflict markers only.
-            // Don't use is_clean() as it can false-positive when the conflicts vec has entries
-            // but the content was resolved correctly. Also use specific marker format to avoid
-            // false positives on source code containing literal conflict marker strings.
-            let weave_clean = !weave_result.content.contains("<<<<<<< ours")
-                && !weave_result.content.contains(">>>>>>> theirs");
+            // Cleanliness is a question about the decisions, and `is_clean()`
+            // is the one place that answers it. The marker scan this used to do
+            // was the v1 workaround for a result whose conflicts vec and
+            // content could disagree; in v2 both are produced from the same
+            // dispositions, so the scan can only introduce a second opinion —
+            // one that a fixture containing the literal marker string flips.
+            let weave_clean = weave_result.is_clean();
 
             match (weave_clean, git_clean) {
                 (true, true) => stats.both_clean += 1,

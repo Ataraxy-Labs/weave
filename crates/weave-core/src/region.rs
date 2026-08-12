@@ -8,21 +8,32 @@ pub enum FileRegion {
 }
 
 impl FileRegion {
-    pub fn content(&self) -> &str {
+    pub(crate) fn content(&self) -> &str {
         match self {
             FileRegion::Entity(e) => &e.content,
             FileRegion::Interstitial(i) => &i.content,
         }
     }
 
-    pub fn key(&self) -> &str {
+    /// Test-only, and private: the region's key is read by this module's own
+    /// tests and by nothing else in any crate. Every production reader already
+    /// has the region *and* knows which arm it wanted — `merge_interstitials`
+    /// matches on `FileRegion::Interstitial` to get the position key it groups
+    /// by — so a public accessor that erases the distinction between an entity
+    /// id and a position key was authority to confuse the two, granted to
+    /// callers who never asked for it.
+    #[cfg(test)]
+    fn key(&self) -> &str {
         match self {
             FileRegion::Entity(e) => &e.entity_id,
             FileRegion::Interstitial(i) => &i.position_key,
         }
     }
 
-    pub fn is_entity(&self) -> bool {
+    /// Test-only, and private, for the same reason: the one-line `matches!` it
+    /// wraps is written out at the two production sites that care.
+    #[cfg(test)]
+    fn is_entity(&self) -> bool {
         matches!(self, FileRegion::Entity(_))
     }
 }
@@ -146,6 +157,16 @@ pub fn extract_regions(content: &str, entities: &[SemanticEntity]) -> Vec<FileRe
 /// - `/** ... */` (JSDoc, JavaDoc block comments)
 /// - `# comment` above Python defs (not always doc, but commonly associated)
 /// - Decorators/annotations (already handled by entity extraction, but defensive)
+///
+/// Termination is structural: the walk is a `rev()` range over
+/// `min_line..entity_start`, so every iteration consumes one line and the loop
+/// is bounded by the number of lines above the entity. It used to be a
+/// hand-rolled `loop` that stepped with `line_idx.saturating_sub(1)` and exited
+/// on `line_idx < min_line`. At `line_idx == 0` with `min_line == 0` the step is
+/// a no-op and the exit condition is unreachable, so any file whose first line
+/// is blank and whose first entity starts on line 2 spun forever. A counter
+/// can only be trusted to reach its bound if something forces it to move —
+/// here the iterator does.
 fn find_leading_comment_start(lines: &[&str], entity_start: usize, min_line: usize) -> usize {
     if entity_start == 0 || entity_start <= min_line {
         return entity_start;
@@ -154,13 +175,7 @@ fn find_leading_comment_start(lines: &[&str], entity_start: usize, min_line: usi
     let mut comment_start = entity_start;
     let mut in_block_comment = false;
 
-    // Walk backwards
-    let mut line_idx = entity_start.saturating_sub(1);
-    loop {
-        if line_idx < min_line {
-            break;
-        }
-
+    for line_idx in (min_line..entity_start).rev() {
         let trimmed = lines[line_idx].trim();
 
         if trimmed.is_empty() {
@@ -168,10 +183,6 @@ fn find_leading_comment_start(lines: &[&str], entity_start: usize, min_line: usi
             // But don't extend past it
             if comment_start == entity_start && line_idx + 1 == entity_start {
                 // Blank line immediately before entity — skip it, check further up
-                line_idx = line_idx.saturating_sub(1);
-                if line_idx < min_line {
-                    break;
-                }
                 continue;
             }
             break;
@@ -182,10 +193,6 @@ fn find_leading_comment_start(lines: &[&str], entity_start: usize, min_line: usi
             // This is the end of a block comment — scan backwards for /*
             in_block_comment = true;
             comment_start = line_idx;
-            if line_idx == min_line {
-                break;
-            }
-            line_idx -= 1;
             continue;
         }
 
@@ -195,10 +202,6 @@ fn find_leading_comment_start(lines: &[&str], entity_start: usize, min_line: usi
                 in_block_comment = false;
             }
             // Continue scanning backwards through block comment
-            if line_idx == min_line {
-                break;
-            }
-            line_idx -= 1;
             continue;
         }
 
@@ -212,10 +215,6 @@ fn find_leading_comment_start(lines: &[&str], entity_start: usize, min_line: usi
         // End of JSDoc block
         {
             comment_start = line_idx;
-            if line_idx == min_line {
-                break;
-            }
-            line_idx -= 1;
             continue;
         }
 

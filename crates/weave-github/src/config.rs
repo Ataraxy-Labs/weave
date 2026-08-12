@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use crate::error::ConfigError;
+
 /// Server configuration loaded from environment variables.
 #[derive(Clone)]
 pub struct Config {
@@ -18,22 +20,26 @@ impl Config {
     ///
     /// Required: GITHUB_APP_ID, GITHUB_PRIVATE_KEY, GITHUB_WEBHOOK_SECRET
     /// Optional: PORT (default 8080)
-    pub fn from_env() -> Result<Arc<Self>, String> {
-        let app_id: u64 = std::env::var("GITHUB_APP_ID")
-            .map_err(|_| "GITHUB_APP_ID not set")?
-            .parse()
-            .map_err(|_| "GITHUB_APP_ID must be a number")?;
+    pub fn from_env() -> Result<Arc<Self>, ConfigError> {
+        let required =
+            |name: &'static str| std::env::var(name).map_err(|_| ConfigError::Missing { name });
 
-        let private_key =
-            std::env::var("GITHUB_PRIVATE_KEY").map_err(|_| "GITHUB_PRIVATE_KEY not set")?;
+        let raw_app_id = required("GITHUB_APP_ID")?;
+        let app_id: u64 = raw_app_id.parse().map_err(|_| ConfigError::Malformed {
+            name: "GITHUB_APP_ID",
+            expected: "a number",
+            found: raw_app_id.clone(),
+        })?;
 
-        let webhook_secret =
-            std::env::var("GITHUB_WEBHOOK_SECRET").map_err(|_| "GITHUB_WEBHOOK_SECRET not set")?;
+        let private_key = required("GITHUB_PRIVATE_KEY")?;
+        let webhook_secret = required("GITHUB_WEBHOOK_SECRET")?;
 
-        let port: u16 = std::env::var("PORT")
-            .unwrap_or_else(|_| "8080".to_string())
-            .parse()
-            .map_err(|_| "PORT must be a number")?;
+        let raw_port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+        let port: u16 = raw_port.parse().map_err(|_| ConfigError::Malformed {
+            name: "PORT",
+            expected: "a port number",
+            found: raw_port.clone(),
+        })?;
 
         Ok(Arc::new(Config {
             app_id,

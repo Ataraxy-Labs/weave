@@ -4,15 +4,27 @@ use std::process::Command;
 
 use colored::Colorize;
 
+/// The extensions `weave setup` writes `merge=weave` lines for.
+///
+/// Every entry here is a promise that a file with that extension gets an
+/// entity-level merge, so an extension earns its place by passing the sweep in
+/// `weave-core/tests/language_coverage.rs`: two sides adding different
+/// definitions merges clean, two sides rewriting one definition conflicts, and
+/// nothing is dropped. An extension the engine merely *parses* is not enough —
+/// `.hs`, `.vue`, `.svelte` and `.erb` all parse and are deliberately absent,
+/// because their entity model boxes disjoint additions and cuts the marker
+/// mid-definition. That file records why for each.
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.jsx", "*.py", "*.go", "*.rs", "*.java", "*.c",
     "*.h", "*.cpp", "*.cc", "*.cxx", "*.hpp", "*.hh", "*.hxx", "*.rb", "*.cs", "*.php", "*.swift",
     "*.ex", "*.exs", "*.sh", "*.f90", "*.f95", "*.f03", "*.f08", "*.xml", "*.plist", "*.svg",
     "*.csproj", "*.fsproj", "*.vbproj", "*.json", "*.yaml", "*.yml", "*.toml", "*.md", "*.scala",
-    "*.sc", "*.sbt", "*.kojo", "*.mill", "*.dart",
+    "*.sc", "*.sbt", "*.kojo", "*.mill", "*.dart", "*.kt", "*.tf", "*.hcl", "*.ml", "*.mli",
+    "*.zig", "*.elm", "*.clj", "*.edn", "*.d", "*.lua", "*.fish", "*.nix", "*.sql", "*.tex",
+    "*.pl", "*.csv",
 ];
 
-pub fn run(
+pub(crate) fn run(
     driver_path: Option<&str>,
     local: bool,
     global: bool,
@@ -114,7 +126,7 @@ pub fn run(
     Ok(())
 }
 
-pub fn unsetup() -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn unsetup() -> Result<(), Box<dyn std::error::Error>> {
     let git_dir = Path::new(".git");
     if !git_dir.exists() {
         return Err("Not in a git repository. Run `weave unsetup` from the repo root.".into());
@@ -311,5 +323,32 @@ mod tests {
         assert_eq!(first_added, SUPPORTED_EXTENSIONS.len() - 1);
         assert_eq!(second_added, 0);
         assert_eq!(existing, after_first);
+    }
+
+    #[test]
+    fn every_pattern_is_listed_once() {
+        // A duplicate would inflate the count `add_supported_patterns` returns
+        // and put the same line in .gitattributes twice.
+        let mut seen: Vec<&str> = SUPPORTED_EXTENSIONS.to_vec();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(before, seen.len(), "SUPPORTED_EXTENSIONS has a duplicate");
+    }
+
+    #[test]
+    fn the_languages_that_fail_the_coverage_sweep_are_not_listed() {
+        // These four parse but merge badly — two sides adding different
+        // definitions conflicts, and the marker cuts a definition in half.
+        // `weave-core/tests/language_coverage.rs` records the observed output
+        // for each. Routing them through weave would be worse than leaving
+        // them to git, so setup must not claim them.
+        for ext in &["*.hs", "*.vue", "*.svelte", "*.erb"] {
+            assert!(
+                !SUPPORTED_EXTENSIONS.contains(ext),
+                "{} fails the language coverage sweep and must not be claimed here",
+                ext
+            );
+        }
     }
 }

@@ -22,6 +22,7 @@ use weave_crdt::{
     upsert_entity, EntityStateDoc,
 };
 
+use crate::error::{Reason, ToolError};
 use crate::tools::*;
 
 /// Lazily-initialized repo context. Created on first tool call.
@@ -41,10 +42,18 @@ fn content_hash_u64(content: &str) -> u64 {
 }
 
 #[derive(Clone)]
-pub struct WeaveServer {
+pub(crate) struct WeaveServer {
     context: Arc<Mutex<Option<RepoContext>>>,
     registry: Arc<ParserRegistry>,
     entity_cache: Arc<Mutex<EntityCache>>,
+    /// What a merge run by this server may reach outside itself. Granted once,
+    /// in `new`, and passed to every merge — nothing below can widen it.
+    host: weave_core::host::Host,
+    /// Built by `#[tool_router]` and consumed by `#[tool_handler]`'s generated
+    /// `list_tools`/`call_tool`, which read it through the trait rather than
+    /// through this field — so a non-test build sees no direct read. It is
+    /// read directly by `description_tests::catalog`, which is how the tool
+    /// catalog gets asserted on; the `allow` covers the shipped build only.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -54,7 +63,7 @@ impl WeaveServer {
     /// 1. If file_path is absolute, derive repo from that path
     /// 2. WEAVE_REPO env var
     /// 3. CWD-based git discovery
-    fn discover_repo_root(file_path_hint: Option<&str>) -> Result<PathBuf, String> {
+    fn discover_repo_root(file_path_hint: Option<&str>) -> Result<PathBuf, ToolError> {
         // Strategy 1: Absolute file path -> git -C <parent> rev-parse
         if let Some(fp) = file_path_hint {
             let p = Path::new(fp);
@@ -74,15 +83,17 @@ impl WeaveServer {
         }
 
         // Strategy 3: CWD-based discovery
-        if let Ok(root) = git::find_repo_root() {
-            return Ok(root);
+        match git::find_repo_root(Path::new(".")) {
+            Ok(root) => return Ok(root),
+            // "git is not installed" is a different diagnosis from "you are
+            // not in a repository", and only one of the two is fixed by
+            // passing a different path. Reporting them as one was the whole
+            // cost of a stringly error here.
+            Err(e @ git::GitError::NotRunnable { .. }) => return Err(e.into()),
+            Err(_) => {}
         }
 
-        Err("Cannot find git repository. Either:\n\
-             - Pass an absolute file path (e.g. /Users/you/project/src/lib.ts)\n\
-             - Set WEAVE_REPO env var to the repo root\n\
-             - Run weave-mcp from within a git repo"
-            .to_string())
+        Err(Reason::NoRepository.into())
     }
 
     /// Resolve a file path to (repo_root-relative path, absolute path).
@@ -90,11 +101,25 @@ impl WeaveServer {
     fn resolve_file_path(repo_root: &Path, file_path: &str) -> (String, PathBuf) {
         let p = Path::new(file_path);
         if p.is_absolute() {
-            // Convert absolute -> relative to repo root
+            // Convert absolute -> relative to repo root. A direct `strip_prefix`
+            // fails when one side is a symlink and the other is git's canonical
+            // toplevel (macOS `/var` vs `/private/var`, a symlinked checkout),
+            // so retry on the canonicalized pair before giving up. Falling back
+            // to the raw absolute path yields `git show <rev>:/abs/...`, which
+            // git reads as a repo-root-relative path that never matches — a
+            // read that silently answers for the wrong (or no) file.
             let relative = p
                 .strip_prefix(repo_root)
                 .map(|r| r.to_string_lossy().to_string())
-                .unwrap_or_else(|_| file_path.to_string());
+                .ok()
+                .or_else(|| {
+                    let cr = std::fs::canonicalize(repo_root).ok()?;
+                    let cp = std::fs::canonicalize(p).ok()?;
+                    cp.strip_prefix(&cr)
+                        .ok()
+                        .map(|r| r.to_string_lossy().to_string())
+                })
+                .unwrap_or_else(|| file_path.to_string());
             (relative, p.to_path_buf())
         } else {
             // Already relative, resolve to absolute
@@ -106,14 +131,14 @@ impl WeaveServer {
     async fn get_context(
         &self,
         file_path_hint: Option<&str>,
-    ) -> Result<tokio::sync::MappedMutexGuard<'_, RepoContext>, String> {
+    ) -> Result<tokio::sync::MappedMutexGuard<'_, RepoContext>, ToolError> {
         {
             let mut guard = self.context.lock().await;
             if guard.is_none() {
                 let repo_root = Self::discover_repo_root(file_path_hint)?;
                 let state_path = repo_root.join(".weave").join("state.automerge");
-                let state = EntityStateDoc::open(&state_path)
-                    .map_err(|e| format!("Failed to open CRDT state: {}", e))?;
+                let state =
+                    EntityStateDoc::open(&state_path).map_err(|e| Reason::state(&state_path, e))?;
                 *guard = Some(RepoContext {
                     state: Mutex::new(state),
                     repo_root,
@@ -135,9 +160,8 @@ impl WeaveServer {
     }
 
     fn walk_dir(dir: &Path, root: &Path, registry: &ParserRegistry, files: &mut Vec<String>) {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return,
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
         };
         for entry in entries.flatten() {
             let path = entry.path();
@@ -162,9 +186,14 @@ impl WeaveServer {
         }
     }
 
-    fn read_file_at(abs_path: &Path, display_path: &str) -> Result<String, String> {
-        std::fs::read_to_string(abs_path)
-            .map_err(|e| format!("Failed to read {}: {}", display_path, e))
+    fn read_file_at(abs_path: &Path, display_path: &str) -> Result<String, ToolError> {
+        std::fs::read_to_string(abs_path).map_err(|source| {
+            Reason::Unreadable {
+                path: display_path.to_string(),
+                source,
+            }
+            .into()
+        })
     }
 
     fn resolve_entity_sync(
@@ -172,9 +201,14 @@ impl WeaveServer {
         content: &str,
         file_path: &str,
         entity_name: &str,
-    ) -> Result<String, String> {
-        resolve_entity_id(content, file_path, entity_name, registry)
-            .ok_or_else(|| format!("Entity '{}' not found in '{}'", entity_name, file_path))
+    ) -> Result<String, ToolError> {
+        resolve_entity_id(content, file_path, entity_name, registry).ok_or_else(|| {
+            Reason::EntityNotFound {
+                entity: entity_name.to_string(),
+                file: file_path.to_string(),
+            }
+            .into()
+        })
     }
 
     /// Extract entities with LRU caching. Cache hit skips tree-sitter parse entirely.
@@ -191,9 +225,8 @@ impl WeaveServer {
         }
 
         // Cache miss: parse
-        let plugin = match self.registry.get_plugin(rel_path) {
-            Some(p) => p,
-            None => return Vec::new(),
+        let Some(plugin) = self.registry.get_plugin(rel_path) else {
+            return Vec::new();
         };
         let entities = plugin.extract_entities(content, rel_path);
 
@@ -209,30 +242,31 @@ impl WeaveServer {
 
 #[tool_router]
 impl WeaveServer {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             context: Arc::new(Mutex::new(None)),
             registry: Arc::new(create_default_registry()),
             entity_cache: Arc::new(Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(500).unwrap(),
             ))),
+            host: weave_core::host::Host {
+                line_merge: Some(weave_core::host::git_line_merge),
+                ..Default::default()
+            },
             tool_router: Self::tool_router(),
         }
     }
 
     #[tool(
-        description = "List all semantic entities (functions, classes, etc.) in a file with their types and line ranges"
+        description = "List every semantic entity (function, class, etc.) in a file, with type and line range. Use before weave_claim_entity to find the exact entity name to claim, or to scope any other tool call to one entity instead of a whole file."
     )]
     async fn weave_extract_entities(
         &self,
         Parameters(params): Parameters<ExtractEntitiesParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let content = Self::read_file_at(&abs_path, &rel_path)?;
 
         let entities = self.cached_extract_entities(&content, &rel_path).await;
         if entities.is_empty() && self.registry.get_plugin(&rel_path).is_none() {
@@ -257,21 +291,17 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Claim an entity before editing it. Advisory lock that signals to other agents you're working on this entity. Returns predictive warnings if related entities are claimed by other agents."
+        description = "Advisory lock on one entity, taken before you edit it — signals other agents to stay out; weave does not enforce it. Call this first when multiple agents share a repo live. The response includes warnings when an entity you depend on, or that depends on you, is already claimed by someone else, so you can wait instead of colliding."
     )]
     async fn weave_claim_entity(
         &self,
         Parameters(params): Parameters<ClaimEntityParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let content = Self::read_file_at(&abs_path, &rel_path)?;
         let entity_id =
-            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
-                .map_err(internal_err)?;
+            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)?;
 
         let mut state = ctx.state.lock().await;
         let entities = self.cached_extract_entities(&content, &rel_path).await;
@@ -286,8 +316,8 @@ impl WeaveServer {
             );
         }
 
-        let result = claim_entity(&mut state, &params.agent_id, &entity_id)
-            .map_err(|e| internal_err(e.to_string()))?;
+        let result =
+            claim_entity(&mut state, &params.agent_id, &entity_id).map_err(internal_err)?;
 
         let _ = state.save();
 
@@ -358,24 +388,21 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Release a previously claimed entity after you're done editing it")]
+    #[tool(
+        description = "Release a lock taken with weave_claim_entity. Call this once your edit is either written back with weave_update_entity_content or abandoned — a stale claim blocks other agents from claiming the same entity."
+    )]
     async fn weave_release_entity(
         &self,
         Parameters(params): Parameters<ReleaseEntityParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let content = Self::read_file_at(&abs_path, &rel_path)?;
         let entity_id =
-            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
-                .map_err(internal_err)?;
+            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)?;
 
         let mut state = ctx.state.lock().await;
-        release_entity(&mut state, &params.agent_id, &entity_id)
-            .map_err(|e| internal_err(e.to_string()))?;
+        release_entity(&mut state, &params.agent_id, &entity_id).map_err(internal_err)?;
         let _ = state.save();
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -384,18 +411,15 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Show entity status for a file: all entities with their claim and modification status"
+        description = "Every entity in a file with its claim owner, last editor, version, and merge_state. Use before editing a file you didn't just extract entities from, to see at a glance what's claimed and what's already mid-conflict."
     )]
     async fn weave_status(
         &self,
         Parameters(params): Parameters<StatusParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let content = Self::read_file_at(&abs_path, &rel_path)?;
 
         let mut state = ctx.state.lock().await;
         let _ = sync_from_files(
@@ -405,8 +429,7 @@ impl WeaveServer {
             &self.registry,
         );
 
-        let entities =
-            get_entities_for_file(&state, &rel_path).map_err(|e| internal_err(e.to_string()))?;
+        let entities = get_entities_for_file(&state, &rel_path).map_err(internal_err)?;
 
         let file_entities = self.cached_extract_entities(&content, &rel_path).await;
 
@@ -433,20 +456,18 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Check if anyone is currently editing a specific entity")]
+    #[tool(
+        description = "Who claimed one entity and who last modified it. Use instead of weave_status when you already know the entity's name and just need a fast yes/no before editing it."
+    )]
     async fn weave_who_is_editing(
         &self,
         Parameters(params): Parameters<WhoIsEditingParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let content = Self::read_file_at(&abs_path, &rel_path)?;
         let entity_id =
-            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
-                .map_err(internal_err)?;
+            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)?;
 
         let state = ctx.state.lock().await;
         match get_entity_status(&state, &entity_id) {
@@ -474,16 +495,15 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Detect entities being worked on by multiple agents — potential merge conflicts"
+        description = "Scan the whole coordination state for entities more than one agent has claimed or edited. Run this periodically, or right before merging, to catch a collision while it's still two claims rather than a conflict marker. No results means no entity currently has more than one agent's claim on it — it is not a guarantee that a later git merge will be clean."
     )]
     async fn weave_potential_conflicts(
         &self,
         Parameters(params): Parameters<PotentialConflictsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context(None).await.map_err(internal_err)?;
+        let ctx = self.get_context(None).await?;
         let state = ctx.state.lock().await;
-        let mut conflicts =
-            detect_potential_conflicts(&state).map_err(|e| internal_err(e.to_string()))?;
+        let mut conflicts = detect_potential_conflicts(&state).map_err(internal_err)?;
 
         if let Some(ref agent_id) = params.agent_id {
             conflicts.retain(|c| c.agents.contains(agent_id));
@@ -517,34 +537,43 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Preview what a merge between two branches would look like using weave's entity-level analysis"
+        description = "Dry-run a merge between two branches — writes nothing, just returns per-file clean/conflict verdicts, a confidence rating, and entity-level stats. Use for a fast go/no-go signal before merging. When you intend to act on the result (resolve a conflict, check for cross-file breakage), use weave_findings instead — it's the typed contract, this is the summary."
     )]
     async fn weave_preview_merge(
         &self,
         Parameters(params): Parameters<PreviewMergeParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(params.file_path.as_deref())
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(params.file_path.as_deref()).await?;
 
         // Run git commands from the repo root
-        let merge_base = git::find_merge_base(&params.base_branch, &params.target_branch)
-            .map_err(|e| internal_err(e.to_string()))?;
+        let merge_base =
+            git::find_merge_base(&ctx.repo_root, &params.base_branch, &params.target_branch)
+                .map_err(internal_err)?;
 
         let files = if let Some(ref fp) = params.file_path {
             let (rel, _) = Self::resolve_file_path(&ctx.repo_root, fp);
             vec![rel]
         } else {
-            git::get_changed_files(&merge_base, &params.base_branch, &params.target_branch)
-                .map_err(|e| internal_err(e.to_string()))?
+            git::get_changed_files(
+                &ctx.repo_root,
+                &merge_base,
+                &params.base_branch,
+                &params.target_branch,
+            )
+            .map_err(internal_err)?
         };
 
         let mut results = Vec::new();
         for file in &files {
-            let base = git::git_show(&merge_base, file).unwrap_or_default();
-            let ours = git::git_show(&params.base_branch, file).unwrap_or_default();
-            let theirs = git::git_show(&params.target_branch, file).unwrap_or_default();
+            let base = git::git_show_optional(&ctx.repo_root, &merge_base, file)
+                .map_err(ToolError::from)?
+                .unwrap_or_default();
+            let ours = git::git_show_optional(&ctx.repo_root, &params.base_branch, file)
+                .map_err(ToolError::from)?
+                .unwrap_or_default();
+            let theirs = git::git_show_optional(&ctx.repo_root, &params.target_branch, file)
+                .map_err(ToolError::from)?
+                .unwrap_or_default();
 
             if ours == theirs || base == ours || base == theirs {
                 continue;
@@ -557,6 +586,7 @@ impl WeaveServer {
                 file,
                 &self.registry,
                 &weave_core::MarkerFormat::default(),
+                &self.host,
             );
 
             let conflicts: Vec<serde_json::Value> = merge_result
@@ -634,16 +664,13 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Get entities that the given entity depends on (calls, references, imports)"
+        description = "What one entity calls, references, or imports. Check this before editing or resolving it — if anything in the list is claimed by another agent (weave_who_is_editing), your change may collide with theirs even though the two entities live in different files."
     )]
     async fn weave_get_dependencies(
         &self,
         Parameters(params): Parameters<EntityDepsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
         // Build graph from all supported files in the repo
@@ -693,16 +720,13 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Get entities that depend on the given entity (reverse dependencies — who calls/references it)"
+        description = "Who calls or references one entity (reverse of weave_get_dependencies). Check this before deleting, renaming, or changing the signature of an entity — every result is a caller that may need updating too."
     )]
     async fn weave_get_dependents(
         &self,
         Parameters(params): Parameters<EntityDepsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
@@ -750,16 +774,13 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Impact analysis: if this entity changes, what else might be affected? Returns all transitive dependents."
+        description = "The full transitive blast radius of changing one entity — not just direct callers (weave_get_dependents), every dependent of every dependent. Use before a wide or risky edit, so you know what's affected up front instead of finding out from a DANGLING finding in weave_check afterward."
     )]
     async fn weave_impact_analysis(
         &self,
         Parameters(params): Parameters<ImpactAnalysisParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
@@ -807,12 +828,14 @@ impl WeaveServer {
         )]))
     }
 
-    #[tool(description = "Register an agent in weave's coordination state")]
+    #[tool(
+        description = "Announce yourself in the CRDT coordination state, with an agent_id and the branch you're on. Call this once before claiming or editing anything, so your claims and edits are attributed to an agent other agents can see and wait on."
+    )]
     async fn weave_agent_register(
         &self,
         Parameters(params): Parameters<AgentRegisterParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context(None).await.map_err(internal_err)?;
+        let ctx = self.get_context(None).await?;
         let mut state = ctx.state.lock().await;
         register_agent(
             &mut state,
@@ -820,7 +843,7 @@ impl WeaveServer {
             &params.agent_id,
             &params.branch,
         )
-        .map_err(|e| internal_err(e.to_string()))?;
+        .map_err(internal_err)?;
         let _ = state.save();
 
         Ok(CallToolResult::success(vec![Content::text(format!(
@@ -830,63 +853,56 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Send a heartbeat to keep agent status active and update what entities it's working on"
+        description = "Refresh your agent's liveness timestamp and replace the list of entities you currently hold. Call periodically while working (after weave_agent_register), and whenever the set of entities you are editing changes, so other agents' weave_status and weave_potential_conflicts calls reflect what you actually hold. Note: weave does not currently reap agents that stop heartbeating, so a crashed agent's claims stay visible until released."
     )]
     async fn weave_agent_heartbeat(
         &self,
         Parameters(params): Parameters<AgentHeartbeatParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context(None).await.map_err(internal_err)?;
+        let ctx = self.get_context(None).await?;
         let mut state = ctx.state.lock().await;
         weave_crdt::agent_heartbeat(&mut state, &params.agent_id, &params.working_on)
-            .map_err(|e| internal_err(e.to_string()))?;
+            .map_err(internal_err)?;
         let _ = state.save();
 
         Ok(CallToolResult::success(vec![Content::text("OK")]))
     }
 
     #[tool(
-        description = "Semantic diff between two refs: shows entity-level changes (added, modified, deleted, renamed) instead of line-level diffs"
+        description = "Entity-level diff between two refs — which functions/classes were added, modified, deleted, or renamed, not which lines changed. Use to scope a review or a merge preview to what actually changed structurally, before running weave_preview_merge or weave_findings on it."
     )]
     async fn weave_diff(
         &self,
         Parameters(params): Parameters<DiffParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let _ctx = self
-            .get_context(params.file_path.as_deref())
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(params.file_path.as_deref()).await?;
 
         let target_ref = params.target_ref.as_deref().unwrap_or("HEAD");
 
         let files = if let Some(ref fp) = params.file_path {
-            let p = Path::new(fp);
-            if p.is_absolute() {
-                let root =
-                    git::find_repo_root_from_path(p).map_err(|e| internal_err(e.to_string()))?;
-                let rel = p
-                    .strip_prefix(&root)
-                    .map(|r| r.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| fp.clone());
-                vec![rel]
-            } else {
-                vec![fp.clone()]
-            }
+            // Relativize against the repository the context discovered — the
+            // same root every content read below runs in — rather than
+            // re-deriving a root from the path and leaving the reads ambient.
+            let (rel, _) = Self::resolve_file_path(&ctx.repo_root, fp);
+            vec![rel]
         } else {
-            git::diff_files(&params.base_ref, target_ref)
-                .map_err(|e| internal_err(e.to_string()))?
+            git::diff_files(&ctx.repo_root, &params.base_ref, target_ref).map_err(internal_err)?
         };
 
         let mut all_changes = Vec::new();
 
         for file in &files {
-            let plugin = match self.registry.get_plugin(file) {
-                Some(p) => p,
-                None => continue, // skip unsupported files
+            // skip unsupported files
+            let Some(plugin) = self.registry.get_plugin(file) else {
+                continue;
             };
 
-            let base_content = git::git_show(&params.base_ref, file).unwrap_or_default();
-            let target_content = git::git_show(target_ref, file).unwrap_or_default();
+            let base_content = git::git_show_optional(&ctx.repo_root, &params.base_ref, file)
+                .map_err(ToolError::from)?
+                .unwrap_or_default();
+            let target_content = git::git_show_optional(&ctx.repo_root, target_ref, file)
+                .map_err(ToolError::from)?
+                .unwrap_or_default();
 
             let base_entities = plugin.extract_entities(&base_content, file);
             let target_entities = plugin.extract_entities(&target_content, file);
@@ -923,19 +939,16 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Parse weave conflict markers in a file and return a structured summary with entity names, conflict types, confidence levels, and resolution hints"
+        description = "Parse a file that already has weave conflict markers (after a merge driver run) into structured JSON: each conflicted entity's name, type, complexity, and refused_by — the same guard name the marker itself prints, machine-readable instead of scraped from comment text."
     )]
     async fn weave_merge_summary(
         &self,
         Parameters(params): Parameters<MergeSummaryParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(Some(&params.file_path)).await?;
         let (_rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
-        let content = Self::read_file_at(&abs_path, &params.file_path).map_err(internal_err)?;
+        let content = Self::read_file_at(&abs_path, &params.file_path)?;
         let conflicts = weave_core::parse_weave_conflicts(&content);
 
         let json_conflicts: Vec<serde_json::Value> = conflicts
@@ -946,7 +959,7 @@ impl WeaveServer {
                     "kind": c.entity_kind,
                     "complexity": format!("{}", c.complexity),
                     "confidence": c.confidence,
-                    "hint": c.hint,
+                    "refused_by": c.refusal,
                 })
             })
             .collect();
@@ -963,33 +976,42 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Run a merge between two branches and return per-entity audit trail: what resolution strategy was used for each entity (unchanged, diffy_merged, inner_merged, conflict, etc.)"
+        description = "Run a merge between two branches (writes nothing) and return, per entity, which resolution strategy weave used or would use (unchanged, diffy_merged, inner_merged, conflict, ...). Use to debug or audit why an entity did or didn't conflict; for the typed agent-facing findings document, use weave_findings instead."
     )]
     async fn weave_merge_audit(
         &self,
         Parameters(params): Parameters<MergeAuditParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(params.file_path.as_deref())
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(params.file_path.as_deref()).await?;
 
-        let merge_base = git::find_merge_base(&params.base_branch, &params.target_branch)
-            .map_err(|e| internal_err(e.to_string()))?;
+        let merge_base =
+            git::find_merge_base(&ctx.repo_root, &params.base_branch, &params.target_branch)
+                .map_err(internal_err)?;
 
         let files = if let Some(ref fp) = params.file_path {
             let (rel, _) = Self::resolve_file_path(&ctx.repo_root, fp);
             vec![rel]
         } else {
-            git::get_changed_files(&merge_base, &params.base_branch, &params.target_branch)
-                .map_err(|e| internal_err(e.to_string()))?
+            git::get_changed_files(
+                &ctx.repo_root,
+                &merge_base,
+                &params.base_branch,
+                &params.target_branch,
+            )
+            .map_err(internal_err)?
         };
 
         let mut results = Vec::new();
         for file in &files {
-            let base = git::git_show(&merge_base, file).unwrap_or_default();
-            let ours = git::git_show(&params.base_branch, file).unwrap_or_default();
-            let theirs = git::git_show(&params.target_branch, file).unwrap_or_default();
+            let base = git::git_show_optional(&ctx.repo_root, &merge_base, file)
+                .map_err(ToolError::from)?
+                .unwrap_or_default();
+            let ours = git::git_show_optional(&ctx.repo_root, &params.base_branch, file)
+                .map_err(ToolError::from)?
+                .unwrap_or_default();
+            let theirs = git::git_show_optional(&ctx.repo_root, &params.target_branch, file)
+                .map_err(ToolError::from)?
+                .unwrap_or_default();
 
             if ours == theirs || base == ours || base == theirs {
                 continue;
@@ -1002,6 +1024,7 @@ impl WeaveServer {
                 file,
                 &self.registry,
                 &weave_core::MarkerFormat::default(),
+                &self.host,
             );
 
             let audit: Vec<serde_json::Value> = merge_result
@@ -1030,34 +1053,154 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Validate a merge for semantic risks: detect when auto-merged entities reference other entities that were also modified"
+        description = "Run a merge between two branches (writes nothing) and return a weave-findings document per file that actually diverges between them: conflicts, semantic warnings (SHADOW), derived binding breakage (DANGLING/DUP), the per-entity op trail, and rename facts. This is the agent-facing read contract for a two-branch comparison — prefer it over weave_preview_merge, weave_merge_audit, and weave_validate_merge, which each return a subset of the same information in an older shape. Each returned document states `clean: true` explicitly when a diverging file has no findings; a file where one side matches the base or both sides agree isn't diverging and is left out of `results` entirely — `files_analyzed` is the count actually compared. For a check against the CURRENT working tree instead of two branch tips, use weave_check."
     )]
-    async fn weave_validate_merge(
+    async fn weave_findings(
         &self,
-        Parameters(params): Parameters<ValidateMergeParams>,
+        Parameters(params): Parameters<FindingsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(params.file_path.as_deref())
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(params.file_path.as_deref()).await?;
 
-        let merge_base = git::find_merge_base(&params.base_branch, &params.target_branch)
-            .map_err(|e| internal_err(e.to_string()))?;
+        let merge_base =
+            git::find_merge_base(&ctx.repo_root, &params.base_branch, &params.target_branch)
+                .map_err(internal_err)?;
 
         let files = if let Some(ref fp) = params.file_path {
             let (rel, _) = Self::resolve_file_path(&ctx.repo_root, fp);
             vec![rel]
         } else {
-            git::get_changed_files(&merge_base, &params.base_branch, &params.target_branch)
-                .map_err(|e| internal_err(e.to_string()))?
+            git::get_changed_files(
+                &ctx.repo_root,
+                &merge_base,
+                &params.base_branch,
+                &params.target_branch,
+            )
+            .map_err(internal_err)?
+        };
+
+        let mut documents = Vec::new();
+        for file in &files {
+            let base = git::git_show_optional(&ctx.repo_root, &merge_base, file)
+                .map_err(ToolError::from)?
+                .unwrap_or_default();
+            let ours = git::git_show_optional(&ctx.repo_root, &params.base_branch, file)
+                .map_err(ToolError::from)?
+                .unwrap_or_default();
+            let theirs = git::git_show_optional(&ctx.repo_root, &params.target_branch, file)
+                .map_err(ToolError::from)?
+                .unwrap_or_default();
+
+            // Nothing to compose: one side is the base, or both agree.
+            if ours == theirs || base == ours || base == theirs {
+                continue;
+            }
+
+            let result = weave_core::entity_merge_with_registry(
+                &base,
+                &ours,
+                &theirs,
+                file,
+                &self.registry,
+                &weave_core::MarkerFormat::default(),
+                &self.host,
+            );
+            // The revisions travel with the references: `path@rev` is one
+            // `git show` away for the reader, which is the whole point of not
+            // carrying the bytes.
+            let revs = crate::findings::Revs {
+                base: Some(merge_base.clone()),
+                ours: Some(params.base_branch.clone()),
+                theirs: Some(params.target_branch.clone()),
+            };
+            documents.push(crate::findings::build(file, &result, &ours, &theirs, &revs));
+        }
+
+        let out = serde_json::json!({
+            "schema": "weave-findings",
+            "schema_version": crate::findings::SCHEMA_VERSION,
+            "files_analyzed": documents.len(),
+            "results": documents,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&out).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(
+        description = "Cross-file binding check, repo-wide. A merge driver runs once per FILE and therefore cannot see a rename in a.py whose surviving caller lives in b.py — both files merge cleanly and the program is broken. This tool re-derives the same def/use evidence over the WHOLE repo and returns weave-findings documents (scope=repo, schema 1.1.0) for the cross-file DANGLING and SHADOW classes only. Defaults to HEAD × MERGE_HEAD — call it right after a merge to catch what the per-file driver couldn't see — or pass base/ours/theirs to check two arbitrary revisions before merging. `files_with_findings: 0` is stated explicitly and means weave found no cross-file breakage between these revisions, not that nothing was checked. Note: this is the repo-scope half of the `weave check` CLI command; it does not verify markers, unanimous-line loss, or duplicate lines in the working tree — those aren't reachable over MCP yet."
+    )]
+    async fn weave_check(
+        &self,
+        Parameters(params): Parameters<CheckParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ctx = self.get_context(None).await?;
+        let root = ctx.repo_root.clone();
+
+        let (base, ours, theirs) = weave_cli::gitscan::trees(
+            &root,
+            params.base.as_deref(),
+            params.ours.as_deref(),
+            params.theirs.as_deref(),
+        )
+        .map_err(internal_err)?;
+
+        let documents = weave_cli::repo_scope::check(&base, &ours, &theirs);
+        let total = weave_cli::repo_scope::total_findings(&documents);
+
+        let out = serde_json::json!({
+            "schema": "weave-findings",
+            "schema_version": weave_cli::wire::SCHEMA_VERSION_1_1,
+            "scope": "repo",
+            "files_with_findings": documents.len(),
+            "findings_total": total,
+            "results": documents,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&out).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(
+        description = "Detect when an auto-merged entity references another entity that was also modified — the risk that two independently-clean edits don't actually work together. This is a subset of what weave_findings returns (as SHADOW findings); prefer weave_findings unless you specifically want just these warnings without the rest of the document."
+    )]
+    async fn weave_validate_merge(
+        &self,
+        Parameters(params): Parameters<ValidateMergeParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ctx = self.get_context(params.file_path.as_deref()).await?;
+
+        let merge_base =
+            git::find_merge_base(&ctx.repo_root, &params.base_branch, &params.target_branch)
+                .map_err(internal_err)?;
+
+        let files = if let Some(ref fp) = params.file_path {
+            let (rel, _) = Self::resolve_file_path(&ctx.repo_root, fp);
+            vec![rel]
+        } else {
+            git::get_changed_files(
+                &ctx.repo_root,
+                &merge_base,
+                &params.base_branch,
+                &params.target_branch,
+            )
+            .map_err(internal_err)?
         };
 
         // Collect modified entities from both branches
         let mut modified_entities = Vec::new();
         for file in &files {
-            let base_content = git::git_show(&merge_base, file).unwrap_or_default();
-            let ours_content = git::git_show(&params.base_branch, file).unwrap_or_default();
-            let theirs_content = git::git_show(&params.target_branch, file).unwrap_or_default();
+            let base_content = git::git_show_optional(&ctx.repo_root, &merge_base, file)
+                .map_err(ToolError::from)?
+                .unwrap_or_default();
+            let ours_content = git::git_show_optional(&ctx.repo_root, &params.base_branch, file)
+                .map_err(ToolError::from)?
+                .unwrap_or_default();
+            let theirs_content =
+                git::git_show_optional(&ctx.repo_root, &params.target_branch, file)
+                    .map_err(ToolError::from)?
+                    .unwrap_or_default();
 
             if let Some(plugin) = self.registry.get_plugin(file) {
                 let base_entities = plugin.extract_entities(&base_content, file);
@@ -1067,10 +1210,9 @@ impl WeaveServer {
                 // Find entities modified in ours or theirs vs base
                 for entity in ours_entities.iter().chain(theirs_entities.iter()) {
                     let base_match = base_entities.iter().find(|b| b.name == entity.name);
-                    let is_modified = match base_match {
-                        Some(b) => b.content_hash != entity.content_hash,
-                        None => true, // new entity
-                    };
+                    // No match in base means a new entity, so treat it as modified.
+                    let is_modified =
+                        base_match.is_none_or(|b| b.content_hash != entity.content_hash);
                     if is_modified {
                         modified_entities.push(weave_core::ModifiedEntity {
                             name: entity.name.clone(),
@@ -1121,21 +1263,17 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Write entity content to the CRDT. Increments the agent's version vector counter and stores the source code."
+        description = "Write your edit of one entity into the CRDT coordination state — not the file on disk; this is the live multi-agent layer, separate from a git merge. Call once you've decided the entity's new content, whether or not you claimed it first. Bumps your agent's version vector so weave_merge_file and other agents' weave_status calls see the update."
     )]
     async fn weave_update_entity_content(
         &self,
         Parameters(params): Parameters<UpdateEntityContentParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let content = Self::read_file_at(&abs_path, &rel_path)?;
         let entity_id =
-            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
-                .map_err(internal_err)?;
+            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)?;
 
         // Compute content hash
         let hash = format!("{:x}", content_hash_u64(&params.content));
@@ -1162,11 +1300,10 @@ impl WeaveServer {
             &params.content,
             &hash,
         )
-        .map_err(|e| internal_err(e.to_string()))?;
+        .map_err(internal_err)?;
         let _ = state.save();
 
-        let status =
-            get_entity_content(&state, &entity_id).map_err(|e| internal_err(e.to_string()))?;
+        let status = get_entity_content(&state, &entity_id).map_err(internal_err)?;
 
         let response = serde_json::json!({
             "entity": params.entity_name,
@@ -1181,21 +1318,17 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Read entity content from the CRDT, including version vector, merge state, and any conflict details"
+        description = "Read what the CRDT currently holds for one entity: content, version vector, merge_state, and — when it's mid-conflict — each side's content. Use to see what another agent wrote (via weave_update_entity_content) before writing your own version, or to inspect a conflict weave_merge_file flagged before calling weave_resolve_conflict."
     )]
     async fn weave_get_entity_content(
         &self,
         Parameters(params): Parameters<GetEntityContentParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let content = Self::read_file_at(&abs_path, &rel_path)?;
         let entity_id =
-            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
-                .map_err(internal_err)?;
+            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)?;
 
         let state = ctx.state.lock().await;
         match get_entity_content(&state, &entity_id) {
@@ -1228,16 +1361,13 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Trigger entity-level merge for a file. Compares version vectors, auto-merges where possible, marks conflicts."
+        description = "Run weave's entity-level merge over one file's CRDT state: syncs from what's on disk, then auto-merges entities where version vectors allow and marks the rest conflicted. This is the CRDT-coordination merge, not the git merge driver — use it when agents are editing live through weave_update_entity_content rather than on separate branches. Follow a conflicted result with weave_get_entity_content then weave_resolve_conflict."
     )]
     async fn weave_merge_file(
         &self,
         Parameters(params): Parameters<MergeFileParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
 
         let mut state = ctx.state.lock().await;
@@ -1250,8 +1380,7 @@ impl WeaveServer {
             &self.registry,
         );
 
-        let result = merge_file_entities(&mut state, &rel_path, &self.registry)
-            .map_err(|e| internal_err(e.to_string()))?;
+        let result = merge_file_entities(&state, &rel_path).map_err(internal_err)?;
         let _ = state.save();
 
         let response = serde_json::json!({
@@ -1268,21 +1397,17 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Resolve a conflict on an entity by providing the resolved content. Merges version vectors and clears conflict state."
+        description = "Resolve an entity weave_merge_file flagged as conflicted: supply the final content and weave merges the version vectors and clears the conflict. Use weave_get_entity_content first to read both sides before deciding."
     )]
     async fn weave_resolve_conflict(
         &self,
         Parameters(params): Parameters<ResolveConflictParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self
-            .get_context(Some(&params.file_path))
-            .await
-            .map_err(internal_err)?;
+        let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-        let content = Self::read_file_at(&abs_path, &rel_path).map_err(internal_err)?;
+        let content = Self::read_file_at(&abs_path, &rel_path)?;
         let entity_id =
-            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)
-                .map_err(internal_err)?;
+            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)?;
 
         let hash = format!("{:x}", content_hash_u64(&params.resolved_content));
 
@@ -1294,7 +1419,7 @@ impl WeaveServer {
             &params.resolved_content,
             &hash,
         )
-        .map_err(|e| internal_err(e.to_string()))?;
+        .map_err(internal_err)?;
         let _ = state.save();
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -1312,13 +1437,114 @@ impl WeaveServer {
 impl ServerHandler for WeaveServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Weave MCP server for entity-level semantic merge coordination. \
-                 Agents can claim entities before editing, check who is editing what, \
-                 detect potential conflicts, and preview merges.",
+            "Weave: entity-level semantic merge for Git, plus live multi-agent coordination. \
+                 Two independent tool groups. (1) Merge analysis — weave_findings, weave_check, \
+                 weave_preview_merge, weave_diff, weave_merge_audit, weave_validate_merge — read \
+                 git refs or the working tree directly; no setup needed. Start with weave_findings \
+                 after (or before) a merge between two branches, or weave_check for cross-file \
+                 binding risk a per-file merge driver can't see. (2) Live coordination — \
+                 weave_claim_entity, weave_release_entity, weave_status, weave_who_is_editing, \
+                 weave_potential_conflicts, weave_update_entity_content, weave_get_entity_content, \
+                 weave_merge_file, weave_resolve_conflict — track edits in a shared CRDT \
+                 (.weave/state.automerge) for agents editing the same repo at the same time. Call \
+                 weave_agent_register once before using any of these.",
         )
     }
 }
 
 fn internal_err(msg: impl ToString) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(msg.to_string(), None)
+}
+
+#[cfg(test)]
+mod description_tests {
+    use super::*;
+
+    /// The full tool catalog, name -> description, as an agent actually sees
+    /// it over MCP (`tools/list`). A change here is a change to what every
+    /// consumer reads, so this list is the thing to diff, not the 22
+    /// individual `#[tool(description = ...)]` attributes scattered through
+    /// this file.
+    fn catalog() -> Vec<(String, String)> {
+        let server = WeaveServer::new();
+        let mut tools: Vec<(String, String)> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| {
+                (
+                    t.name.to_string(),
+                    t.description.map(|d| d.to_string()).unwrap_or_default(),
+                )
+            })
+            .collect();
+        tools.sort();
+        tools
+    }
+
+    #[test]
+    fn every_tool_has_a_nonempty_description() {
+        for (name, desc) in catalog() {
+            assert!(!desc.is_empty(), "{name} has no description");
+        }
+    }
+
+    /// Every description names when to reach for the tool or how to read its
+    /// output, not just what it computes — the point of a tool description is
+    /// to substitute for a manual an agent will never read: agents read tool
+    /// descriptions and point-of-need lines, not docs. This is a floor, not a
+    /// style check: it requires one of a handful of task-oriented words per
+    /// description rather than asserting exact wording, so it survives future
+    /// rewording as long as the rewrite stays task-oriented.
+    #[test]
+    fn every_description_is_action_shaped() {
+        const SIGNAL: &[&str] = &[
+            "use ",
+            "call ",
+            "before ",
+            "after ",
+            "prefer ",
+            "check this",
+            "run this",
+            "start with",
+        ];
+        for (name, desc) in catalog() {
+            let lower = desc.to_lowercase();
+            assert!(
+                SIGNAL.iter().any(|s| lower.contains(s)),
+                "{name}'s description doesn't say when to use it: {desc:?}"
+            );
+        }
+    }
+
+    /// Stale vocabulary that should never survive a rewrite: "resolution
+    /// hints" was the old advice-sentence-in-the-marker feature; it was
+    /// removed and replaced by `refused_by` (the guard name). A description
+    /// that still promises "hints" is describing a feature that no longer
+    /// exists.
+    #[test]
+    fn no_description_promises_removed_features() {
+        for (name, desc) in catalog() {
+            let lower = desc.to_lowercase();
+            assert!(
+                !lower.contains("resolution hint"),
+                "{name} still advertises removed resolution-hint text: {desc:?}"
+            );
+        }
+    }
+
+    /// Fixed count, on purpose: adding, removing, or renaming a tool is a
+    /// catalog change an agent's tool list will show immediately, and this
+    /// test exists so it can never happen silently alongside an unrelated
+    /// description edit. Bump the number and update the surrounding docs
+    /// (SKILL.md, README, docs/llms.txt) in the same change.
+    #[test]
+    fn tool_count_is_pinned() {
+        let names: Vec<String> = catalog().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(
+            names.len(),
+            22,
+            "tool count changed ({names:?}) — update SKILL.md/README/docs/llms.txt in the same commit"
+        );
+    }
 }

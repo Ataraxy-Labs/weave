@@ -1,25 +1,45 @@
-use std::collections::{HashMap, HashSet};
-use std::io::Write;
-use std::process::Command;
-use std::sync::{mpsc, LazyLock};
-use std::time::Duration;
+//! The merge's front door, its result types, and the machinery around the
+//! decision itself.
+//!
+//! The decision itself lives in [`crate::v2`]: match, classify, plan, resolve,
+//! render. [`entity_merge_fmt`] is the entry point every
+//! caller uses, and its job is to hand v2 three texts and a marker format and
+//! then get out of the way.
+//!
+//! What is left here is everything around that decision, and it falls into
+//! three groups:
+//!
+//!   1. **The pre-checks that can refuse before v2 runs at all** — binary
+//!      content, a file over 1MB, inputs that already carry conflict markers.
+//!   2. **Helpers v2 calls into** — interstitial and import merging, decorator
+//!      handling, container wrapper extraction, the scoped marker writer. These
+//!      predate v2 and were kept because v2 needed exactly them; each is reached
+//!      from `v2::mod`, `v2::resolve`, `statement` or `container`.
+//!   3. **The line-level route** — [`line_level_fallback`] and what it calls
+//!      (`skip_expansion`, `expand_separators`, `git_merge_file`, `diffy_fallback`).
+//!      Reached only after v2 returns a typed `Unsupported` verdict, or on the
+//!      size and binary pre-checks above. Nothing on this route produces an
+//!      audit trail, so a fallback merge reports bytes and no per-entity story.
+//!
+//! There is no fourth group. A helper here that no live path reaches is a bug,
+//! not history.
 
-use sem_core::model::change::ChangeType;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::LazyLock;
+
 use sem_core::model::entity::SemanticEntity;
-use sem_core::model::identity::match_entities;
 use sem_core::parser::plugins::create_default_registry;
 use sem_core::parser::registry::ParserRegistry;
 use serde::Serialize;
 
 /// Static parser registry shared across all merge operations.
 /// Avoids recreating 11 tree-sitter language parsers per merge call.
-static PARSER_REGISTRY: LazyLock<ParserRegistry> = LazyLock::new(create_default_registry);
+pub(crate) static PARSER_REGISTRY: LazyLock<ParserRegistry> =
+    LazyLock::new(create_default_registry);
 
-use crate::conflict::{
-    classify_conflict, ConflictComplexity, ConflictKind, EntityConflict, MarkerFormat, MergeStats,
-};
-use crate::reconstruct::reconstruct;
-use crate::region::{extract_regions, EntityRegion, FileRegion};
+use crate::conflict::{classify_conflict, ConflictKind, EntityConflict, MarkerFormat, MergeStats};
+use crate::host::{Host, LineMergeStyle};
+use crate::region::FileRegion;
 use crate::validate::SemanticWarning;
 
 /// How an individual entity was resolved during merge.
@@ -33,7 +53,19 @@ pub enum ResolutionStrategy {
     DiffyMerged,
     DecoratorMerged,
     InnerMerged,
+    /// The body was a sequence of statements and the statement triples merged
+    /// (`statement.rs`). Reached only after every other clean path refused.
+    StatementMerged,
+    /// A conflict the whole ladder refused, resolved by `v2::bind` under
+    /// disjoint composition: the two sides inserted into one slot and neither block
+    /// writes what the other writes or reads. Every one of these
+    /// carries a `composition_licensed` finding with the evidence.
+    FootprintLicensed,
     ConflictBothModified,
+    /// A conflict the statement fold scoped down to the statements that
+    /// actually disagree, inside a body diff3 refused whole. Same
+    /// verdict as `ConflictBothModified`, a much smaller marked region.
+    ConflictStatementScoped,
     ConflictModifyDelete,
     ConflictBothAdded,
     ConflictRenameRename,
@@ -41,8 +73,48 @@ pub enum ResolutionStrategy {
     AddedOurs,
     AddedTheirs,
     Deleted,
-    Renamed { from: String, to: String },
-    Fallback,
+    Renamed {
+        from: String,
+        to: String,
+    },
+}
+
+impl ResolutionStrategy {
+    /// Which rung of the ladder refused, as a stable name — `None` when this
+    /// strategy resolved and nothing refused.
+    ///
+    /// `kind: "both_modified"` is a VERDICT: it says the two sides disagreed,
+    /// which the reader could see from the marker. This says *which guard*
+    /// declined, and the guards are not interchangeable: `statement_fold` means
+    /// diff3, the decorator merge and the container merge all passed and two
+    /// edits landed in one statement; `merge_ladder_exhausted` means every rung
+    /// refused. Naming the guard is the one part of weave's output that gets
+    /// used unprompted, which is why it moved from a JSON document nobody
+    /// opened into the marker everybody has to read.
+    ///
+    /// One owner: `weave-mcp`'s findings producer used to carry its own copy of
+    /// this table, and the marker renderer had none. Exhaustive, so a new
+    /// refusal cannot compile until it has a name here.
+    pub fn guard(&self) -> Option<&'static str> {
+        match self {
+            ResolutionStrategy::ConflictBothModified => Some("merge_ladder_exhausted"),
+            ResolutionStrategy::ConflictStatementScoped => Some("statement_fold"),
+            ResolutionStrategy::InnerMerged => Some("container_member"),
+            ResolutionStrategy::ConflictModifyDelete => Some("modify_delete_guard"),
+            ResolutionStrategy::ConflictBothAdded => Some("both_added_divergent"),
+            ResolutionStrategy::ConflictRenameRename => Some("rename_rename_divergent"),
+            ResolutionStrategy::ConflictRenameModify => Some("rename_vs_edit_guard"),
+            _ => None,
+        }
+    }
+
+    /// The guard name a marker must print. A conflict always has a refusing
+    /// guard; `guard()` returning `None` on a conflicting strategy would be a
+    /// bug, and naming the fallback here keeps the renderer total without
+    /// letting it invent a name.
+    pub(crate) fn guard_or_ladder(&self) -> &'static str {
+        self.guard().unwrap_or("merge_ladder_exhausted")
+    }
 }
 
 /// Audit record for a single entity's merge resolution.
@@ -65,84 +137,79 @@ pub struct MergeResult {
 }
 
 impl MergeResult {
+    /// Whether the merge conflicted — a question about the *decisions*, not
+    /// about the bytes.
+    ///
+    /// This used to also scan the output for `<<<<<<< ours`, because
+    /// reconstruction could embed markers the conflict list did not know about
+    /// (an interstitial merged by diff3, a scoped inner conflict). That is a
+    /// symptom of two owners for one fact. In the v2 pipeline every conflict is
+    /// a `Disposition::Conflict` before it is ever text, so the typed record is
+    /// the only source of truth, and a clean merge can no longer report itself
+    /// dirty because its *output* happens to contain the marker string.
+    ///
+    /// One marker scan survives, and it is not this one: `entity_merge*`
+    /// refuses outright when an **input** already contains markers
+    /// ([`has_conflict_markers`]), so a file that legitimately quotes
+    /// `<<<<<<<` — a test fixture, a merge-tool's own documentation — is still
+    /// declared conflicted before the entity model is ever consulted. That is a
+    /// deliberate refusal to merge a base that is not a program, not a verdict
+    /// about entities; it is a known, documented limit rather than a silent
+    /// one.
     pub fn is_clean(&self) -> bool {
-        self.conflicts.is_empty() && !self.content.lines().any(|l| l.starts_with("<<<<<<< ours"))
+        self.conflicts.is_empty()
     }
-}
-
-/// The resolved content for a single entity after merging.
-#[derive(Debug, Clone)]
-pub enum ResolvedEntity {
-    /// Clean resolution — use this content.
-    Clean(EntityRegion),
-    /// Conflict — render conflict markers.
-    Conflict(EntityConflict),
-    /// Inner merge with per-member scoped conflicts.
-    /// Content already contains per-member conflict markers; emit as-is.
-    ScopedConflict {
-        content: String,
-        conflict: EntityConflict,
-    },
-    /// Entity was deleted.
-    Deleted,
 }
 
 /// Perform entity-level 3-way merge.
 ///
-/// Falls back to line-level merge (via diffy) when:
-/// - No parser matches the file type
-/// - Parser returns 0 entities for non-empty content
-/// - File exceeds 1MB
+/// Takes the line-level route on the typed `Unsupported` verdicts raised by
+/// `v2::mod` — no parser for the file type, zero entities out of non-empty
+/// content, both sides creating the file, or identity too ambiguous to key on
+/// (`has_excessive_duplicates`) — and, before any of that, on a file over 1MB
+/// or one that is binary. The verdict is a value, not a bare `None`, so the
+/// route a file took is answerable after the fact.
+/// Runs against [`Host::default`] — no subprocess, no temporary files, no
+/// environment read. Callers that want the `git merge-file` second opinion
+/// grant it explicitly through [`entity_merge_fmt`].
 pub fn entity_merge(base: &str, ours: &str, theirs: &str, file_path: &str) -> MergeResult {
-    entity_merge_fmt(base, ours, theirs, file_path, &MarkerFormat::default())
+    entity_merge_fmt(
+        base,
+        ours,
+        theirs,
+        file_path,
+        &MarkerFormat::default(),
+        &Host::default(),
+    )
 }
 
 /// Perform entity-level 3-way merge with configurable marker format.
+///
+/// There is no longer a watchdog thread here. The timeout existed because
+/// rename detection compared candidate pairs, so a file full of same-shaped
+/// entities made the merge quadratic and a large input could outrun any
+/// deadline. v2's matcher generates candidates from indexes —
+/// body-hash buckets paired in key order, a prefix-filtered token index, and a
+/// rare-token index for short bodies — so there is no pairwise scan left to
+/// blow up, and the bound is pinned by a test rather than assumed. Racing a thread against a
+/// clock was a way of not knowing the complexity; knowing it is better.
 pub fn entity_merge_fmt(
     base: &str,
     ours: &str,
     theirs: &str,
     file_path: &str,
     marker_format: &MarkerFormat,
+    host: &Host,
 ) -> MergeResult {
-    let timeout_secs = std::env::var("WEAVE_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(5);
-
-    // Timeout: if entity merge takes too long, diffy is likely hitting
-    // pathological input. Fall back to git merge-file which always terminates.
-    let base_owned = base.to_string();
-    let ours_owned = ours.to_string();
-    let theirs_owned = theirs.to_string();
-    let path_owned = file_path.to_string();
-    let fmt_owned = marker_format.clone();
-
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let result = entity_merge_with_registry(
-            &base_owned,
-            &ours_owned,
-            &theirs_owned,
-            &path_owned,
-            &PARSER_REGISTRY,
-            &fmt_owned,
-        );
-        let _ = tx.send(result);
-    });
-
-    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
-        Ok(result) => result,
-        Err(_) => {
-            eprintln!(
-                "weave: merge timed out after {}s for {}, falling back to git merge-file",
-                timeout_secs, file_path
-            );
-            let mut stats = MergeStats::default();
-            stats.used_fallback = true;
-            git_merge_file(base, ours, theirs, &mut stats)
-        }
-    }
+    entity_merge_with_registry(
+        base,
+        ours,
+        theirs,
+        file_path,
+        &PARSER_REGISTRY,
+        marker_format,
+        host,
+    )
 }
 
 pub fn entity_merge_with_registry(
@@ -152,14 +219,20 @@ pub fn entity_merge_with_registry(
     file_path: &str,
     registry: &ParserRegistry,
     marker_format: &MarkerFormat,
+    host: &Host,
 ) -> MergeResult {
+    // The `refused_by:` line's comment prefix is a fact about the file, and
+    // this is the one function that has both the file path and the marker
+    // format. Deriving it here means every consumer gets a refusal line that is
+    // a comment in the language it lands in, and no consumer has to know that.
+    let marker_format = &marker_format.clone().for_file(file_path);
     // Guard: if any input already contains conflict markers (e.g. AU/AA conflicts
     // where git bakes markers into stage blobs), report as conflict immediately.
     // We can't do a meaningful 3-way merge on pre-conflicted content.
     if has_conflict_markers(base) || has_conflict_markers(ours) || has_conflict_markers(theirs) {
         let mut stats = MergeStats::default();
         stats.entities_conflicted = 1;
-        stats.used_fallback = true;
+        stats.mark_fallback();
         // Use whichever input has markers as the merged content (preserves
         // the conflict for the user to resolve manually).
         let content = if has_conflict_markers(ours) {
@@ -226,972 +299,68 @@ pub fn entity_merge_with_registry(
         };
     }
 
+    // The subsumption rule: the unit fast path above, with "changed nothing"
+    // weakened to "wrote nothing the other side did not write". If every hunk
+    // one side wrote is carried by a hunk the other side wrote — same base
+    // lines gone, same lines written, in order — then that other side's file
+    // already has both edits in it, and it is a file a developer wrote rather
+    // than one we composed. See `subsumption.rs` for what "carried" excludes.
+    if !is_binary(base) && !is_binary(ours) && !is_binary(theirs) {
+        if let Some(side) = crate::subsumption::subsuming_side(base, ours, theirs) {
+            let (content, stats) = match side {
+                crate::subsumption::Superset::Ours => (
+                    ours,
+                    MergeStats {
+                        entities_ours_only: 1,
+                        ..Default::default()
+                    },
+                ),
+                crate::subsumption::Superset::Theirs => (
+                    theirs,
+                    MergeStats {
+                        entities_theirs_only: 1,
+                        ..Default::default()
+                    },
+                ),
+            };
+            return MergeResult {
+                content: content.to_string(),
+                conflicts: vec![],
+                warnings: vec![],
+                stats,
+                audit: vec![],
+            };
+        }
+    }
+
     // Binary file detection: if any version has null bytes, use git merge-file directly
     if is_binary(base) || is_binary(ours) || is_binary(theirs) {
         let mut stats = MergeStats::default();
-        stats.used_fallback = true;
-        return git_merge_file(base, ours, theirs, &mut stats);
+        stats.mark_fallback();
+        return line_merge_file(base, ours, theirs, stats, host);
     }
 
     // Large file fallback
     if base.len() > 1_000_000 || ours.len() > 1_000_000 || theirs.len() > 1_000_000 {
-        return line_level_fallback(base, ours, theirs, file_path);
+        return line_level_fallback(base, ours, theirs, file_path, host);
     }
 
-    // If the file type isn't natively supported, the registry returns the fallback
-    // plugin (20-line chunks). Entity merge on arbitrary chunks produces WORSE
-    // results than line-level merge (confirmed on GitButler's .svelte files where
-    // chunk boundaries don't align with structural boundaries). So we skip entity
-    // merge entirely for fallback-plugin files and go straight to line-level merge.
-    let plugin = match registry.get_plugin(file_path) {
-        Some(p) if p.id() != "fallback" => p,
-        _ => return line_level_fallback(base, ours, theirs, file_path),
-    };
-
-    // Extract entities from all three versions. Keep unfiltered lists for inner merge
-    // (child entities provide tree-sitter-based method decomposition for classes).
-    let base_all = plugin.extract_entities(base, file_path);
-    let ours_all = plugin.extract_entities(ours, file_path);
-    let theirs_all = plugin.extract_entities(theirs, file_path);
-
-    // Filter out nested entities for top-level matching and region extraction
-    let base_entities = filter_nested_entities(base_all.clone());
-    let ours_entities = filter_nested_entities(ours_all.clone());
-    let theirs_entities = filter_nested_entities(theirs_all.clone());
-
-    // Fallback if parser returns nothing for non-empty content
-    if base_entities.is_empty() && !base.trim().is_empty() {
-        return line_level_fallback(base, ours, theirs, file_path);
-    }
-    // When base is empty (file newly added in both branches), entity-level
-    // reconstruction can produce invalid output for structured formats like JSON
-    // (e.g. content appended after closing delimiter). Fall back to line-level
-    // merge which handles this case correctly.
-    if base.trim().is_empty() && !ours.trim().is_empty() && !theirs.trim().is_empty() {
-        return line_level_fallback(base, ours, theirs, file_path);
-    }
-    // Allow empty entities if content is actually empty
-    if ours_entities.is_empty()
-        && !ours.trim().is_empty()
-        && theirs_entities.is_empty()
-        && !theirs.trim().is_empty()
-    {
-        return line_level_fallback(base, ours, theirs, file_path);
-    }
-
-    // Fallback if too many duplicate entity names. Entity matching is O(n*m) on
-    // same-named entities which can hang on files with many `var app = ...` etc.
-    if has_excessive_duplicates(&base_entities)
-        || has_excessive_duplicates(&ours_entities)
-        || has_excessive_duplicates(&theirs_entities)
-    {
-        return line_level_fallback(base, ours, theirs, file_path);
-    }
-
-    // Extract regions from all three
-    let base_regions = extract_regions(base, &base_entities);
-    let ours_regions = extract_regions(ours, &ours_entities);
-    let theirs_regions = extract_regions(theirs, &theirs_entities);
-
-    // Build region content maps (entity_id → content from file lines, preserving
-    // surrounding syntax like `export` that sem-core's entity.content may strip)
-    let base_region_content = build_region_content_map(&base_regions);
-    let ours_region_content = build_region_content_map(&ours_regions);
-    let theirs_region_content = build_region_content_map(&theirs_regions);
-
-    // Match entities: base↔ours and base↔theirs
-    let ours_changes = match_entities(&base_entities, &ours_entities, file_path, None, None, None);
-    let theirs_changes = match_entities(
-        &base_entities,
-        &theirs_entities,
-        file_path,
-        None,
-        None,
-        None,
-    );
-
-    // Build lookup maps
-    let base_entity_map: HashMap<&str, &SemanticEntity> =
-        base_entities.iter().map(|e| (e.id.as_str(), e)).collect();
-    let ours_entity_map: HashMap<&str, &SemanticEntity> =
-        ours_entities.iter().map(|e| (e.id.as_str(), e)).collect();
-    let theirs_entity_map: HashMap<&str, &SemanticEntity> =
-        theirs_entities.iter().map(|e| (e.id.as_str(), e)).collect();
-
-    // Classify what happened to each entity in each branch
-    let mut ours_change_map: HashMap<String, ChangeType> = HashMap::new();
-    for change in &ours_changes.changes {
-        ours_change_map.insert(change.entity_id.clone(), change.change_type);
-    }
-    let mut theirs_change_map: HashMap<String, ChangeType> = HashMap::new();
-    for change in &theirs_changes.changes {
-        theirs_change_map.insert(change.entity_id.clone(), change.change_type);
-    }
-
-    // Detect renames using structural_hash (RefFilter / IntelliMerge-inspired).
-    // When one branch renames an entity, connect the old and new IDs so the merge
-    // treats it as the same entity rather than a delete+add.
-    let ours_rename_to_base = build_rename_map(&base_entities, &ours_entities);
-    let theirs_rename_to_base = build_rename_map(&base_entities, &theirs_entities);
-    // Reverse maps: base_id → renamed_id in that branch
-    let base_to_ours_rename: HashMap<String, String> = ours_rename_to_base
-        .iter()
-        .map(|(new, old)| (old.clone(), new.clone()))
-        .collect();
-    let base_to_theirs_rename: HashMap<String, String> = theirs_rename_to_base
-        .iter()
-        .map(|(new, old)| (old.clone(), new.clone()))
-        .collect();
-
-    // Collect all entity IDs across all versions
-    let mut all_entity_ids: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    // Track renamed IDs so we don't process them twice
-    let mut skip_ids: HashSet<String> = HashSet::new();
-    // The "new" IDs from renames should be skipped — they'll be handled via the base ID
-    for new_id in ours_rename_to_base.keys() {
-        skip_ids.insert(new_id.clone());
-    }
-    for new_id in theirs_rename_to_base.keys() {
-        skip_ids.insert(new_id.clone());
-    }
-
-    // Start with ours ordering (skeleton)
-    for entity in &ours_entities {
-        if skip_ids.contains(&entity.id) {
-            continue;
-        }
-        if seen.insert(entity.id.clone()) {
-            all_entity_ids.push(entity.id.clone());
-        }
-    }
-    // Add theirs-only entities
-    for entity in &theirs_entities {
-        if skip_ids.contains(&entity.id) {
-            continue;
-        }
-        if seen.insert(entity.id.clone()) {
-            all_entity_ids.push(entity.id.clone());
-        }
-    }
-    // Add base-only entities (deleted in both → skip, deleted in one → handled below)
-    for entity in &base_entities {
-        if seen.insert(entity.id.clone()) {
-            all_entity_ids.push(entity.id.clone());
-        }
-    }
-
-    let mut stats = MergeStats::default();
-    let mut conflicts: Vec<EntityConflict> = Vec::new();
-    let mut audit: Vec<EntityAudit> = Vec::new();
-    let mut resolved_entities: HashMap<String, ResolvedEntity> = HashMap::new();
-
-    // Detect rename/rename conflicts: same base entity renamed differently in both branches.
-    // These must be flagged before the entity resolution loop, which would otherwise silently
-    // pick ours and also include theirs as an unmatched entity.
-    let mut rename_conflict_ids: HashSet<String> = HashSet::new();
-    for (base_id, ours_new_id) in &base_to_ours_rename {
-        if let Some(theirs_new_id) = base_to_theirs_rename.get(base_id) {
-            if ours_new_id != theirs_new_id {
-                rename_conflict_ids.insert(base_id.clone());
-            }
-        }
-    }
-
-    for entity_id in &all_entity_ids {
-        // Handle rename/rename conflicts: both branches renamed this base entity differently
-        if rename_conflict_ids.contains(entity_id) {
-            let ours_new_id = &base_to_ours_rename[entity_id];
-            let theirs_new_id = &base_to_theirs_rename[entity_id];
-            let base_entity = base_entity_map.get(entity_id.as_str());
-            let ours_entity = ours_entity_map.get(ours_new_id.as_str());
-            let theirs_entity = theirs_entity_map.get(theirs_new_id.as_str());
-            let base_name = base_entity.map(|e| e.name.as_str()).unwrap_or(entity_id);
-            let ours_name = ours_entity.map(|e| e.name.as_str()).unwrap_or(ours_new_id);
-            let theirs_name = theirs_entity
-                .map(|e| e.name.as_str())
-                .unwrap_or(theirs_new_id);
-
-            let base_rc = base_entity.map(|e| {
-                base_region_content
-                    .get(e.id.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| e.content.clone())
-            });
-            let ours_rc = ours_entity.map(|e| {
-                ours_region_content
-                    .get(e.id.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| e.content.clone())
-            });
-            let theirs_rc = theirs_entity.map(|e| {
-                theirs_region_content
-                    .get(e.id.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| e.content.clone())
-            });
-
-            stats.entities_conflicted += 1;
-            let conflict = EntityConflict {
-                entity_name: base_name.to_string(),
-                entity_type: base_entity
-                    .map(|e| e.entity_type.clone())
-                    .unwrap_or_default(),
-                kind: ConflictKind::RenameRename {
-                    base_name: base_name.to_string(),
-                    ours_name: ours_name.to_string(),
-                    theirs_name: theirs_name.to_string(),
-                },
-                complexity: crate::conflict::ConflictComplexity::Syntax,
-                ours_content: ours_rc,
-                theirs_content: theirs_rc,
-                base_content: base_rc,
-            };
-            conflicts.push(conflict.clone());
-            audit.push(EntityAudit {
-                name: base_name.to_string(),
-                entity_type: base_entity
-                    .map(|e| e.entity_type.clone())
-                    .unwrap_or_default(),
-                resolution: ResolutionStrategy::ConflictRenameRename,
-            });
-            let resolution = ResolvedEntity::Conflict(conflict);
-            resolved_entities.insert(entity_id.clone(), resolution.clone());
-            resolved_entities.insert(ours_new_id.clone(), resolution);
-            // Mark theirs renamed ID as Deleted so reconstruct doesn't emit the conflict twice
-            // (once from ours skeleton, once from theirs-only insertion)
-            resolved_entities.insert(theirs_new_id.clone(), ResolvedEntity::Deleted);
-            continue;
-        }
-
-        let in_base = base_entity_map.get(entity_id.as_str());
-        // Follow rename chains: if base entity was renamed in ours/theirs, use renamed version
-        let ours_id = base_to_ours_rename
-            .get(entity_id.as_str())
-            .map(|s| s.as_str())
-            .unwrap_or(entity_id.as_str());
-        let theirs_id = base_to_theirs_rename
-            .get(entity_id.as_str())
-            .map(|s| s.as_str())
-            .unwrap_or(entity_id.as_str());
-        let in_ours = ours_entity_map
-            .get(ours_id)
-            .or_else(|| ours_entity_map.get(entity_id.as_str()));
-        let in_theirs = theirs_entity_map
-            .get(theirs_id)
-            .or_else(|| theirs_entity_map.get(entity_id.as_str()));
-
-        let ours_change = ours_change_map.get(entity_id);
-        let theirs_change = theirs_change_map.get(entity_id);
-
-        let (resolution, strategy) = resolve_entity(
-            entity_id,
-            in_base,
-            in_ours,
-            in_theirs,
-            ours_change,
-            theirs_change,
-            &base_region_content,
-            &ours_region_content,
-            &theirs_region_content,
-            &base_all,
-            &ours_all,
-            &theirs_all,
-            &mut stats,
-            marker_format,
-        );
-
-        // Build audit entry from entity info
-        let entity_name = in_ours
-            .map(|e| e.name.as_str())
-            .or_else(|| in_theirs.map(|e| e.name.as_str()))
-            .or_else(|| in_base.map(|e| e.name.as_str()))
-            .unwrap_or(entity_id)
-            .to_string();
-        let entity_type = in_ours
-            .map(|e| e.entity_type.as_str())
-            .or_else(|| in_theirs.map(|e| e.entity_type.as_str()))
-            .or_else(|| in_base.map(|e| e.entity_type.as_str()))
-            .unwrap_or("")
-            .to_string();
-        audit.push(EntityAudit {
-            name: entity_name,
-            entity_type,
-            resolution: strategy,
-        });
-
-        match &resolution {
-            ResolvedEntity::Conflict(ref c) => conflicts.push(c.clone()),
-            ResolvedEntity::ScopedConflict { conflict, .. } => conflicts.push(conflict.clone()),
-            _ => {}
-        }
-
-        resolved_entities.insert(entity_id.clone(), resolution.clone());
-        // Also store under renamed IDs so reconstruct can find them
-        if let Some(ours_renamed_id) = base_to_ours_rename.get(entity_id.as_str()) {
-            resolved_entities.insert(ours_renamed_id.clone(), resolution.clone());
-        }
-        if let Some(theirs_renamed_id) = base_to_theirs_rename.get(entity_id.as_str()) {
-            resolved_entities.insert(theirs_renamed_id.clone(), resolution);
-        }
-    }
-
-    // Merge interstitial regions
-    let (merged_interstitials, interstitial_conflicts) =
-        merge_interstitials(&base_regions, &ours_regions, &theirs_regions, marker_format);
-    stats.entities_conflicted += interstitial_conflicts.len();
-    conflicts.extend(interstitial_conflicts);
-
-    // Collect base IDs that were renamed in ours — these should not be treated
-    // as "theirs-only additions" during reconstruction.
-    let theirs_rename_base_ids: HashSet<String> = base_to_ours_rename.keys().cloned().collect();
-
-    // Reconstruct the file
-    let content = reconstruct(
-        &ours_regions,
-        &theirs_regions,
-        &theirs_entities,
-        &ours_entity_map,
-        &resolved_entities,
-        &merged_interstitials,
-        marker_format,
-        &theirs_rename_base_ids,
-    );
-
-    // Post-merge cleanup: remove duplicate lines and normalize blank lines
-    let content = post_merge_cleanup(&content);
-
-    // Post-merge validation: verify the merged result is structurally sound.
-    // Catches silent data loss from entity merge / reconstruction bugs.
-    let mut warnings = vec![];
-    if conflicts.is_empty() && stats.entities_both_changed_merged > 0 {
-        let merged_entities = plugin.extract_entities(&content, file_path);
-        if merged_entities.is_empty() && !content.trim().is_empty() {
-            warnings.push(crate::validate::SemanticWarning {
-                entity_name: "(file)".to_string(),
-                entity_type: "file".to_string(),
-                file_path: file_path.to_string(),
-                kind: crate::validate::WarningKind::ParseFailedAfterMerge,
-                related: vec![],
-            });
-        }
-
-        // Entity coverage check: every resolved-clean entity's content should
-        // appear in the merged output. If it doesn't, reconstruct dropped it.
-        if conflicts.is_empty() {
-            for resolved in resolved_entities.values() {
-                if let ResolvedEntity::Clean(region) = resolved {
-                    let trimmed = region.content.trim();
-                    if !trimmed.is_empty() && trimmed.len() > 20 && !content.contains(trimmed) {
-                        // Entity resolved cleanly but its content is missing from output.
-                        // Fall back to git merge-file to avoid silent data loss.
-                        return git_merge_file(base, ours, theirs, &mut stats);
-                    }
-                }
-            }
-        }
-
-        // Entity count check: re-parsed merged output should have at least as many
-        // entities as the minimum of ours/theirs (minus deletions). A significant
-        // drop means entities were silently lost.
-        if conflicts.is_empty() && !merged_entities.is_empty() {
-            let merged_top = filter_nested_entities(merged_entities);
-            let deleted_count = resolved_entities
-                .values()
-                .filter(|r| matches!(r, ResolvedEntity::Deleted))
-                .count();
-            let expected_min = ours_entities
-                .len()
-                .min(theirs_entities.len())
-                .saturating_sub(deleted_count);
-            if expected_min > 3 && merged_top.len() < expected_min * 80 / 100 {
-                return git_merge_file(base, ours, theirs, &mut stats);
-            }
-        }
-    }
-
-    // Line-level drop detection: lines present in all 3 inputs (unchanged by
-    // either branch) must appear in the output. Dropping them is always wrong.
-    // This runs on ALL clean merges, not just those with both-changed entities.
-    if conflicts.is_empty() {
-        let base_lines: HashSet<&str> = base
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| l.len() > 15 && !is_import_line_trimmed(l))
-            .collect();
-        let ours_lines: HashSet<&str> = ours
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| l.len() > 15 && !is_import_line_trimmed(l))
-            .collect();
-        let theirs_lines: HashSet<&str> = theirs
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| l.len() > 15 && !is_import_line_trimmed(l))
-            .collect();
-        let output_lines: HashSet<&str> = content.lines().map(|l| l.trim()).collect();
-
-        // Unchanged lines (in all 3) must be in output
-        let missing_unchanged = base_lines
-            .iter()
-            .filter(|l| ours_lines.contains(*l) && theirs_lines.contains(*l))
-            .filter(|l| !output_lines.contains(*l))
-            .count();
-
-        if missing_unchanged > 0 {
-            return git_merge_file(base, ours, theirs, &mut stats);
-        }
-
-        // Lines added by either branch (not in base) shouldn't be dropped either.
-        // Split into two tiers:
-        // - "Significant" lines (> 40 chars): even 1 missing is likely a bug, since
-        //   long lines are unique enough that reformatting won't change them completely
-        // - Shorter lines (16-40 chars): use threshold > 3, since these could be
-        //   structural lines reformatted by the import merger or brace placement
-        let mut missing_added_significant = 0;
-        let mut missing_added_short = 0;
-        for l in ours_lines.iter().chain(theirs_lines.iter()) {
-            if base_lines.contains(l) || output_lines.contains(l) {
-                continue;
-            }
-            // Also check if the core content appears as a substring in any output line
-            // (handles reformatting like `Foo {` becoming `Foo\n{`)
-            if l.len() > 25 && content.contains(*l) {
-                continue;
-            }
-            if l.len() > 40 {
-                missing_added_significant += 1;
-            } else {
-                missing_added_short += 1;
-            }
-        }
-
-        if missing_added_significant > 0 || missing_added_short > 3 {
-            return git_merge_file(base, ours, theirs, &mut stats);
-        }
-    }
-
-    let entity_result = MergeResult {
-        content,
-        conflicts,
-        warnings,
-        stats: stats.clone(),
-        audit,
-    };
-
-    // Floor: when both entity merge and git conflict, prefer the smaller marker set.
-    // Do not let git's clean-but-duplicate output erase a semantic conflict.
-    let entity_markers = entity_result
-        .content
-        .lines()
-        .filter(|l| l.starts_with("<<<<<<<"))
-        .count();
-    if entity_markers > 0 {
-        let git_result = git_merge_file(base, ours, theirs, &mut stats);
-        let git_markers = git_result
-            .content
-            .lines()
-            .filter(|l| l.starts_with("<<<<<<<"))
-            .count();
-        if git_markers > 0 && entity_markers > git_markers {
-            return git_result;
-        }
-    }
-
-    // Safety net: detect silent data loss from entity merge.
-    // If the merged result is significantly shorter than expected, fall back to git.
-    if entity_markers == 0 {
-        let merged_len = entity_result.content.len();
-        let max_input_len = ours.len().max(theirs.len());
-        let min_input_len = ours.len().min(theirs.len());
-        // Expected length: at least 90% of the shorter input (both branches
-        // contribute content, so the merge should be at least as long as the
-        // shorter one minus some deletions).
-        if min_input_len > 200 && merged_len < min_input_len * 90 / 100 {
-            return git_merge_file(base, ours, theirs, &mut stats);
-        }
-        // Also check: merged shouldn't be much shorter than max input unless
-        // there were intentional deletions from one branch
-        if max_input_len > 500 && merged_len < max_input_len * 70 / 100 {
-            // Check if the length reduction is explained by one branch deleting content
-            let base_len = base.len();
-            let ours_deleted =
-                base_len > ours.len() && (base_len - ours.len()) > max_input_len * 20 / 100;
-            let theirs_deleted =
-                base_len > theirs.len() && (base_len - theirs.len()) > max_input_len * 20 / 100;
-            if !ours_deleted && !theirs_deleted {
-                return git_merge_file(base, ours, theirs, &mut stats);
-            }
-        }
-    }
-
-    entity_result
-}
-
-fn resolve_entity(
-    _entity_id: &str,
-    in_base: Option<&&SemanticEntity>,
-    in_ours: Option<&&SemanticEntity>,
-    in_theirs: Option<&&SemanticEntity>,
-    _ours_change: Option<&ChangeType>,
-    _theirs_change: Option<&ChangeType>,
-    base_region_content: &HashMap<&str, &str>,
-    ours_region_content: &HashMap<&str, &str>,
-    theirs_region_content: &HashMap<&str, &str>,
-    base_all: &[SemanticEntity],
-    ours_all: &[SemanticEntity],
-    theirs_all: &[SemanticEntity],
-    stats: &mut MergeStats,
-    marker_format: &MarkerFormat,
-) -> (ResolvedEntity, ResolutionStrategy) {
-    // Helper: get region content (from file lines) for an entity, falling back to entity.content
-    let region_content = |entity: &SemanticEntity, map: &HashMap<&str, &str>| -> String {
-        map.get(entity.id.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| entity.content.clone())
-    };
-
-    match (in_base, in_ours, in_theirs) {
-        // Entity exists in all three versions
-        (Some(base), Some(ours), Some(theirs)) => {
-            // Check modification status via structural hash AND region content.
-            // Region content may differ even when structural hash is the same
-            // (e.g., doc comment added/changed but function body unchanged).
-            let base_rc_lazy = || region_content(base, base_region_content);
-            let ours_rc_lazy = || region_content(ours, ours_region_content);
-            let theirs_rc_lazy = || region_content(theirs, theirs_region_content);
-
-            let ours_modified =
-                ours.content_hash != base.content_hash || ours_rc_lazy() != base_rc_lazy();
-            let theirs_modified =
-                theirs.content_hash != base.content_hash || theirs_rc_lazy() != base_rc_lazy();
-
-            match (ours_modified, theirs_modified) {
-                (false, false) => {
-                    // Neither changed
-                    stats.entities_unchanged += 1;
-                    (
-                        ResolvedEntity::Clean(entity_to_region_with_content(
-                            ours,
-                            &region_content(ours, ours_region_content),
-                        )),
-                        ResolutionStrategy::Unchanged,
-                    )
-                }
-                (true, false) => {
-                    // Only ours changed
-                    stats.entities_ours_only += 1;
-                    (
-                        ResolvedEntity::Clean(entity_to_region_with_content(
-                            ours,
-                            &region_content(ours, ours_region_content),
-                        )),
-                        ResolutionStrategy::OursOnly,
-                    )
-                }
-                (false, true) => {
-                    // Only theirs changed
-                    stats.entities_theirs_only += 1;
-                    (
-                        ResolvedEntity::Clean(entity_to_region_with_content(
-                            theirs,
-                            &region_content(theirs, theirs_region_content),
-                        )),
-                        ResolutionStrategy::TheirsOnly,
-                    )
-                }
-                (true, true) => {
-                    // Both changed — try intra-entity merge
-                    if ours.content_hash == theirs.content_hash {
-                        // Same change in both — take ours
-                        stats.entities_both_changed_merged += 1;
-                        (
-                            ResolvedEntity::Clean(entity_to_region_with_content(
-                                ours,
-                                &region_content(ours, ours_region_content),
-                            )),
-                            ResolutionStrategy::ContentEqual,
-                        )
-                    } else {
-                        // Try diffy 3-way merge on region content (preserves full syntax)
-                        let base_rc = region_content(base, base_region_content);
-                        let ours_rc = region_content(ours, ours_region_content);
-                        let theirs_rc = region_content(theirs, theirs_region_content);
-
-                        // Rename-aware merge: when one side renamed an entity and the
-                        // other modified it, normalize names before 3-way merge so diffy
-                        // only sees the structural changes, not name conflicts.
-                        let ours_renamed = base.name != ours.name;
-                        let theirs_renamed = base.name != theirs.name;
-                        let (merge_base_rc, merge_ours_rc, merge_theirs_rc, _final_name) =
-                            if ours_renamed && !theirs_renamed {
-                                // Ours renamed: normalize base+theirs to use ours' name
-                                let nb =
-                                    replace_at_word_boundaries(&base_rc, &base.name, &ours.name);
-                                let nt = replace_at_word_boundaries(
-                                    &theirs_rc,
-                                    &theirs.name,
-                                    &ours.name,
-                                );
-                                (nb, ours_rc.clone(), nt, Some(&ours.name))
-                            } else if theirs_renamed && !ours_renamed {
-                                // Theirs renamed: normalize base+ours to use theirs' name
-                                let nb =
-                                    replace_at_word_boundaries(&base_rc, &base.name, &theirs.name);
-                                let no =
-                                    replace_at_word_boundaries(&ours_rc, &ours.name, &theirs.name);
-                                (nb, no, theirs_rc.clone(), Some(&theirs.name))
-                            } else {
-                                (base_rc.clone(), ours_rc.clone(), theirs_rc.clone(), None)
-                            };
-
-                        // Rename + modify: if one side renamed and the other modified
-                        // the body, conflict. The modifying developer didn't know about
-                        // the rename, so the merge needs human/agent review.
-                        if (ours_renamed && !theirs_renamed) || (!ours_renamed && theirs_renamed) {
-                            let renamed_in_ours = ours_renamed;
-                            let (old_name, new_name) = if renamed_in_ours {
-                                (base.name.clone(), ours.name.clone())
-                            } else {
-                                (base.name.clone(), theirs.name.clone())
-                            };
-                            stats.entities_conflicted += 1;
-                            let conflict = EntityConflict {
-                                entity_name: base.name.clone(),
-                                entity_type: base.entity_type.clone(),
-                                kind: ConflictKind::RenameModify {
-                                    old_name,
-                                    new_name,
-                                    renamed_in_ours,
-                                },
-                                complexity: ConflictComplexity::SyntaxFunctional,
-                                ours_content: Some(ours_rc),
-                                theirs_content: Some(theirs_rc),
-                                base_content: Some(base_rc),
-                            };
-                            return (
-                                ResolvedEntity::Conflict(conflict),
-                                ResolutionStrategy::ConflictRenameModify,
-                            );
-                        }
-
-                        // Whitespace-aware shortcut: if one side only changed
-                        // whitespace/formatting, take the other side's content changes.
-                        // This handles the common case where one agent reformats while
-                        // another makes semantic changes.
-                        if is_whitespace_only_diff(&base_rc, &ours_rc) {
-                            stats.entities_theirs_only += 1;
-                            return (
-                                ResolvedEntity::Clean(entity_to_region_with_content(
-                                    theirs, &theirs_rc,
-                                )),
-                                ResolutionStrategy::TheirsOnly,
-                            );
-                        }
-                        if is_whitespace_only_diff(&base_rc, &theirs_rc) {
-                            stats.entities_ours_only += 1;
-                            return (
-                                ResolvedEntity::Clean(entity_to_region_with_content(
-                                    ours, &ours_rc,
-                                )),
-                                ResolutionStrategy::OursOnly,
-                            );
-                        }
-
-                        // Pick the renamed entity for output (prefer the side that did the rename)
-                        let output_entity = if ours_renamed {
-                            ours
-                        } else if theirs_renamed {
-                            theirs
-                        } else {
-                            ours
-                        };
-
-                        match diffy_merge(&merge_base_rc, &merge_ours_rc, &merge_theirs_rc) {
-                            Some(merged) => {
-                                stats.entities_both_changed_merged += 1;
-                                stats.resolved_via_diffy += 1;
-                                (
-                                    ResolvedEntity::Clean(EntityRegion {
-                                        entity_id: output_entity.id.clone(),
-                                        entity_name: output_entity.name.clone(),
-                                        entity_type: output_entity.entity_type.clone(),
-                                        content: merged,
-                                        start_line: output_entity.start_line,
-                                        end_line: output_entity.end_line,
-                                    }),
-                                    ResolutionStrategy::DiffyMerged,
-                                )
-                            }
-                            None => {
-                                // Strategy 1: decorator/annotation-aware merge
-                                // Decorators are unordered annotations — merge them commutatively
-                                if let Some(merged) =
-                                    try_decorator_aware_merge(&base_rc, &ours_rc, &theirs_rc)
-                                {
-                                    stats.entities_both_changed_merged += 1;
-                                    stats.resolved_via_diffy += 1;
-                                    return (
-                                        ResolvedEntity::Clean(EntityRegion {
-                                            entity_id: ours.id.clone(),
-                                            entity_name: ours.name.clone(),
-                                            entity_type: ours.entity_type.clone(),
-                                            content: merged,
-                                            start_line: ours.start_line,
-                                            end_line: ours.end_line,
-                                        }),
-                                        ResolutionStrategy::DecoratorMerged,
-                                    );
-                                }
-
-                                // Strategy 2: inner entity merge for container types
-                                // (LastMerge insight: class members are unordered children)
-                                if is_container_entity_type(&ours.entity_type) {
-                                    let base_children = in_base
-                                        .map(|b| get_child_entities(b, base_all))
-                                        .unwrap_or_default();
-                                    let ours_children = get_child_entities(ours, ours_all);
-                                    let theirs_children = in_theirs
-                                        .map(|t| get_child_entities(t, theirs_all))
-                                        .unwrap_or_default();
-                                    let base_start = in_base.map(|b| b.start_line).unwrap_or(1);
-                                    let ours_start = ours.start_line;
-                                    let theirs_start = in_theirs.map(|t| t.start_line).unwrap_or(1);
-                                    if let Some(inner) = try_inner_entity_merge(
-                                        &base_rc,
-                                        &ours_rc,
-                                        &theirs_rc,
-                                        &base_children,
-                                        &ours_children,
-                                        &theirs_children,
-                                        base_start,
-                                        ours_start,
-                                        theirs_start,
-                                        marker_format,
-                                    ) {
-                                        if inner.has_conflicts {
-                                            // Inner merge produced per-member conflicts:
-                                            // content has scoped markers for just the conflicted
-                                            // members; clean members are merged normally.
-                                            stats.entities_conflicted += 1;
-                                            stats.resolved_via_inner_merge += 1;
-                                            let complexity = classify_conflict(
-                                                Some(&base_rc),
-                                                Some(&ours_rc),
-                                                Some(&theirs_rc),
-                                            );
-                                            return (
-                                                ResolvedEntity::ScopedConflict {
-                                                    content: inner.content,
-                                                    conflict: EntityConflict {
-                                                        entity_name: ours.name.clone(),
-                                                        entity_type: ours.entity_type.clone(),
-                                                        kind: ConflictKind::BothModified,
-                                                        complexity,
-                                                        ours_content: Some(ours_rc),
-                                                        theirs_content: Some(theirs_rc),
-                                                        base_content: Some(base_rc),
-                                                    },
-                                                },
-                                                ResolutionStrategy::InnerMerged,
-                                            );
-                                        } else {
-                                            stats.entities_both_changed_merged += 1;
-                                            stats.resolved_via_inner_merge += 1;
-                                            return (
-                                                ResolvedEntity::Clean(EntityRegion {
-                                                    entity_id: ours.id.clone(),
-                                                    entity_name: ours.name.clone(),
-                                                    entity_type: ours.entity_type.clone(),
-                                                    content: inner.content,
-                                                    start_line: ours.start_line,
-                                                    end_line: ours.end_line,
-                                                }),
-                                                ResolutionStrategy::InnerMerged,
-                                            );
-                                        }
-                                    }
-                                }
-                                stats.entities_conflicted += 1;
-                                let complexity = classify_conflict(
-                                    Some(&base_rc),
-                                    Some(&ours_rc),
-                                    Some(&theirs_rc),
-                                );
-                                (
-                                    ResolvedEntity::Conflict(EntityConflict {
-                                        entity_name: ours.name.clone(),
-                                        entity_type: ours.entity_type.clone(),
-                                        kind: ConflictKind::BothModified,
-                                        complexity,
-                                        ours_content: Some(ours_rc),
-                                        theirs_content: Some(theirs_rc),
-                                        base_content: Some(base_rc),
-                                    }),
-                                    ResolutionStrategy::ConflictBothModified,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Entity in base and ours, but not theirs → theirs deleted it
-        (Some(_base), Some(ours), None) => {
-            let ours_modified = ours.content_hash != _base.content_hash;
-            if ours_modified {
-                // Modify/delete conflict
-                stats.entities_conflicted += 1;
-                let ours_rc = region_content(ours, ours_region_content);
-                let base_rc = region_content(_base, base_region_content);
-                let complexity = classify_conflict(Some(&base_rc), Some(&ours_rc), None);
-                (
-                    ResolvedEntity::Conflict(EntityConflict {
-                        entity_name: ours.name.clone(),
-                        entity_type: ours.entity_type.clone(),
-                        kind: ConflictKind::ModifyDelete {
-                            modified_in_ours: true,
-                        },
-                        complexity,
-                        ours_content: Some(ours_rc),
-                        theirs_content: None,
-                        base_content: Some(base_rc),
-                    }),
-                    ResolutionStrategy::ConflictModifyDelete,
-                )
-            } else {
-                // Theirs deleted, ours unchanged → accept deletion
-                stats.entities_deleted += 1;
-                (ResolvedEntity::Deleted, ResolutionStrategy::Deleted)
-            }
-        }
-
-        // Entity in base and theirs, but not ours → ours deleted it
-        (Some(_base), None, Some(theirs)) => {
-            let theirs_modified = theirs.content_hash != _base.content_hash;
-            if theirs_modified {
-                // Modify/delete conflict
-                stats.entities_conflicted += 1;
-                let theirs_rc = region_content(theirs, theirs_region_content);
-                let base_rc = region_content(_base, base_region_content);
-                let complexity = classify_conflict(Some(&base_rc), None, Some(&theirs_rc));
-                (
-                    ResolvedEntity::Conflict(EntityConflict {
-                        entity_name: theirs.name.clone(),
-                        entity_type: theirs.entity_type.clone(),
-                        kind: ConflictKind::ModifyDelete {
-                            modified_in_ours: false,
-                        },
-                        complexity,
-                        ours_content: None,
-                        theirs_content: Some(theirs_rc),
-                        base_content: Some(base_rc),
-                    }),
-                    ResolutionStrategy::ConflictModifyDelete,
-                )
-            } else {
-                // Ours deleted, theirs unchanged → accept deletion
-                stats.entities_deleted += 1;
-                (ResolvedEntity::Deleted, ResolutionStrategy::Deleted)
-            }
-        }
-
-        // Entity only in ours (added by ours)
-        (None, Some(ours), None) => {
-            stats.entities_added_ours += 1;
-            (
-                ResolvedEntity::Clean(entity_to_region_with_content(
-                    ours,
-                    &region_content(ours, ours_region_content),
-                )),
-                ResolutionStrategy::AddedOurs,
-            )
-        }
-
-        // Entity only in theirs (added by theirs)
-        (None, None, Some(theirs)) => {
-            stats.entities_added_theirs += 1;
-            (
-                ResolvedEntity::Clean(entity_to_region_with_content(
-                    theirs,
-                    &region_content(theirs, theirs_region_content),
-                )),
-                ResolutionStrategy::AddedTheirs,
-            )
-        }
-
-        // Entity in both ours and theirs but not base (both added)
-        (None, Some(ours), Some(theirs)) => {
-            if ours.content_hash == theirs.content_hash {
-                // Same content added by both → take ours
-                stats.entities_added_ours += 1;
-                (
-                    ResolvedEntity::Clean(entity_to_region_with_content(
-                        ours,
-                        &region_content(ours, ours_region_content),
-                    )),
-                    ResolutionStrategy::ContentEqual,
-                )
-            } else {
-                // Different content → conflict
-                stats.entities_conflicted += 1;
-                let ours_rc = region_content(ours, ours_region_content);
-                let theirs_rc = region_content(theirs, theirs_region_content);
-                let complexity = classify_conflict(None, Some(&ours_rc), Some(&theirs_rc));
-                (
-                    ResolvedEntity::Conflict(EntityConflict {
-                        entity_name: ours.name.clone(),
-                        entity_type: ours.entity_type.clone(),
-                        kind: ConflictKind::BothAdded,
-                        complexity,
-                        ours_content: Some(ours_rc),
-                        theirs_content: Some(theirs_rc),
-                        base_content: None,
-                    }),
-                    ResolutionStrategy::ConflictBothAdded,
-                )
-            }
-        }
-
-        // Entity only in base (deleted by both)
-        (Some(_), None, None) => {
-            stats.entities_deleted += 1;
-            (ResolvedEntity::Deleted, ResolutionStrategy::Deleted)
-        }
-
-        // Should not happen
-        (None, None, None) => (ResolvedEntity::Deleted, ResolutionStrategy::Deleted),
+    // ------------------------------------------------------------------
+    // v2: the typed pipeline (Match -> Classify -> Resolve -> Bind -> Plan
+    // -> Render). It owns every file the entity model actually describes.
+    // The line-level path below is reached only for the constructs v2
+    // reports as outside that model — no grammar, no entities, both sides
+    // creating a structured file from nothing, or identity so ambiguous
+    // that per-entity verdicts would be fiction. Those are properties of the
+    // input, not fallbacks from v2 failing.
+    // ------------------------------------------------------------------
+    match crate::v2::merge_file(base, ours, theirs, file_path, registry, marker_format, host) {
+        Ok(result) => result,
+        Err(_unsupported) => line_level_fallback(base, ours, theirs, file_path, host),
     }
 }
 
-fn entity_to_region_with_content(entity: &SemanticEntity, content: &str) -> EntityRegion {
-    EntityRegion {
-        entity_id: entity.id.clone(),
-        entity_name: entity.name.clone(),
-        entity_type: entity.entity_type.clone(),
-        content: content.to_string(),
-        start_line: entity.start_line,
-        end_line: entity.end_line,
-    }
-}
-
-/// Build a map from entity_id to region content (from file lines).
-/// This preserves surrounding syntax (like `export`) that sem-core's entity.content may strip.
-/// Returns borrowed references since regions live for the merge duration.
-fn build_region_content_map(regions: &[FileRegion]) -> HashMap<&str, &str> {
-    regions
-        .iter()
-        .filter_map(|r| match r {
-            FileRegion::Entity(e) => Some((e.entity_id.as_str(), e.content.as_str())),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Check if the only differences between two strings are whitespace changes.
-/// This includes: indentation changes, trailing whitespace, blank line additions/removals.
-fn is_whitespace_only_diff(a: &str, b: &str) -> bool {
+pub(crate) fn is_whitespace_only_diff(a: &str, b: &str) -> bool {
     if a == b {
         return true; // identical, not really a "whitespace-only diff" but safe
     }
@@ -1206,6 +375,24 @@ fn is_whitespace_only_diff(a: &str, b: &str) -> bool {
         .filter(|l| !l.is_empty())
         .collect();
     a_normalized == b_normalized
+}
+
+/// A blank-line count, merged the way a one-line region would be: a side that
+/// left base's number alone has asserted nothing about it, so the other side's
+/// number is the answer. If both moved it, the wider run wins — a blank line
+/// neither version deleted is not this merge's to delete.
+///
+/// Every boundary the import rebuild re-synthesizes goes through here, so the
+/// separators it writes are a function of the three inputs and not of a
+/// constant somebody picked.
+fn widest_gap(base: usize, ours: usize, theirs: usize) -> usize {
+    if ours == base {
+        theirs
+    } else if theirs == base {
+        ours
+    } else {
+        ours.max(theirs)
+    }
 }
 
 /// Check if a line is a decorator or annotation.
@@ -1255,7 +442,12 @@ fn split_decorators(content: &str) -> (Vec<&str>, &str) {
 ///
 /// This handles the common pattern where one agent adds @cache and another adds @deprecated
 /// to the same function — they should both be preserved.
-fn try_decorator_aware_merge(base: &str, ours: &str, theirs: &str) -> Option<String> {
+pub(crate) fn try_decorator_aware_merge(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    decorators_compose: bool,
+) -> Option<String> {
     let (base_decorators, base_body) = split_decorators(base);
     let (ours_decorators, ours_body) = split_decorators(ours);
     let (theirs_decorators, theirs_body) = split_decorators(theirs);
@@ -1263,6 +455,31 @@ fn try_decorator_aware_merge(base: &str, ours: &str, theirs: &str) -> Option<Str
     // Only useful if at least one side has decorators
     if ours_decorators.is_empty() && theirs_decorators.is_empty() {
         return None;
+    }
+
+    // In languages where decorators COMPOSE (Python, TS/JS: application is
+    // function composition, non-commutative), the stack order of two
+    // one-sided additions is a semantic decision neither side made (e.g.
+    // @cache outside @auth serves cached responses without an auth check).
+    // Refuse to fabricate it: fall through to the conflict path so a
+    // human/agent chooses the order. Java/C#/Kotlin annotations are
+    // unordered metadata, so set-union remains correct there.
+    if decorators_compose {
+        let base_set_pre: HashSet<&str> = base_decorators.iter().copied().collect();
+        let ours_new: Vec<&&str> = ours_decorators
+            .iter()
+            .filter(|d| !base_set_pre.contains(**d))
+            .collect();
+        let theirs_new: Vec<&&str> = theirs_decorators
+            .iter()
+            .filter(|d| !base_set_pre.contains(**d))
+            .collect();
+        if !ours_new.is_empty()
+            && !theirs_new.is_empty()
+            && ours_new.iter().any(|d| !theirs_new.iter().any(|t| t == d))
+        {
+            return None;
+        }
     }
 
     // Merge bodies using diffy (or take unchanged side)
@@ -1318,45 +535,25 @@ fn try_decorator_aware_merge(base: &str, ours: &str, theirs: &str) -> Option<Str
 }
 
 /// Try 3-way merge on text using diffy. Returns None if there are conflicts.
-fn diffy_merge(base: &str, ours: &str, theirs: &str) -> Option<String> {
+pub(crate) fn diffy_merge(base: &str, ours: &str, theirs: &str) -> Option<String> {
     let result = diffy::merge(base, ours, theirs);
     result.ok()
 }
 
-/// Try 3-way merge using git merge-file. Returns None on conflict or error.
-/// This uses a different diff algorithm than diffy and can sometimes merge
-/// cases that diffy cannot (and vice versa).
-fn git_merge_string(base: &str, ours: &str, theirs: &str) -> Option<String> {
-    let dir = tempfile::tempdir().ok()?;
-    let base_path = dir.path().join("base");
-    let ours_path = dir.path().join("ours");
-    let theirs_path = dir.path().join("theirs");
-
-    std::fs::write(&base_path, base).ok()?;
-    std::fs::write(&ours_path, ours).ok()?;
-    std::fs::write(&theirs_path, theirs).ok()?;
-
-    let output = Command::new("git")
-        .arg("merge-file")
-        .arg("-p")
-        .arg(&ours_path)
-        .arg(&base_path)
-        .arg(&theirs_path)
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        String::from_utf8(output.stdout).ok()
-    } else {
-        None
-    }
-}
-
+/// The three files a `git merge-file` call has to be handed, and nothing else.
+///
+/// `git merge-file` takes three *paths*. There is no stdin form and no way to
+/// pass three blobs on a command line, so any caller of it has to materialise
+/// its inputs. What a caller does *not* have to do is build and tear down a
+/// whole directory around them: both fallbacks used to `tempfile::tempdir()`
+/// per call, paying a `mkdir` and an `rmdir` on top of the creates and unlinks
+/// the files themselves need — and on top of the ~3.2ms `git` process, which
+/// is the real cost and the one thing here that cannot be removed.
+///
 /// Merge interstitial regions from all three versions.
-/// Uses commutative (set-based) merge for import blocks — inspired by
-/// LastMerge/Mergiraf's "unordered children" concept.
+/// Uses set-based (order-independent) merge for import blocks.
 /// Falls back to line-level 3-way merge for non-import content.
-fn merge_interstitials(
+pub(crate) fn merge_interstitials(
     base_regions: &[FileRegion],
     ours_regions: &[FileRegion],
     theirs_regions: &[FileRegion],
@@ -1386,7 +583,11 @@ fn merge_interstitials(
         })
         .collect();
 
-    let mut all_keys: HashSet<&str> = HashSet::new();
+    // Sorted, not hashed: the loop below appends to `interstitial_conflicts`,
+    // and a conflict list in hash order is a merge that is not a function of
+    // its inputs. The per-key answers are independent, so the order only has
+    // to be *some* fixed one.
+    let mut all_keys: BTreeSet<&str> = BTreeSet::new();
     all_keys.extend(base_map.keys());
     all_keys.extend(ours_map.keys());
     all_keys.extend(theirs_map.keys());
@@ -1407,52 +608,119 @@ fn merge_interstitials(
         } else if base_content == theirs_content {
             merged.insert(key.to_string(), ours_content.to_string());
         } else {
-            // Both changed — check whitespace-only first
-            if is_whitespace_only_diff(base_content, ours_content)
-                && is_whitespace_only_diff(base_content, theirs_content)
-            {
-                // Both sides only changed whitespace, take theirs (arbitrary)
-                merged.insert(key.to_string(), theirs_content.to_string());
-            } else if is_whitespace_only_diff(base_content, ours_content) {
-                // Ours is whitespace-only, theirs has real changes
-                merged.insert(key.to_string(), theirs_content.to_string());
-            } else if is_whitespace_only_diff(base_content, theirs_content) {
-                // Theirs is whitespace-only, ours has real changes
-                merged.insert(key.to_string(), ours_content.to_string());
+            // Both changed. Each rung of this ladder is a SPECIALISATION — a
+            // reading of the region that lets two edits compose where diff3
+            // would refuse. A specialisation is only allowed while it loses
+            // nothing: the import union, for instance, rebuilds the region out
+            // of its import lines, so a `//#region` banner or a comment
+            // explaining an import is not in its vocabulary and used to vanish
+            // silently. Each rung's answer is therefore checked before it is
+            // accepted, and a rung that drops text all three versions agree on
+            // is not taken.
+            let keeps_everything = |text: &str| {
+                !crate::container::drops_unanimous_lines(
+                    base_content,
+                    ours_content,
+                    theirs_content,
+                    text,
+                )
+            };
+            // A line NEITHER version had before is an addition, and no rung is
+            // allowed to answer by dropping one. `keeps_everything` cannot see
+            // it — it asks about lines all three versions agree on — so an
+            // import block with a `try: import pytz / except ImportError:`
+            // guard interleaved in it came back with the guard gone: those
+            // lines are neither imports (so the rebuild has no slot for them)
+            // nor unanimous (so the no-loss backstop had no complaint). This
+            // check has to account for every side's work, not only the part
+            // both sides touched.
+            let added: Vec<&str> = ours_content
+                .lines()
+                .chain(theirs_content.lines())
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !base_content.lines().any(|b| b.trim() == *l))
+                .collect();
+            let keeps_additions = |text: &str| {
+                let have: HashSet<&str> = text.lines().map(str::trim).collect();
+                added.iter().all(|l| have.contains(l))
+            };
+            let ws_ours = is_whitespace_only_diff(base_content, ours_content);
+            let ws_theirs = is_whitespace_only_diff(base_content, theirs_content);
+            let mut order_conflicted = false;
+            // The rungs, in the order they are allowed to answer. The first
+            // one whose answer loses nothing wins; `keeps_everything` is the
+            // same predicate for all of them.
+            let mut ladder: Vec<String> = Vec::new();
+            if ws_ours && ws_theirs {
+                // Both sides only changed whitespace; neither has content to
+                // defer to, so one of them is taken outright.
+                ladder.push(theirs_content.to_string());
             } else if is_import_region(base_content)
                 || is_import_region(ours_content)
                 || is_import_region(theirs_content)
             {
-                // Commutative merge: treat import lines as a set
-                let result =
+                // Order-preserving merge of the two import sequences. The
+                // sides may give imports they SHARE contradictory relative
+                // orders; module initialisation is side-effectful, so no
+                // ordering is safe to invent and that is surfaced below.
+                let (result, order_conflict) =
                     merge_imports_commutatively(base_content, ours_content, theirs_content);
-                merged.insert(key.to_string(), result);
-            } else {
-                // Regular line-level merge
-                match diffy::merge(base_content, ours_content, theirs_content) {
-                    Ok(m) => {
-                        merged.insert(key.to_string(), m);
+                order_conflicted = order_conflict;
+                if !order_conflict {
+                    ladder.push(result);
+                }
+            }
+            if !order_conflicted {
+                if let Ok(text) = diffy::merge(base_content, ours_content, theirs_content) {
+                    ladder.push(text);
+                }
+            }
+            // The one-sided whitespace rung, DEMOTED below the line merge.
+            // Taking the content-bearing side outright answers the whole
+            // region, so a blank line the other side deleted at a declaration
+            // boundary silently comes back. A whitespace-only edit is still an
+            // edit; it only loses when the lines will not compose.
+            if ws_ours != ws_theirs {
+                ladder.push(
+                    if ws_ours {
+                        theirs_content
+                    } else {
+                        ours_content
                     }
-                    Err(_conflicted) => {
-                        // Create a proper conflict instead of silently embedding
-                        // raw conflict markers into the output.
-                        let complexity = classify_conflict(
-                            Some(base_content),
-                            Some(ours_content),
-                            Some(theirs_content),
-                        );
-                        let conflict = EntityConflict {
-                            entity_name: key.to_string(),
-                            entity_type: "interstitial".to_string(),
-                            kind: ConflictKind::BothModified,
-                            complexity,
-                            ours_content: Some(ours_content.to_string()),
-                            theirs_content: Some(theirs_content.to_string()),
-                            base_content: Some(base_content.to_string()),
-                        };
-                        merged.insert(key.to_string(), conflict.to_conflict_markers(marker_format));
-                        interstitial_conflicts.push(conflict);
-                    }
+                    .to_string(),
+                );
+            }
+            let candidate = ladder
+                .into_iter()
+                .find(|text| keeps_everything(text) && keeps_additions(text));
+            match candidate {
+                Some(text) => {
+                    merged.insert(key.to_string(), text);
+                }
+                None => {
+                    let complexity = classify_conflict(
+                        Some(base_content),
+                        Some(ours_content),
+                        Some(theirs_content),
+                    );
+                    let conflict = EntityConflict {
+                        entity_name: key.to_string(),
+                        entity_type: if order_conflicted {
+                            "imports".to_string()
+                        } else {
+                            "interstitial".to_string()
+                        },
+                        kind: ConflictKind::BothModified,
+                        complexity,
+                        ours_content: Some(ours_content.to_string()),
+                        theirs_content: Some(theirs_content.to_string()),
+                        base_content: Some(base_content.to_string()),
+                    };
+                    merged.insert(
+                        key.to_string(),
+                        conflict.to_conflict_markers(marker_format, "merge_ladder_exhausted"),
+                    );
+                    interstitial_conflicts.push(conflict);
                 }
             }
         }
@@ -1496,71 +764,6 @@ fn is_import_region(content: &str) -> bool {
     import_count * 2 > lines.len()
 }
 
-/// Post-merge cleanup: remove consecutive duplicate lines and normalize blank lines.
-///
-/// Fixes two classes of merge artifacts:
-/// 1. Duplicate lines/blocks that appear when both sides add the same content
-///    (e.g. duplicate typedefs, forward declarations)
-/// 2. Missing blank lines between entities or declarations, and excessive
-///    blank lines (3+ consecutive) collapsed to 2
-fn post_merge_cleanup(content: &str) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    let mut result: Vec<&str> = Vec::with_capacity(lines.len());
-
-    // Pass 1: Remove consecutive duplicate lines that look like declarations or imports.
-    // Only dedup lines that are plausibly merge artifacts (imports, exports, forward decls).
-    // Preserve intentional duplicates like repeated assertions, assignments, or data lines.
-    for line in &lines {
-        if line.trim().is_empty() {
-            result.push(line);
-            continue;
-        }
-        if let Some(prev) = result.last() {
-            if !prev.trim().is_empty() && *prev == *line && looks_like_declaration(line) {
-                continue; // skip consecutive exact duplicate of declaration-like line
-            }
-        }
-        result.push(line);
-    }
-
-    // Pass 2: Collapse 3+ consecutive blank lines to 2 (one separator blank line).
-    let mut final_lines: Vec<&str> = Vec::with_capacity(result.len());
-    let mut consecutive_blanks = 0;
-    for line in &result {
-        if line.trim().is_empty() {
-            consecutive_blanks += 1;
-            if consecutive_blanks <= 2 {
-                final_lines.push(line);
-            }
-        } else {
-            consecutive_blanks = 0;
-            final_lines.push(line);
-        }
-    }
-
-    let mut out = final_lines.join("\n");
-    if content.ends_with('\n') && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out
-}
-
-/// Check if a line looks like a declaration/import that merge might duplicate.
-/// Returns false for lines that could be intentionally repeated (assertions,
-/// assignments, data initializers, struct fields, etc.).
-fn looks_like_declaration(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.starts_with("import ")
-        || trimmed.starts_with("from ")
-        || trimmed.starts_with("use ")
-        || trimmed.starts_with("export ")
-        || trimmed.starts_with("require(")
-        || trimmed.starts_with("#include")
-        || trimmed.starts_with("typedef ")
-        || trimmed.starts_with("using ")
-        || (trimmed.starts_with("pub ") && trimmed.contains("mod "))
-}
-
 /// Check if a line is a top-level import/use/require statement.
 ///
 /// Only matches unindented lines to avoid picking up conditional imports
@@ -1571,19 +774,6 @@ fn is_import_line(line: &str) -> bool {
         return false;
     }
     let trimmed = line.trim();
-    trimmed.starts_with("import ")
-        || trimmed.starts_with("from ")
-        || trimmed.starts_with("use ")
-        || trimmed.starts_with("require(")
-        || trimmed.starts_with("const ") && trimmed.contains("require(")
-        || trimmed.starts_with("package ")
-        || trimmed.starts_with("#include ")
-        || trimmed.starts_with("using ")
-}
-
-/// Like is_import_line but operates on already-trimmed strings.
-/// Used in the line-level safety net where we compare trimmed lines.
-fn is_import_line_trimmed(trimmed: &str) -> bool {
     trimmed.starts_with("import ")
         || trimmed.starts_with("from ")
         || trimmed.starts_with("use ")
@@ -1719,12 +909,80 @@ fn parse_import_statements(content: &str) -> (Vec<ImportStatement>, Vec<String>)
     (imports, non_import_lines)
 }
 
-/// Merge import blocks commutatively (as unordered sets), preserving grouping.
+/// Order-preserving union of two import sequences.
+///
+/// Module imports execute top to bottom and their side effects are ordered, so
+/// the two sides' sequences are sequences, not sets: the result must be a
+/// linear extension of BOTH. Walks the two sequences together, taking shared
+/// imports as anchors and slotting each side's own additions at the position
+/// that side put them. Returns the merged sequence and whether the two sides
+/// disagreed about the relative order of imports they SHARE — the one case no
+/// linear extension exists for, which only a human can settle.
+fn order_preserving_import_union<'a>(ours: &[&'a str], theirs: &[&'a str]) -> (Vec<&'a str>, bool) {
+    let ours_set: HashSet<&str> = ours.iter().copied().collect();
+    let theirs_set: HashSet<&str> = theirs.iter().copied().collect();
+    let mut out: Vec<&'a str> = Vec::with_capacity(ours.len() + theirs.len());
+    let mut emitted: HashSet<&str> = HashSet::new();
+    let mut order_conflict = false;
+    let (mut i, mut j) = (0usize, 0usize);
+
+    while i < ours.len() || j < theirs.len() {
+        if i < ours.len() && emitted.contains(ours[i]) {
+            i += 1;
+            continue;
+        }
+        if j < theirs.len() && emitted.contains(theirs[j]) {
+            j += 1;
+            continue;
+        }
+        let next = if i >= ours.len() {
+            let l = theirs[j];
+            j += 1;
+            l
+        } else if j >= theirs.len() {
+            let l = ours[i];
+            i += 1;
+            l
+        } else if ours[i] == theirs[j] {
+            let l = ours[i];
+            i += 1;
+            j += 1;
+            l
+        } else if !theirs_set.contains(ours[i]) {
+            // ours-only import: it belongs where ours put it
+            let l = ours[i];
+            i += 1;
+            l
+        } else if !ours_set.contains(theirs[j]) {
+            // theirs-only import: it belongs where theirs put it
+            let l = theirs[j];
+            j += 1;
+            l
+        } else {
+            // Both heads are shared imports, in opposite relative order. No
+            // sequence satisfies both sides; report it and keep going so the
+            // caller still has content to show alongside the markers.
+            order_conflict = true;
+            let l = ours[i];
+            i += 1;
+            l
+        };
+        if emitted.insert(next) {
+            out.push(next);
+        }
+    }
+
+    (out, order_conflict)
+}
+
+/// Merge import blocks, preserving each side's import ORDER and grouping.
 ///
 /// Handles both single-line imports and multi-line import blocks.
 /// For multi-line imports from the same source, merges specifiers as a set.
-/// Single-line imports are merged as before: set union with deletions.
-fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
+/// Returns the merged text and whether the two sides gave imports they share
+/// contradictory relative orders (an honest conflict, not something to
+/// silently pick a winner for).
+fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> (String, bool) {
     let (base_imports, _) = parse_import_statements(base);
     let (ours_imports, _) = parse_import_statements(ours);
     let (theirs_imports, _) = parse_import_statements(theirs);
@@ -1734,90 +992,192 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
         || theirs_imports.iter().any(|i| i.is_multiline);
 
     if has_multiline {
-        return merge_imports_with_multiline(
-            base,
-            ours,
-            theirs,
-            &base_imports,
-            &ours_imports,
-            &theirs_imports,
+        return (
+            merge_imports_with_multiline(
+                base,
+                ours,
+                theirs,
+                &base_imports,
+                &ours_imports,
+                &theirs_imports,
+            ),
+            false,
         );
     }
 
-    // Original single-line-only logic
-    let base_lines: HashSet<&str> = base.lines().filter(|l| is_import_line(l)).collect();
-    let ours_lines: HashSet<&str> = ours.lines().filter(|l| is_import_line(l)).collect();
+    // Single-line-only path.
+    fn import_seq(content: &str) -> Vec<&str> {
+        content.lines().filter(|l| is_import_line(l)).collect()
+    }
+    let base_seq = import_seq(base);
+    let ours_seq = import_seq(ours);
+    let theirs_seq = import_seq(theirs);
+    let base_set: HashSet<&str> = base_seq.iter().copied().collect();
+    let ours_set: HashSet<&str> = ours_seq.iter().copied().collect();
+    let theirs_set: HashSet<&str> = theirs_seq.iter().copied().collect();
 
-    let theirs_deleted: HashSet<&str> = base_lines
-        .difference(
-            &theirs
-                .lines()
-                .filter(|l| is_import_line(l))
-                .collect::<HashSet<&str>>(),
-        )
-        .copied()
-        .collect();
+    // An import that was in base and is gone from one side was deleted there;
+    // the deletion wins over the other side's untouched copy.
+    let survives =
+        |l: &&str| !(base_set.contains(*l) && (!ours_set.contains(*l) || !theirs_set.contains(*l)));
+    let ours_live: Vec<&str> = ours_seq.iter().copied().filter(survives).collect();
+    let theirs_live: Vec<&str> = theirs_seq.iter().copied().filter(survives).collect();
 
-    let theirs_added: Vec<&str> = theirs
-        .lines()
-        .filter(|l| is_import_line(l) && !base_lines.contains(l) && !ours_lines.contains(l))
-        .collect();
+    // Who edited the ORDER? Restrict each side to the imports base also had:
+    // if that subsequence still reads the way base read it, the side left the
+    // ordering alone. A disagreement between the two sides is only a conflict
+    // when BOTH of them moved shared imports — if one side is still at base's
+    // order it has asserted nothing about ordering, so the other side's order
+    // is the merge. Ours used to be the skeleton unconditionally, so a
+    // one-sided "organize imports" collided with the untouched side and
+    // produced a whole-block conflict where neither side actually disagreed.
+    // Both views are taken over the same set — the base imports this side still
+    // has AFTER the other side's deletions are applied — so a deletion cannot
+    // masquerade as a reordering.
+    let reordered = |live: &[&str]| -> bool {
+        let live_set: HashSet<&str> = live.iter().copied().collect();
+        let side_view: Vec<&str> = live
+            .iter()
+            .copied()
+            .filter(|l| base_set.contains(l))
+            .collect();
+        let base_view: Vec<&str> = base_seq
+            .iter()
+            .copied()
+            .filter(|l| live_set.contains(l))
+            .collect();
+        side_view != base_view
+    };
+    let ours_reordered = reordered(&ours_live);
+    let theirs_reordered = reordered(&theirs_live);
+    let theirs_leads = theirs_reordered && !ours_reordered;
 
-    // Build import groups from ours (import lines only)
-    let mut groups: Vec<Vec<&str>> = Vec::new();
-    let mut current_group: Vec<&str> = Vec::new();
+    // The skeleton side supplies both the order and the blank-line grouping.
+    let (skeleton, lead_live, follow_live) = if theirs_leads {
+        (theirs, &theirs_live, &ours_live)
+    } else {
+        (ours, &ours_live, &theirs_live)
+    };
 
-    for line in ours.lines() {
-        if line.trim().is_empty() {
-            if !current_group.is_empty() {
-                groups.push(current_group);
-                current_group = Vec::new();
+    let (merged_seq, raw_order_conflict) = order_preserving_import_union(lead_live, follow_live);
+    let order_conflict = raw_order_conflict && ours_reordered && theirs_reordered;
+
+    // Grouping: blank-line-separated import groups are meaningful (stdlib vs.
+    // local, etc.). The skeleton's grouping is the frame; an import only the
+    // other side has inherits a group from its neighbours in the merged
+    // sequence.
+    let mut skeleton_group_of: HashMap<&str, usize> = HashMap::new();
+    let mut group_count = 0usize;
+    {
+        let mut current = 0usize;
+        let mut current_has_imports = false;
+        for line in skeleton.lines() {
+            if line.trim().is_empty() {
+                if current_has_imports {
+                    current += 1;
+                    current_has_imports = false;
+                }
+            } else if is_import_line(line) {
+                skeleton_group_of.insert(line, current);
+                current_has_imports = true;
+                group_count = group_count.max(current + 1);
             }
-        } else if is_import_line(line) {
-            if theirs_deleted.contains(line) {
-                continue;
-            }
-            current_group.push(line);
         }
     }
-    if !current_group.is_empty() {
-        groups.push(current_group);
-    }
+    let group_count = group_count.max(1);
 
-    for add in &theirs_added {
-        let prefix = import_source_prefix(add);
-        let mut best_group = if groups.is_empty() {
-            0
-        } else {
-            groups.len() - 1
+    // An import the skeleton also has keeps the skeleton's group. One only the
+    // other side has is bracketed by its nearest known neighbours in the
+    // merged sequence and joins whichever of the two it shares more leading
+    // source-path segments with. Two properties matter, and the old code had
+    // neither: (1) the group lands *between* the neighbours' groups, so the
+    // assignment is monotone along the sequence and emitting in sequence order
+    // reproduces the union exactly; (2) it never consults a global prefix
+    // table. The old `group_for` asked for an exact `import_source_prefix`
+    // match and fell back to the LAST group, and `import_source_prefix` had no
+    // Java arm at all — a bare `import a.b.C;` has no quotes, so every
+    // Java import only one side added was declared prefix-unique and dumped at
+    // the end. Then the emitter bucketed lines group by group and concatenated,
+    // which threw away the union's ordering as well. That single miss silently
+    // reordered or misplaced a large share of the imports either side added.
+    let known: Vec<Option<usize>> = merged_seq
+        .iter()
+        .map(|l| skeleton_group_of.get(l).copied())
+        .collect();
+    let mut group_of_pos: Vec<usize> = Vec::with_capacity(merged_seq.len());
+    for (idx, line) in merged_seq.iter().enumerate() {
+        if let Some(g) = known[idx] {
+            group_of_pos.push(g);
+            continue;
+        }
+        let prev = (0..idx).rev().find(|&k| known[k].is_some());
+        let next = (idx + 1..merged_seq.len()).find(|&k| known[k].is_some());
+        let g = match (prev, next) {
+            (None, None) => group_count - 1,
+            (Some(p), None) => known[p].expect("prev is known"),
+            (None, Some(n)) => known[n].expect("next is known"),
+            (Some(p), Some(n)) => {
+                let (gp, gn) = (
+                    known[p].expect("prev is known"),
+                    known[n].expect("next is known"),
+                );
+                if gp == gn
+                    || import_prefix_affinity(line, merged_seq[n])
+                        <= import_prefix_affinity(line, merged_seq[p])
+                {
+                    gp
+                } else {
+                    gn
+                }
+            }
         };
-        for (i, group) in groups.iter().enumerate() {
-            if group
-                .iter()
-                .any(|l| is_import_line(l) && import_source_prefix(l) == prefix)
-            {
-                best_group = i;
-                break;
-            }
-        }
-        if best_group < groups.len() {
-            groups[best_group].push(add);
-        } else {
-            groups.push(vec![add]);
-        }
+        group_of_pos.push(g);
     }
 
-    // Sort import lines within each group alphabetically
-    for group in &mut groups {
-        group.sort_unstable();
-    }
+    // A `package` declaration is not an import. `is_import_line` lumps them
+    // together — they share the "unindented top-of-file declaration" shape —
+    // but no Java or Go file writes them in the same block, and when one side
+    // *changes* the package the new declaration is a line the skeleton has
+    // never seen, so it inherits the first import group and the blank line
+    // between declaration and imports disappears. Keep the separation if any
+    // of the three versions had it; none of them can be said to have asked for
+    // it to go away.
+    //
+    // How WIDE that separation is, is also a fact about the file and not a
+    // constant: a file that writes two blank lines between `package` and its
+    // imports is not asking for one.
+    let is_module_decl = |l: &str| l.trim_start().starts_with("package ");
+    let declares_with_gap = |content: &str| -> usize {
+        let lines: Vec<&str> = content.lines().collect();
+        lines
+            .iter()
+            .position(|l| is_module_decl(l))
+            .map(|i| {
+                lines[i + 1..]
+                    .iter()
+                    .take_while(|l| l.trim().is_empty())
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let decl_gap = widest_gap(
+        declares_with_gap(base),
+        declares_with_gap(ours),
+        declares_with_gap(theirs),
+    );
 
     let mut import_lines: Vec<&str> = Vec::new();
-    for (i, group) in groups.iter().enumerate() {
-        if i > 0 {
+    let mut prev_group: Option<usize> = None;
+    for (idx, line) in merged_seq.iter().enumerate() {
+        let group_changed = prev_group.is_some_and(|g| g != group_of_pos[idx]);
+        let leaving_decl = idx > 0 && is_module_decl(merged_seq[idx - 1]) && !is_module_decl(line);
+        if leaving_decl {
+            import_lines.extend(std::iter::repeat_n("", decl_gap));
+        } else if group_changed {
             import_lines.push("");
         }
-        import_lines.extend(group);
+        prev_group = Some(group_of_pos[idx]);
+        import_lines.push(line);
     }
 
     let import_block = import_lines.join("\n");
@@ -1825,46 +1185,110 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
     // Split non-import lines into prefix (before first import) and suffix
     // (after last import) to preserve file-leading directives like
     // `// @ts-nocheck`, shebangs, or license headers (fixes #94).
+    // The blank lines INSIDE the header are content, not padding: a license
+    // block, a blank, then `package foo;` is a shape a real Java file can have,
+    // and gluing the two together is a visible edit nobody made. Only the
+    // blank run that abuts the import block is dropped — that boundary is
+    // re-synthesized below, so keeping it here would double it.
+    //
+    // "Abuts the import block" is one edge, not two. The prefix's OTHER edge is
+    // the top of the region, and a blank line there is the file's own opening —
+    // nothing re-synthesizes it, so trimming it deleted a line all three
+    // versions wrote.
     let extract_prefix_suffix = |content: &str| -> (String, String) {
-        let mut prefix = Vec::new();
-        let mut suffix = Vec::new();
-        let mut seen_import = false;
-        let mut last_import_idx = 0;
+        fn trim_blank_edges<'s, 'a>(lines: &'s [&'a str]) -> &'s [&'a str] {
+            let start = lines
+                .iter()
+                .position(|l| !l.trim().is_empty())
+                .unwrap_or(lines.len());
+            let end = lines
+                .iter()
+                .rposition(|l| !l.trim().is_empty())
+                .map_or(start, |i| i + 1);
+            &lines[start..end]
+        }
+
         let all_lines: Vec<&str> = content.lines().collect();
+        let first_import = all_lines.iter().position(|l| is_import_line(l));
+        let last_import = all_lines.iter().rposition(|l| is_import_line(l));
 
-        for (idx, line) in all_lines.iter().enumerate() {
-            if is_import_line(line) {
-                seen_import = true;
-                last_import_idx = idx;
-            }
+        match (first_import, last_import) {
+            (Some(first), Some(last)) => (
+                trim_blank_edges(&all_lines[..first]).join("\n"),
+                trim_blank_edges(&all_lines[last + 1..]).join("\n"),
+            ),
+            // No imports at all: the whole region is prefix.
+            _ => (trim_blank_edges(&all_lines).join("\n"), String::new()),
         }
-
-        for (idx, line) in all_lines.iter().enumerate() {
-            if is_import_line(line) || line.trim().is_empty() {
-                continue;
-            }
-            if !seen_import
-                || idx
-                    < all_lines
-                        .iter()
-                        .position(|l| is_import_line(l))
-                        .unwrap_or(0)
-            {
-                prefix.push(*line);
-            } else if idx > last_import_idx {
-                suffix.push(*line);
-            }
-        }
-
-        (prefix.join("\n"), suffix.join("\n"))
     };
+
+    // The blank run the region OPENS with, carried separately for the same
+    // reason `gap` is: `join("\n")` cannot represent it and the trim above
+    // discards it. Nothing downstream re-synthesizes this edge, so dropping it
+    // deleted a line every version wrote — `package foo;` counts as an import
+    // line, so a Java file that opens with a blank has its whole prefix inside
+    // that blank run.
+    let lead_blanks = |content: &str| -> usize {
+        content
+            .lines()
+            .take_while(|l| l.trim().is_empty())
+            .count()
+            .min(content.lines().count())
+    };
+    let lead = widest_gap(lead_blanks(base), lead_blanks(ours), lead_blanks(theirs));
+
+    // And the blank run between the last import and whatever follows it. It was
+    // a hard-coded single blank line, which is a formatting opinion the merge
+    // is not entitled to: a file that puts two blank lines between its imports
+    // and its class javadoc came back with one, and one that puts none came
+    // back with one.
+    let suffix_gap = |content: &str| -> usize {
+        let lines: Vec<&str> = content.lines().collect();
+        match lines.iter().rposition(|l| is_import_line(l)) {
+            Some(last) => lines[last + 1..]
+                .iter()
+                .take_while(|l| l.trim().is_empty())
+                .count(),
+            None => 0,
+        }
+    };
+    let tail_gap = widest_gap(suffix_gap(base), suffix_gap(ours), suffix_gap(theirs));
 
     let (base_prefix, base_suffix) = extract_prefix_suffix(base);
     let (ours_prefix, ours_suffix) = extract_prefix_suffix(ours);
     let (theirs_prefix, theirs_suffix) = extract_prefix_suffix(theirs);
 
+    // How many blank lines stood between the header and the first import?
+    // `package foo;` counts as an import line (`is_import_line`), so for Java
+    // this is exactly the blank between the license block and the package
+    // declaration — the one the rebuild used to swallow. Take the widest gap
+    // any version had: a side that *added* the header (a fresh license block
+    // is a common real-world edit) is the only side that has an opinion about
+    // the gap below it, and it is not always the skeleton.
+    let header_gap = |content: &str| -> usize {
+        let lines: Vec<&str> = content.lines().collect();
+        match lines.iter().position(|l| is_import_line(l)) {
+            Some(first) => lines[..first]
+                .iter()
+                .rev()
+                .take_while(|l| l.trim().is_empty())
+                .count(),
+            None => 0,
+        }
+    };
+    let gap = header_gap(ours)
+        .max(header_gap(theirs))
+        .max(header_gap(base));
+
     // Merge prefix lines (directives before imports)
     let mut result = String::new();
+    // The opening blank run first, then the prefix, then the run that abuts the
+    // import block. The three are disjoint: when the prefix has no non-blank
+    // content at all, `lead` and `gap` name the same run and only `lead` is
+    // emitted, because the `gap` below is inside the prefix branch.
+    for _ in 0..lead {
+        result.push('\n');
+    }
     if !base_prefix.is_empty() || !ours_prefix.is_empty() || !theirs_prefix.is_empty() {
         let merged_prefix = match diffy::merge(&base_prefix, &ours_prefix, &theirs_prefix) {
             Ok(m) => m,
@@ -1873,6 +1297,9 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
         if !merged_prefix.trim().is_empty() {
             result.push_str(&merged_prefix);
             result.push('\n');
+            for _ in 0..gap {
+                result.push('\n');
+            }
         }
     }
 
@@ -1886,7 +1313,9 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
         };
         if !merged_suffix.trim().is_empty() {
             result.push('\n');
-            result.push('\n');
+            for _ in 0..tail_gap {
+                result.push('\n');
+            }
             result.push_str(&merged_suffix);
         }
     }
@@ -1895,7 +1324,7 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> String {
     for _ in result_trailing..ours_trailing {
         result.push('\n');
     }
-    result
+    (result, order_conflict)
 }
 
 /// Merge imports when multi-line import blocks are involved.
@@ -1919,11 +1348,19 @@ fn merge_imports_with_multiline(
         }
     }
 
-    let mut theirs_specs: HashMap<&str, HashSet<&str>> = HashMap::new();
+    // Theirs' specifiers are kept as a SEQUENCE, not a set. A specifier theirs
+    // added is appended to ours' list, so the append order is output bytes; a
+    // `HashSet` iteration made it a function of the process's random hash seed
+    // and the merge stopped being a function of its inputs — output bytes
+    // would differ between two runs on identical input. The order theirs
+    // wrote them in is the only order either version actually asserts.
+    let mut theirs_specs: HashMap<&str, Vec<&str>> = HashMap::new();
     for imp in theirs_imports {
-        let entry = theirs_specs.entry(imp.source.as_str()).or_default();
+        let entry: &mut Vec<&str> = theirs_specs.entry(imp.source.as_str()).or_default();
         for s in &imp.specifiers {
-            entry.insert(s.as_str());
+            if !entry.contains(&s.as_str()) {
+                entry.push(s.as_str());
+            }
         }
     }
 
@@ -1978,16 +1415,19 @@ fn merge_imports_with_multiline(
 
                 // Merge specifiers: ours + theirs additions - theirs deletions
                 let base_spec_set = base_specs.get(source).cloned().unwrap_or_default();
-                let theirs_spec_set = theirs_specs.get(source).cloned().unwrap_or_default();
-                // Added by theirs: in theirs but not in base
-                let theirs_added: HashSet<&str> = theirs_spec_set
-                    .difference(&base_spec_set)
+                let theirs_seq: &[&str] =
+                    theirs_specs.get(source).map(Vec::as_slice).unwrap_or(&[]);
+                // Added by theirs: in theirs but not in base, in theirs' order.
+                let theirs_added: Vec<&str> = theirs_seq
+                    .iter()
                     .copied()
+                    .filter(|s| !base_spec_set.contains(s))
                     .collect();
                 // Deleted by theirs: in base but not in theirs
                 let theirs_removed: HashSet<&str> = base_spec_set
-                    .difference(&theirs_spec_set)
+                    .iter()
                     .copied()
+                    .filter(|s| !theirs_seq.contains(s))
                     .collect();
 
                 // Final set: ours (in original order) + theirs_added - theirs_removed
@@ -2042,30 +1482,46 @@ fn merge_imports_with_multiline(
                     ours_imp_idx += 1;
 
                     // Check if theirs has a multi-line version with more specifiers
-                    if let Some(theirs_spec_set) = theirs_specs.get(source) {
+                    if let Some(theirs_seq) = theirs_specs.get(source) {
                         let base_spec_set = base_specs.get(source).cloned().unwrap_or_default();
-                        let theirs_added: HashSet<&str> = theirs_spec_set
-                            .difference(&base_spec_set)
+                        // Theirs' order, again: see the multi-line arm above.
+                        let theirs_added: Vec<&str> = theirs_seq
+                            .iter()
                             .copied()
+                            .filter(|s| !base_spec_set.contains(s))
                             .collect();
 
                         if !theirs_added.is_empty() {
-                            // Parse ours single-line specifier from the line text
-                            let mut ours_specifiers: Vec<&str> = Vec::new();
+                            // Parse ours single-line specifier from the line text.
+                            //
+                            // The specifiers and the ` import ` position they were
+                            // parsed from travel as ONE value. The reconstruction
+                            // below needs that same position to rebuild the prefix,
+                            // and it used to re-`find` it and `.unwrap()` the
+                            // result — a slice whose precondition ("this line
+                            // contains ` import `") is a property of the input file,
+                            // stated nowhere, on the merge path, and a byte slice
+                            // computed from a re-`find` can land off a char boundary
+                            // and panic. Binding the two together makes "we found
+                            // specifiers" and "we know where they start" the same
+                            // fact, so there is no second lookup to disagree.
                             let trimmed_line = line.trim();
                             // Python: "from X import Y, Z" → extract after "import "
-                            if let Some(import_pos) = trimmed_line.find(" import ") {
-                                let after_import = &trimmed_line[import_pos + 8..];
-                                for spec in after_import.split(',') {
-                                    let s = spec.trim().trim_end_matches(';');
-                                    if !s.is_empty() {
-                                        ours_specifiers.push(s);
-                                    }
-                                }
-                            }
-                            // JS/TS: "import X from 'Y'" → X is a default import, not a specifier
-                            // Only merge if we found named specifiers
-                            if !ours_specifiers.is_empty() {
+                            let ours_parse: Option<(usize, Vec<&str>)> = trimmed_line
+                                .find(" import ")
+                                .map(|import_pos| {
+                                    let specs: Vec<&str> = trimmed_line[import_pos + 8..]
+                                        .split(',')
+                                        .map(|spec| spec.trim().trim_end_matches(';'))
+                                        .filter(|s| !s.is_empty())
+                                        .collect();
+                                    (import_pos, specs)
+                                })
+                                // JS/TS: "import X from 'Y'" → X is a default import,
+                                // not a specifier. Only merge if we found named
+                                // specifiers.
+                                .filter(|(_, specs)| !specs.is_empty());
+                            if let Some((import_pos, ours_specifiers)) = ours_parse {
                                 let mut final_specs: Vec<&str> = ours_specifiers.clone();
                                 for added in &theirs_added {
                                     if !final_specs.contains(added) {
@@ -2097,9 +1553,9 @@ fn merge_imports_with_multiline(
                                     }
                                 }
                                 // Theirs not multi-line but has more specifiers: reconstruct single-line
-                                // e.g. "from X import A, B, C"
-                                let prefix =
-                                    &trimmed_line[..trimmed_line.find(" import ").unwrap() + 8];
+                                // e.g. "from X import A, B, C" — the prefix is the
+                                // match `ours_parse` already made, not a fresh one.
+                                let prefix = &trimmed_line[..import_pos + 8];
                                 result_parts.push(format!("{}{}", prefix, final_specs.join(", ")));
                                 i += 1;
                                 continue;
@@ -2208,12 +1664,25 @@ fn import_source_prefix(line: &str) -> &str {
             }
         }
         // JS/TS: "import X from 'Y'" -> Y (between quotes)
-        if trimmed.starts_with("import ") {
+        if let Some(rest) = trimmed.strip_prefix("import ") {
             if let Some(quote_start) = trimmed.find(['\'', '"']) {
                 let after = &trimmed[quote_start + 1..];
                 if let Some(quote_end) = after.find(['\'', '"']) {
                     return &after[..quote_end];
                 }
+            }
+            // Java/Kotlin: "import a.b.C;" or "import static a.b.C.d;" -> the
+            // dotted path. There are no quotes to key on, and returning the
+            // whole line (the old fallback) made every such import look
+            // unrelated to every other one.
+            let rest = rest.strip_prefix("static ").unwrap_or(rest);
+            let path = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_end_matches(';');
+            if !path.is_empty() && path.contains('.') {
+                return path;
             }
         }
         // Rust: "use X::Y;" -> X
@@ -2224,42 +1693,72 @@ fn import_source_prefix(line: &str) -> &str {
     line.trim()
 }
 
+/// How many leading source-path segments two import lines share.
+///
+/// The unit of relatedness for imports is the path prefix, not the whole
+/// source: `java.util.Map` belongs with `java.util.List` (2 segments shared),
+/// not with `com.google.common.collect.Maps` (0). Segments are split on the
+/// separators every ecosystem uses for the same purpose — `.` for Java and
+/// Python, `/` for JS/TS module specifiers, `::` for Rust — so one function
+/// serves all of them.
+fn import_prefix_affinity(a: &str, b: &str) -> usize {
+    fn segments(line: &str) -> Vec<&str> {
+        import_source_prefix(line)
+            .trim_matches(|c| c == '.' || c == '/')
+            .split(['.', '/', ':'])
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+    segments(a)
+        .iter()
+        .zip(segments(b).iter())
+        .take_while(|(x, y)| x == y)
+        .count()
+}
+
 /// Fallback to line-level 3-way merge when entity extraction isn't possible.
 ///
-/// Uses Sesame-inspired separator preprocessing (arXiv:2407.18888) to get
-/// finer-grained alignment before line-level merge. Inserts newlines around
-/// syntactic separators ({, }, ;) so that changes in different code blocks
-/// align independently, reducing spurious conflicts.
+/// Inserts newlines around syntactic separators ({, }, ;) so that changes in
+/// different code blocks align independently before line-level merge, reducing
+/// spurious conflicts.
 ///
-/// Sesame expansion is skipped for data formats (JSON, YAML, TOML, lock files)
-/// where `{`, `}`, `;` are structural content rather than code separators.
-/// Expanding them destroys alignment and produces far more conflicts (confirmed
-/// on GitButler: YAML went from 68 git markers to 192 weave markers with Sesame).
-fn line_level_fallback(base: &str, ours: &str, theirs: &str, file_path: &str) -> MergeResult {
+/// Separator expansion is skipped for data formats (JSON, YAML, TOML, lock
+/// files) where `{`, `}`, `;` are structural content rather than code
+/// separators. Expanding them destroys alignment and produces far more
+/// conflicts.
+pub(crate) fn line_level_fallback(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    file_path: &str,
+    host: &Host,
+) -> MergeResult {
     let mut stats = MergeStats::default();
-    stats.used_fallback = true;
+    stats.mark_fallback();
 
-    // Skip Sesame preprocessing for data formats where {/}/; are content, not separators
-    let skip = skip_sesame(file_path);
+    // Skip separator expansion for data formats where {/}/; are content, not
+    // separators — and for any input that already carries the marker byte, the
+    // one case where the expansion would not be invertible.
+    let skip = skip_expansion(file_path) || !expansion_safe(base, ours, theirs);
 
     if skip {
         // Use git merge-file for data formats so we match git's output exactly.
         // diffy::merge uses a different diff algorithm that can produce more
         // conflict markers on structured data like lock files.
-        return git_merge_file(base, ours, theirs, &mut stats);
+        return line_merge_file(base, ours, theirs, stats, host);
     }
 
-    // Try Sesame expansion + diffy first, then compare against git merge-file.
+    // Try separator expansion + diffy first, then compare against git merge-file.
     // Use whichever produces fewer conflict markers so we're never worse than git.
     let base_expanded = expand_separators(base);
     let ours_expanded = expand_separators(ours);
     let theirs_expanded = expand_separators(theirs);
 
-    let sesame_result = match diffy::merge(&base_expanded, &ours_expanded, &theirs_expanded) {
+    let expanded_result = match diffy::merge(&base_expanded, &ours_expanded, &theirs_expanded) {
         Ok(merged) => {
-            let content = collapse_separators(&merged, base);
+            let content = collapse_separators(&merged);
             Some(MergeResult {
-                content: post_merge_cleanup(&content),
+                content,
                 conflicts: vec![],
                 warnings: vec![],
                 stats: stats.clone(),
@@ -2267,7 +1766,7 @@ fn line_level_fallback(base: &str, ours: &str, theirs: &str, file_path: &str) ->
             })
         }
         Err(_) => {
-            // Sesame expansion conflicted, try plain diffy
+            // Separator expansion conflicted, try plain diffy
             match diffy::merge(base, ours, theirs) {
                 Ok(merged) => Some(MergeResult {
                     content: merged,
@@ -2277,10 +1776,6 @@ fn line_level_fallback(base: &str, ours: &str, theirs: &str, file_path: &str) ->
                     audit: vec![],
                 }),
                 Err(conflicted) => {
-                    let _markers = conflicted
-                        .lines()
-                        .filter(|l| l.starts_with("<<<<<<<"))
-                        .count();
                     let mut s = stats.clone();
                     s.entities_conflicted = 1;
                     Some(MergeResult {
@@ -2303,18 +1798,18 @@ fn line_level_fallback(base: &str, ours: &str, theirs: &str, file_path: &str) ->
         }
     };
 
-    // Get git merge-file result as our floor
-    let git_result = git_merge_file(base, ours, theirs, &mut stats);
+    // Get the line-level merge as our floor
+    let git_result = line_merge_file(base, ours, theirs, stats, host);
 
-    // Compare: use sesame result only if it has fewer or equal markers
-    match sesame_result {
-        Some(sesame) if sesame.conflicts.is_empty() && !git_result.conflicts.is_empty() => {
-            // Sesame resolved cleanly, git didn't: use sesame
-            sesame
+    // Compare: use expanded result only if it has fewer or equal markers
+    match expanded_result {
+        Some(expanded) if expanded.conflicts.is_empty() && !git_result.conflicts.is_empty() => {
+            // Separator expansion resolved cleanly, git did not: use it
+            expanded
         }
-        Some(sesame) if !sesame.conflicts.is_empty() && !git_result.conflicts.is_empty() => {
+        Some(expanded) if !expanded.conflicts.is_empty() && !git_result.conflicts.is_empty() => {
             // Both conflicted: use whichever has fewer markers
-            let sesame_markers = sesame
+            let expanded_markers = expanded
                 .content
                 .lines()
                 .filter(|l| l.starts_with("<<<<<<<"))
@@ -2324,8 +1819,8 @@ fn line_level_fallback(base: &str, ours: &str, theirs: &str, file_path: &str) ->
                 .lines()
                 .filter(|l| l.starts_with("<<<<<<<"))
                 .count();
-            if sesame_markers <= git_markers {
-                sesame
+            if expanded_markers <= git_markers {
+                expanded
             } else {
                 git_result
             }
@@ -2334,98 +1829,78 @@ fn line_level_fallback(base: &str, ours: &str, theirs: &str, file_path: &str) ->
     }
 }
 
-/// Shell out to `git merge-file` for an exact match with git's line-level merge.
+/// The line-level merge, taken through whatever route the caller granted.
 ///
-/// We use this instead of `diffy::merge` for data formats (lock files, JSON, YAML, TOML)
-/// where weave can't improve on git. `diffy` uses a different diff algorithm that can
-/// produce more conflict markers on structured data (e.g. 22 markers vs git's 19 on uv.lock).
-fn git_merge_file(base: &str, ours: &str, theirs: &str, stats: &mut MergeStats) -> MergeResult {
-    let dir = match tempfile::tempdir() {
-        Ok(d) => d,
-        Err(_) => return diffy_fallback(base, ours, theirs, stats),
+/// Used instead of the in-process line merge for data formats (lock files,
+/// JSON, YAML, TOML) where weave cannot improve on git: `diffy` uses a
+/// different diff algorithm that can produce more conflict markers on
+/// structured data (e.g. 22 markers vs git's 19 on uv.lock). The conflicted
+/// output is the part that cannot go in-process at all — see
+/// [`crate::host::git_line_merge`].
+///
+/// With no route granted, this is [`diffy_fallback`]: the same answer the
+/// caller already got whenever the scratch files could not be written.
+///
+/// The summary comes in by value and leaves inside the result. It used to come
+/// in as `&mut`, and the authority that granted — to write a counter the caller
+/// could still read afterwards — was exercised by nobody: all three call sites
+/// either return this result directly or drop their `stats` immediately after,
+/// so the only reader of the write was the `MergeResult` this function builds.
+/// Owning it says that, drops two clones, and leaves no handle behind for a
+/// later stage to disagree through.
+pub(crate) fn line_merge_file(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    mut stats: MergeStats,
+    host: &Host,
+) -> MergeResult {
+    let Some(line_merge) = host.line_merge else {
+        return diffy_fallback(base, ours, theirs, stats);
+    };
+    let Some(merged) = line_merge(LineMergeStyle::Labelled, base, ours, theirs) else {
+        return diffy_fallback(base, ours, theirs, stats);
     };
 
-    let base_path = dir.path().join("base");
-    let ours_path = dir.path().join("ours");
-    let theirs_path = dir.path().join("theirs");
-
-    let write_ok = (|| -> std::io::Result<()> {
-        std::fs::File::create(&base_path)?.write_all(base.as_bytes())?;
-        std::fs::File::create(&ours_path)?.write_all(ours.as_bytes())?;
-        std::fs::File::create(&theirs_path)?.write_all(theirs.as_bytes())?;
-        Ok(())
-    })();
-
-    if write_ok.is_err() {
-        return diffy_fallback(base, ours, theirs, stats);
-    }
-
-    // git merge-file writes result to the first file (ours) in place
-    let output = Command::new("git")
-        .arg("merge-file")
-        .arg("-p") // print to stdout instead of modifying ours in place
-        .arg("--diff3") // include ||||||| base section for jj compatibility
-        .arg("-L")
-        .arg("ours")
-        .arg("-L")
-        .arg("base")
-        .arg("-L")
-        .arg("theirs")
-        .arg(&ours_path)
-        .arg(&base_path)
-        .arg(&theirs_path)
-        .output();
-
-    match output {
-        Ok(result) => {
-            let content = String::from_utf8_lossy(&result.stdout).into_owned();
-            if result.status.success() {
-                // Exit 0 = clean merge
-                MergeResult {
-                    content: post_merge_cleanup(&content),
-                    conflicts: vec![],
-                    warnings: vec![],
-                    stats: stats.clone(),
-                    audit: vec![],
-                }
-            } else {
-                // Exit >0 = conflicts (exit code = number of conflicts)
-                stats.entities_conflicted = 1;
-                MergeResult {
-                    content,
-                    conflicts: vec![EntityConflict {
-                        entity_name: "(file)".to_string(),
-                        entity_type: "file".to_string(),
-                        kind: ConflictKind::BothModified,
-                        complexity: classify_conflict(Some(base), Some(ours), Some(theirs)),
-                        ours_content: Some(ours.to_string()),
-                        theirs_content: Some(theirs.to_string()),
-                        base_content: Some(base.to_string()),
-                    }],
-                    warnings: vec![],
-                    stats: stats.clone(),
-                    audit: vec![],
-                }
-            }
+    if merged.clean {
+        MergeResult {
+            content: merged.content,
+            conflicts: vec![],
+            warnings: vec![],
+            stats,
+            audit: vec![],
         }
-        // git not available, fall back to diffy
-        Err(_) => diffy_fallback(base, ours, theirs, stats),
+    } else {
+        stats.entities_conflicted = 1;
+        MergeResult {
+            content: merged.content,
+            conflicts: vec![EntityConflict {
+                entity_name: "(file)".to_string(),
+                entity_type: "file".to_string(),
+                kind: ConflictKind::BothModified,
+                complexity: classify_conflict(Some(base), Some(ours), Some(theirs)),
+                ours_content: Some(ours.to_string()),
+                theirs_content: Some(theirs.to_string()),
+                base_content: Some(base.to_string()),
+            }],
+            warnings: vec![],
+            stats,
+            audit: vec![],
+        }
     }
 }
 
-/// Fallback to diffy::merge when git merge-file is unavailable.
-fn diffy_fallback(base: &str, ours: &str, theirs: &str, stats: &mut MergeStats) -> MergeResult {
+/// The in-process line merge, used when no line-level route was granted or
+/// the granted one could not answer.
+fn diffy_fallback(base: &str, ours: &str, theirs: &str, mut stats: MergeStats) -> MergeResult {
     match diffy::merge(base, ours, theirs) {
-        Ok(merged) => {
-            let content = post_merge_cleanup(&merged);
-            MergeResult {
-                content,
-                conflicts: vec![],
-                warnings: vec![],
-                stats: stats.clone(),
-                audit: vec![],
-            }
-        }
+        Ok(merged) => MergeResult {
+            content: merged,
+            conflicts: vec![],
+            warnings: vec![],
+            stats,
+            audit: vec![],
+        },
         Err(conflicted) => {
             stats.entities_conflicted = 1;
             MergeResult {
@@ -2440,25 +1915,24 @@ fn diffy_fallback(base: &str, ours: &str, theirs: &str, stats: &mut MergeStats) 
                     base_content: Some(base.to_string()),
                 }],
                 warnings: vec![],
-                stats: stats.clone(),
+                stats,
                 audit: vec![],
             }
         }
     }
 }
 
-/// Filter out entities that are nested inside other entities.
+/// Whether one name repeats often enough that identity has stopped meaning
+/// anything in this file.
 ///
-/// When a class contains methods which contain local variables, sem-core may extract
-/// all of them as entities. But for merge purposes, nested entities are part of their
-/// parent — we handle them via inner entity merge. Keeping them causes false conflicts
-/// (e.g. two methods both declaring `const user` would appear as BothAdded).
-/// Check if entity list has too many duplicate names, which causes matching to hang.
-fn has_excessive_duplicates(entities: &[SemanticEntity]) -> bool {
-    let threshold = std::env::var("WEAVE_MAX_DUPLICATES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(10);
+/// Not a liveness guard: the v2 matcher terminates regardless. The reason is
+/// honesty — with a name repeated past the threshold, a per-name matcher can
+/// still produce a verdict for every cell, and every one of those verdicts is
+/// fiction. So the file takes the typed `Unsupported::AmbiguousIdentity` route
+/// (`v2::mod`) and a line-level merge, rather than a confident wrong answer.
+/// The threshold arrives on the [`Host`]; it used to be read out of
+/// `WEAVE_MAX_DUPLICATES` right here, in the middle of the decision.
+pub(crate) fn has_excessive_duplicates(entities: &[SemanticEntity], threshold: usize) -> bool {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for e in entities {
         *counts.entry(&e.name).or_default() += 1;
@@ -2467,8 +1941,13 @@ fn has_excessive_duplicates(entities: &[SemanticEntity]) -> bool {
 }
 
 /// Filter out entities that are nested inside other entities.
-/// O(n log n) via sort + stack, replacing the previous O(n^2) approach.
-fn filter_nested_entities(mut entities: Vec<SemanticEntity>) -> Vec<SemanticEntity> {
+///
+/// When a class contains methods which contain local variables, sem-core may
+/// extract all of them as entities. But for merge purposes a nested entity is
+/// part of its parent — they are handled by inner entity merge. Keeping them
+/// causes false conflicts (two methods both declaring `const user` would
+/// appear as BothAdded). O(n log n) via sort + stack.
+pub(crate) fn filter_nested_entities(mut entities: Vec<SemanticEntity>) -> Vec<SemanticEntity> {
     if entities.len() <= 1 {
         return entities;
     }
@@ -2503,7 +1982,7 @@ fn filter_nested_entities(mut entities: Vec<SemanticEntity>) -> Vec<SemanticEnti
 }
 
 /// Get child entities of a parent, sorted by start line.
-fn get_child_entities<'a>(
+pub(crate) fn get_child_entities<'a>(
     parent: &SemanticEntity,
     all_entities: &'a [SemanticEntity],
 ) -> Vec<&'a SemanticEntity> {
@@ -2515,234 +1994,8 @@ fn get_child_entities<'a>(
     children
 }
 
-/// Compute a body hash for rename detection: the entity content with the entity
-/// name replaced at word boundaries by a placeholder, so entities with identical
-/// bodies but different names produce the same hash.
-///
-/// Compute Jaccard similarity on whitespace-split tokens of two strings.
-/// Returns a value in [0.0, 1.0] where 1.0 means identical token sets.
-fn token_jaccard(a: &str, b: &str) -> f64 {
-    let tokens_a: HashSet<&str> = a.split_whitespace().collect();
-    let tokens_b: HashSet<&str> = b.split_whitespace().collect();
-    if tokens_a.is_empty() && tokens_b.is_empty() {
-        return 1.0;
-    }
-    let intersection = tokens_a.intersection(&tokens_b).count();
-    let union = tokens_a.union(&tokens_b).count();
-    if union == 0 {
-        1.0
-    } else {
-        intersection as f64 / union as f64
-    }
-}
-
-/// Uses word-boundary matching to avoid partial replacements (e.g. replacing
-/// "get" inside "getAll"). Works across all languages since it operates on
-/// the content string, not language-specific AST features.
-fn body_hash(entity: &SemanticEntity) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let normalized = replace_at_word_boundaries(&entity.content, &entity.name, "__ENTITY__");
-    let mut hasher = DefaultHasher::new();
-    normalized.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Replace `needle` with `replacement` only at word boundaries.
-/// A word boundary means the character before/after the match is not
-/// alphanumeric or underscore (i.e. not an identifier character).
-fn replace_at_word_boundaries(content: &str, needle: &str, replacement: &str) -> String {
-    if needle.is_empty() {
-        return content.to_string();
-    }
-    let bytes = content.as_bytes();
-    let mut result = String::with_capacity(content.len());
-    let mut i = 0;
-    while i < content.len() {
-        if content.is_char_boundary(i) && content[i..].starts_with(needle) {
-            let before_ok = i == 0 || {
-                let prev_idx = content[..i]
-                    .char_indices()
-                    .next_back()
-                    .map(|(idx, _)| idx)
-                    .unwrap_or(0);
-                !is_ident_char(bytes[prev_idx])
-            };
-            let after_idx = i + needle.len();
-            let after_ok = after_idx >= content.len()
-                || (content.is_char_boundary(after_idx) && !is_ident_char(bytes[after_idx]));
-            if before_ok && after_ok {
-                result.push_str(replacement);
-                i += needle.len();
-                continue;
-            }
-        }
-        if content.is_char_boundary(i) {
-            let ch = content[i..].chars().next().unwrap();
-            result.push(ch);
-            i += ch.len_utf8();
-        } else {
-            i += 1;
-        }
-    }
-    result
-}
-
-fn is_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
-/// Build a rename map from new_id → base_id using confidence-scored matching.
-///
-/// Detects when an entity in the branch has the same body as an entity
-/// in base but a different name/ID, indicating it was renamed.
-/// Uses body_hash (name-stripped content hash) and structural_hash with
-/// confidence scoring to resolve ambiguous matches correctly.
-fn build_rename_map(
-    base_entities: &[SemanticEntity],
-    branch_entities: &[SemanticEntity],
-) -> HashMap<String, String> {
-    let mut rename_map: HashMap<String, String> = HashMap::new();
-
-    let base_ids: HashSet<&str> = base_entities.iter().map(|e| e.id.as_str()).collect();
-
-    // Build body_hash → base entities (multiple can have same hash)
-    let mut base_by_body: HashMap<u64, Vec<&SemanticEntity>> = HashMap::new();
-    for entity in base_entities {
-        base_by_body
-            .entry(body_hash(entity))
-            .or_default()
-            .push(entity);
-    }
-
-    // Also keep structural_hash index as fallback
-    let mut base_by_structural: HashMap<&str, Vec<&SemanticEntity>> = HashMap::new();
-    for entity in base_entities {
-        if let Some(ref sh) = entity.structural_hash {
-            base_by_structural
-                .entry(sh.as_str())
-                .or_default()
-                .push(entity);
-        }
-    }
-
-    // Collect all candidate (branch_entity, base_entity, confidence) triples
-    struct RenameCandidate<'a> {
-        branch: &'a SemanticEntity,
-        base: &'a SemanticEntity,
-        confidence: f64,
-    }
-    let mut candidates: Vec<RenameCandidate> = Vec::new();
-
-    for branch_entity in branch_entities {
-        if base_ids.contains(branch_entity.id.as_str()) {
-            continue;
-        }
-
-        let bh = body_hash(branch_entity);
-
-        // Body hash matches
-        if let Some(base_entities_for_hash) = base_by_body.get(&bh) {
-            for &base_entity in base_entities_for_hash {
-                let same_type = base_entity.entity_type == branch_entity.entity_type;
-                let same_parent = base_entity.parent_id == branch_entity.parent_id;
-                let confidence = match (same_type, same_parent) {
-                    (true, true) => 0.95,
-                    (true, false) => 0.8,
-                    (false, _) => 0.6,
-                };
-                candidates.push(RenameCandidate {
-                    branch: branch_entity,
-                    base: base_entity,
-                    confidence,
-                });
-            }
-        }
-
-        // Structural hash fallback (lower confidence)
-        if let Some(ref sh) = branch_entity.structural_hash {
-            if let Some(base_entities_for_sh) = base_by_structural.get(sh.as_str()) {
-                for &base_entity in base_entities_for_sh {
-                    // Skip if already covered by body hash match
-                    if candidates
-                        .iter()
-                        .any(|c| c.branch.id == branch_entity.id && c.base.id == base_entity.id)
-                    {
-                        continue;
-                    }
-                    candidates.push(RenameCandidate {
-                        branch: branch_entity,
-                        base: base_entity,
-                        confidence: 0.6,
-                    });
-                }
-            }
-        }
-
-        // Token similarity fallback: catches renames where internal references were also updated
-        // (e.g. IDE "rename symbol" changes the name everywhere in the body).
-        // Only check same-file, same-type entities not already matched above.
-        let has_candidate = candidates.iter().any(|c| c.branch.id == branch_entity.id);
-        if !has_candidate {
-            for base_entity in base_entities {
-                if base_entity.entity_type != branch_entity.entity_type {
-                    continue;
-                }
-                if base_entity.file_path != branch_entity.file_path {
-                    continue;
-                }
-                // Skip if base entity still exists in branch (not actually deleted/renamed)
-                if branch_entities.iter().any(|e| e.id == base_entity.id) {
-                    continue;
-                }
-                let similarity = token_jaccard(&base_entity.content, &branch_entity.content);
-                if similarity >= 0.7 {
-                    let same_parent = base_entity.parent_id == branch_entity.parent_id;
-                    let confidence = if same_parent { 0.75 } else { 0.65 };
-                    candidates.push(RenameCandidate {
-                        branch: branch_entity,
-                        base: base_entity,
-                        confidence,
-                    });
-                }
-            }
-        }
-    }
-
-    // Sort by confidence descending, assign greedily
-    candidates.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let mut used_base_ids: HashSet<String> = HashSet::new();
-    let mut used_branch_ids: HashSet<String> = HashSet::new();
-
-    for candidate in &candidates {
-        if candidate.confidence < 0.6 {
-            break;
-        }
-        if used_base_ids.contains(&candidate.base.id)
-            || used_branch_ids.contains(&candidate.branch.id)
-        {
-            continue;
-        }
-        // Don't rename if the base entity's ID still exists in branch (it wasn't actually renamed)
-        let base_id_in_branch = branch_entities.iter().any(|e| e.id == candidate.base.id);
-        if base_id_in_branch {
-            continue;
-        }
-        rename_map.insert(candidate.branch.id.clone(), candidate.base.id.clone());
-        used_base_ids.insert(candidate.base.id.clone());
-        used_branch_ids.insert(candidate.branch.id.clone());
-    }
-
-    rename_map
-}
-
 /// Check if an entity type is a container that may benefit from inner entity merge.
-fn is_container_entity_type(entity_type: &str) -> bool {
+pub(crate) fn is_container_entity_type(entity_type: &str) -> bool {
     matches!(
         entity_type,
         "class"
@@ -2763,638 +2016,184 @@ fn is_container_entity_type(entity_type: &str) -> bool {
     )
 }
 
-/// A named member chunk extracted from a class/container body.
-#[derive(Debug, Clone)]
-struct MemberChunk {
-    /// The member name (method name, field name, etc.)
-    name: String,
-    /// Full content of the member including its body
-    content: String,
-}
-
-/// Result of an inner entity merge attempt.
-struct InnerMergeResult {
-    /// Merged content (may contain per-member conflict markers)
-    content: String,
-    /// Whether any members had conflicts
-    has_conflicts: bool,
-}
-
-/// Convert sem-core child entities to MemberChunks for inner merge.
+/// What a scoped marker knows about where it sits: the format it is written in,
+/// and the entity whose body the scope is inside.
 ///
-/// Uses child entity line positions to extract content from the container text,
-/// including any leading decorators/annotations that tree-sitter attaches as
-/// sibling nodes rather than part of the method node.
-fn children_to_chunks(
-    children: &[&SemanticEntity],
-    container_content: &str,
-    container_start_line: usize,
-) -> Vec<MemberChunk> {
-    if children.is_empty() {
-        return Vec::new();
+/// A statement-scoped conflict is a strictly better artefact than a
+/// whole-entity one — three lines in markers instead of a whole method — but it
+/// is only better to READ if it says the same things. The boundary contract
+/// requires a `refused_by:` line after every `<<<<<<< ours`, in the file's own
+/// comment syntax, and a reader who is handed three anonymous lines has lost
+/// the one thing the whole-entity marker gave them: which declaration this
+/// is.
+#[derive(Clone, Copy)]
+pub(crate) struct ScopeMarkers<'a> {
+    pub fmt: &'a MarkerFormat,
+    /// The entity whose body this scope is inside — `""` when the caller has no
+    /// name for it, in which case the marker simply omits the context.
+    pub entity_type: &'a str,
+    pub entity_name: &'a str,
+    /// Which guard refused this scope. A scoped marker is emitted by exactly
+    /// two callers — the statement fold and the container merge — and they
+    /// refuse for different reasons, so the reason travels with the format
+    /// rather than being re-derived from the shape of the text.
+    pub guard: &'static str,
+}
+
+impl<'a> ScopeMarkers<'a> {
+    /// A scope with no entity context: the marker names the scope and says
+    /// nothing about where it sits. Used by the fold's own tests, and by any
+    /// caller merging a body it has no name for.
+    #[cfg(test)]
+    pub(crate) fn bare(fmt: &'a MarkerFormat) -> Self {
+        Self {
+            fmt,
+            entity_type: "",
+            entity_name: "",
+            guard: "statement_fold",
+        }
     }
 
-    let lines: Vec<&str> = container_content.lines().collect();
-    let mut chunks = Vec::new();
-
-    for (i, child) in children.iter().enumerate() {
-        let child_start_idx = child.start_line.saturating_sub(container_start_line);
-        // +1 because end_line is inclusive but we need an exclusive upper bound for slicing
-        let child_end_idx = child.end_line.saturating_sub(container_start_line) + 1;
-
-        if child_end_idx > lines.len() + 1 || child_start_idx >= lines.len() {
-            // Position out of range, fall back to entity content
-            chunks.push(MemberChunk {
-                name: child.name.clone(),
-                content: child.content.clone(),
-            });
-            continue;
+    /// The same format, now inside a named entity.
+    pub(crate) fn inside(
+        fmt: &'a MarkerFormat,
+        entity_type: &'a str,
+        entity_name: &'a str,
+        guard: &'static str,
+    ) -> Self {
+        Self {
+            fmt,
+            entity_type,
+            entity_name,
+            guard,
         }
-        let child_end_idx = child_end_idx.min(lines.len());
+    }
 
-        // Determine the earliest line we can claim (after previous child's end, or body start)
-        let floor = if i > 0 {
-            children[i - 1]
-                .end_line
-                .saturating_sub(container_start_line)
-                + 1
+    /// ` in function `f`` — where this scope sits, empty when the caller has no
+    /// name for it.
+    ///
+    /// This used to be the tail of the marker's `hint:` line. The hint line is
+    /// gone, stripped as litter, but *which declaration a scope sits in* is
+    /// not advice — it is the one thing a reader of `scope `then`` cannot
+    /// recover from the text around it. So it moved up onto the opening
+    /// marker, where the whole-entity marker already states the same fact,
+    /// instead of leaving with the sentence it happened to be attached to.
+    fn context(&self) -> String {
+        if self.entity_name.is_empty() {
+            String::new()
+        } else if self.entity_type.is_empty() {
+            format!(" in `{}`", self.entity_name)
         } else {
-            // First child: start after the container header line (the `{` or `:` line)
-            // For Python-style containers, find the declaration line ending with `:`
-            // For brace-delimited, find the opening `{` on a declaration line
-            let header_end = if is_python_style_container(&lines) {
-                lines
-                    .iter()
-                    .position(|l| {
-                        let t = l.trim();
-                        (t.starts_with("class ")
-                            || t.starts_with("def ")
-                            || t.starts_with("async def "))
-                            && t.ends_with(':')
-                    })
-                    .map(|p| p + 1)
-                    .unwrap_or(0)
-            } else {
-                lines
-                    .iter()
-                    .position(|l| l.contains('{'))
-                    .map(|p| p + 1)
-                    .unwrap_or(0)
-            };
-            header_end
-        };
-
-        // Scan backwards from child_start_idx to include decorators/annotations/comments
-        let mut content_start = child_start_idx;
-        while content_start > floor {
-            let prev = content_start - 1;
-            let trimmed = lines[prev].trim();
-            if trimmed.starts_with('@')
-                || trimmed.starts_with("#[")
-                || trimmed.starts_with("//")
-                || trimmed.starts_with("///")
-                || trimmed.starts_with("/**")
-                || trimmed.starts_with("* ")
-                || trimmed == "*/"
-            {
-                content_start = prev;
-            } else if trimmed.is_empty() && content_start > floor + 1 {
-                // Allow one blank line between decorator and method
-                content_start = prev;
-            } else {
-                break;
-            }
+            format!(" in {} `{}`", self.entity_type, self.entity_name)
         }
-
-        // Skip leading blank lines
-        while content_start < child_start_idx && lines[content_start].trim().is_empty() {
-            content_start += 1;
-        }
-
-        let chunk_content: String = lines[content_start..child_end_idx].join("\n");
-        chunks.push(MemberChunk {
-            name: child.name.clone(),
-            content: chunk_content,
-        });
     }
-
-    chunks
 }
 
 /// Generate a scoped conflict marker for a single member within a container merge.
-fn scoped_conflict_marker(
+pub(crate) fn scoped_conflict_marker(
     name: &str,
     base: Option<&str>,
     ours: Option<&str>,
     theirs: Option<&str>,
     ours_deleted: bool,
     theirs_deleted: bool,
-    fmt: &MarkerFormat,
+    scope: &ScopeMarkers<'_>,
 ) -> String {
+    let fmt = scope.fmt;
     let open = "<".repeat(fmt.marker_length);
     let sep = "=".repeat(fmt.marker_length);
     let close = ">".repeat(fmt.marker_length);
 
-    let o = ours.unwrap_or("");
-    let t = theirs.unwrap_or("");
-
-    // Narrow conflict markers to just the differing lines
-    let ours_lines: Vec<&str> = o.lines().collect();
-    let theirs_lines: Vec<&str> = t.lines().collect();
-    let (prefix_len, suffix_len) = if ours.is_some() && theirs.is_some() {
-        crate::conflict::narrow_conflict_lines(&ours_lines, &theirs_lines)
-    } else {
-        (0, 0)
-    };
-    let has_narrowing = prefix_len > 0 || suffix_len > 0;
-    let ours_mid = &ours_lines[prefix_len..ours_lines.len() - suffix_len];
-    let theirs_mid = &theirs_lines[prefix_len..theirs_lines.len() - suffix_len];
+    // ONE cut, the same one `EntityConflict::to_conflict_markers` takes. This
+    // function used to carry its own copy of the narrowing, and a copy of a rule
+    // is a second rule as soon as either copy is edited.
+    let hole = crate::conflict::ConflictBox::cut(
+        ours,
+        (!fmt.enhanced).then_some(base.unwrap_or("")),
+        theirs,
+    );
 
     let mut out = String::new();
+    crate::conflict::push_lines(&mut out, hole.frame_prefix());
 
-    // Emit common prefix as clean text
-    if has_narrowing {
-        for line in &ours_lines[..prefix_len] {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-
-    // Opening marker
+    // Opening marker. In enhanced mode it carries the same three things the
+    // whole-entity marker carries — what this is, how hard it looks, and a
+    // `refused_by:` line in the file's own comment syntax — because the boundary
+    // contract is entitled to them on EVERY conflict, not only on the ones
+    // that happen to be entity-sized.
     if fmt.enhanced {
-        if ours_deleted {
-            out.push_str(&format!("{} ours ({} deleted)\n", open, name));
+        let complexity = crate::conflict::classify_conflict(base, ours, theirs);
+        let state = if ours_deleted {
+            ", deleted in ours"
+        } else if theirs_deleted {
+            ", deleted in theirs"
         } else {
-            out.push_str(&format!("{} ours ({})\n", open, name));
-        }
+            ""
+        };
+        out.push_str(&format!(
+            "{} ours \u{2014} scope `{}`{}{} ({}, confidence: {})\n",
+            open,
+            name,
+            scope.context(),
+            state,
+            complexity,
+            complexity.confidence()
+        ));
+        out.push_str(&crate::conflict::refusal_line(
+            &fmt.comment_prefix,
+            scope.guard,
+            base,
+            ours,
+            theirs,
+        ));
     } else {
         out.push_str(&format!("{} ours\n", open));
     }
 
-    // Ours content (narrowed or full)
-    if ours.is_some() {
-        if has_narrowing {
-            for line in ours_mid {
-                out.push_str(line);
-                out.push('\n');
-            }
-        } else {
-            out.push_str(o);
-            if !o.ends_with('\n') {
-                out.push('\n');
-            }
-        }
-    }
+    crate::conflict::push_lines(
+        &mut out,
+        hole.side(crate::conflict::BoxSide::Ours).unwrap_or(&[]),
+    );
 
-    // Base section for diff3 format (standard mode only)
+    // Base section for diff3 format (standard mode only). It is cut at the same
+    // offsets as the other two sides — it was one of the sides the cut was taken
+    // over — so `prefix ++ base_hole ++ suffix` is base, byte for byte. The old
+    // code sliced base at *ours'* offsets and said so: "use prefix/suffix from
+    // ours/theirs narrowing as approximation".
     if !fmt.enhanced {
-        let base_marker = "|".repeat(fmt.marker_length);
-        out.push_str(&format!("{} base\n", base_marker));
-        let b = base.unwrap_or("");
-        if has_narrowing {
-            let base_lines: Vec<&str> = b.lines().collect();
-            let base_prefix = prefix_len.min(base_lines.len());
-            let base_suffix = suffix_len.min(base_lines.len().saturating_sub(base_prefix));
-            for line in &base_lines[base_prefix..base_lines.len() - base_suffix] {
-                out.push_str(line);
-                out.push('\n');
-            }
-        } else {
-            out.push_str(b);
-            if !b.is_empty() && !b.ends_with('\n') {
-                out.push('\n');
-            }
-        }
+        out.push_str(&format!("{} base\n", "|".repeat(fmt.marker_length)));
+        crate::conflict::push_lines(
+            &mut out,
+            hole.side(crate::conflict::BoxSide::Base).unwrap_or(&[]),
+        );
     }
 
-    // Separator
     out.push_str(&format!("{}\n", sep));
+    crate::conflict::push_lines(
+        &mut out,
+        hole.side(crate::conflict::BoxSide::Theirs).unwrap_or(&[]),
+    );
 
-    // Theirs content (narrowed or full)
-    if theirs.is_some() {
-        if has_narrowing {
-            for line in theirs_mid {
-                out.push_str(line);
-                out.push('\n');
-            }
-        } else {
-            out.push_str(t);
-            if !t.ends_with('\n') {
-                out.push('\n');
-            }
-        }
-    }
-
-    // Closing marker
     if fmt.enhanced {
-        if theirs_deleted {
-            out.push_str(&format!("{} theirs ({} deleted)\n", close, name));
+        let state = if theirs_deleted {
+            " deleted in theirs"
+        } else if ours_deleted {
+            " deleted in ours"
         } else {
-            out.push_str(&format!("{} theirs ({})\n", close, name));
-        }
+            ""
+        };
+        out.push_str(&format!(
+            "{} theirs \u{2014} scope `{}`{}\n",
+            close, name, state
+        ));
     } else {
         out.push_str(&format!("{} theirs\n", close));
     }
 
-    // Emit common suffix as clean text
-    if has_narrowing {
-        for line in &ours_lines[ours_lines.len() - suffix_len..] {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-
+    crate::conflict::push_lines(&mut out, hole.frame_suffix());
     out
 }
 
-/// Try recursive inner entity merge for container types (classes, impls, etc.).
-///
-/// Inspired by LastMerge (arXiv:2507.19687): class members are "unordered children" —
-/// reordering them is not a conflict. We chunk the class body into members, match by
-/// name, and merge each member independently.
-///
-/// Returns Some(result) if chunking succeeded, None if we can't parse the container.
-/// The result may contain per-member conflict markers (scoped conflicts).
-fn try_inner_entity_merge(
-    base: &str,
-    ours: &str,
-    theirs: &str,
-    base_children: &[&SemanticEntity],
-    ours_children: &[&SemanticEntity],
-    theirs_children: &[&SemanticEntity],
-    base_start_line: usize,
-    ours_start_line: usize,
-    theirs_start_line: usize,
-    marker_format: &MarkerFormat,
-) -> Option<InnerMergeResult> {
-    // Try sem-core child entities first (tree-sitter-accurate boundaries),
-    // fall back to indentation heuristic if children aren't available.
-    // When children_to_chunks produces chunks, try indentation as a fallback
-    // if the tree-sitter chunks lead to conflicts (the indentation heuristic
-    // can include trailing context that helps diffy merge adjacent changes).
-    let use_children = !ours_children.is_empty() || !theirs_children.is_empty();
-    let (base_chunks, ours_chunks, theirs_chunks) = if use_children {
-        (
-            children_to_chunks(base_children, base, base_start_line),
-            children_to_chunks(ours_children, ours, ours_start_line),
-            children_to_chunks(theirs_children, theirs, theirs_start_line),
-        )
-    } else {
-        (
-            extract_member_chunks(base)?,
-            extract_member_chunks(ours)?,
-            extract_member_chunks(theirs)?,
-        )
-    };
-
-    // Need at least 1 member to attempt inner merge
-    // (Even single-member containers benefit from decorator-aware merge)
-    if base_chunks.is_empty() && ours_chunks.is_empty() && theirs_chunks.is_empty() {
-        return None;
-    }
-
-    // Build name → content maps
-    let base_map: HashMap<&str, &str> = base_chunks
-        .iter()
-        .map(|c| (c.name.as_str(), c.content.as_str()))
-        .collect();
-    let ours_map: HashMap<&str, &str> = ours_chunks
-        .iter()
-        .map(|c| (c.name.as_str(), c.content.as_str()))
-        .collect();
-    let theirs_map: HashMap<&str, &str> = theirs_chunks
-        .iter()
-        .map(|c| (c.name.as_str(), c.content.as_str()))
-        .collect();
-
-    // Collect all member names
-    let mut all_names: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    // Use ours ordering as skeleton
-    for chunk in &ours_chunks {
-        if seen.insert(chunk.name.clone()) {
-            all_names.push(chunk.name.clone());
-        }
-    }
-    // Add theirs-only members
-    for chunk in &theirs_chunks {
-        if seen.insert(chunk.name.clone()) {
-            all_names.push(chunk.name.clone());
-        }
-    }
-
-    // Extract header/footer (class declaration line and closing brace)
-    let (ours_header, ours_footer) = extract_container_wrapper(ours)?;
-
-    let mut merged_members: Vec<String> = Vec::new();
-    let mut has_conflict = false;
-
-    for name in &all_names {
-        let in_base = base_map.get(name.as_str());
-        let in_ours = ours_map.get(name.as_str());
-        let in_theirs = theirs_map.get(name.as_str());
-
-        match (in_base, in_ours, in_theirs) {
-            // In all three
-            (Some(b), Some(o), Some(t)) => {
-                if o == t {
-                    merged_members.push(o.to_string());
-                } else if b == o {
-                    merged_members.push(t.to_string());
-                } else if b == t {
-                    merged_members.push(o.to_string());
-                } else {
-                    // Both changed differently: try diffy, then git merge-file, then decorator merge
-                    if let Some(merged) = diffy_merge(b, o, t) {
-                        merged_members.push(merged);
-                    } else if let Some(merged) = git_merge_string(b, o, t) {
-                        merged_members.push(merged);
-                    } else if let Some(merged) = try_decorator_aware_merge(b, o, t) {
-                        merged_members.push(merged);
-                    } else {
-                        // Emit per-member conflict markers
-                        has_conflict = true;
-                        merged_members.push(scoped_conflict_marker(
-                            name,
-                            Some(b),
-                            Some(o),
-                            Some(t),
-                            false,
-                            false,
-                            marker_format,
-                        ));
-                    }
-                }
-            }
-            // Deleted by theirs, ours unchanged or not in base
-            (Some(b), Some(o), None) => {
-                if *b == *o {
-                    // Ours unchanged, theirs deleted → accept deletion
-                } else {
-                    // Ours modified, theirs deleted → per-member conflict
-                    has_conflict = true;
-                    merged_members.push(scoped_conflict_marker(
-                        name,
-                        Some(b),
-                        Some(o),
-                        None,
-                        false,
-                        true,
-                        marker_format,
-                    ));
-                }
-            }
-            // Deleted by ours, theirs unchanged or not in base
-            (Some(b), None, Some(t)) => {
-                if *b == *t {
-                    // Theirs unchanged, ours deleted → accept deletion
-                } else {
-                    // Theirs modified, ours deleted → per-member conflict
-                    has_conflict = true;
-                    merged_members.push(scoped_conflict_marker(
-                        name,
-                        Some(b),
-                        None,
-                        Some(t),
-                        true,
-                        false,
-                        marker_format,
-                    ));
-                }
-            }
-            // Added by ours only
-            (None, Some(o), None) => {
-                merged_members.push(o.to_string());
-            }
-            // Added by theirs only
-            (None, None, Some(t)) => {
-                merged_members.push(t.to_string());
-            }
-            // Added by both with different content
-            (None, Some(o), Some(t)) => {
-                if o == t {
-                    merged_members.push(o.to_string());
-                } else {
-                    has_conflict = true;
-                    merged_members.push(scoped_conflict_marker(
-                        name,
-                        None,
-                        Some(o),
-                        Some(t),
-                        false,
-                        false,
-                        marker_format,
-                    ));
-                }
-            }
-            // Deleted by both
-            (Some(_), None, None) => {}
-            (None, None, None) => {}
-        }
-    }
-
-    // Reconstruct: header + merged members + footer
-    let mut result = String::new();
-    result.push_str(ours_header);
-    if !ours_header.ends_with('\n') {
-        result.push('\n');
-    }
-
-    // Detect if members are single-line (fields, variants) vs multi-line (methods)
-    let has_multiline_members = merged_members.iter().any(|m| m.contains('\n'));
-    // Check if the original content had blank lines between members
-    let original_has_blank_separators = {
-        let body = ours_header.len()..ours.rfind(ours_footer).unwrap_or(ours.len());
-        let body_content = &ours[body];
-        body_content.contains("\n\n")
-    };
-
-    for (i, member) in merged_members.iter().enumerate() {
-        result.push_str(member);
-        if !member.ends_with('\n') {
-            result.push('\n');
-        }
-        // Add blank line between multi-line members only if the original had them
-        if i < merged_members.len() - 1
-            && has_multiline_members
-            && original_has_blank_separators
-            && !member.ends_with("\n\n")
-        {
-            result.push('\n');
-        }
-    }
-
-    result.push_str(ours_footer);
-    if !ours_footer.ends_with('\n') && ours.ends_with('\n') {
-        result.push('\n');
-    }
-
-    // If children_to_chunks led to conflicts, retry with indentation heuristic.
-    // The indentation approach includes trailing blank lines in chunks, giving
-    // diffy more context to merge adjacent changes from different branches.
-    if has_conflict && use_children {
-        if let (Some(bc), Some(oc), Some(tc)) = (
-            extract_member_chunks(base),
-            extract_member_chunks(ours),
-            extract_member_chunks(theirs),
-        ) {
-            if !bc.is_empty() || !oc.is_empty() || !tc.is_empty() {
-                let fallback = try_inner_merge_with_chunks(
-                    &bc,
-                    &oc,
-                    &tc,
-                    ours,
-                    ours_header,
-                    ours_footer,
-                    has_multiline_members,
-                    marker_format,
-                );
-                if let Some(fb) = fallback {
-                    if !fb.has_conflicts {
-                        return Some(fb);
-                    }
-                }
-            }
-        }
-    }
-
-    Some(InnerMergeResult {
-        content: result,
-        has_conflicts: has_conflict,
-    })
-}
-
-/// Inner merge helper using pre-extracted chunks. Used for indentation-heuristic fallback.
-fn try_inner_merge_with_chunks(
-    base_chunks: &[MemberChunk],
-    ours_chunks: &[MemberChunk],
-    theirs_chunks: &[MemberChunk],
-    ours: &str,
-    ours_header: &str,
-    ours_footer: &str,
-    has_multiline_hint: bool,
-    marker_format: &MarkerFormat,
-) -> Option<InnerMergeResult> {
-    let base_map: HashMap<&str, &str> = base_chunks
-        .iter()
-        .map(|c| (c.name.as_str(), c.content.as_str()))
-        .collect();
-    let ours_map: HashMap<&str, &str> = ours_chunks
-        .iter()
-        .map(|c| (c.name.as_str(), c.content.as_str()))
-        .collect();
-    let theirs_map: HashMap<&str, &str> = theirs_chunks
-        .iter()
-        .map(|c| (c.name.as_str(), c.content.as_str()))
-        .collect();
-
-    let mut all_names: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for chunk in ours_chunks {
-        if seen.insert(chunk.name.clone()) {
-            all_names.push(chunk.name.clone());
-        }
-    }
-    for chunk in theirs_chunks {
-        if seen.insert(chunk.name.clone()) {
-            all_names.push(chunk.name.clone());
-        }
-    }
-
-    let mut merged_members: Vec<String> = Vec::new();
-    let mut has_conflict = false;
-
-    for name in &all_names {
-        let in_base = base_map.get(name.as_str());
-        let in_ours = ours_map.get(name.as_str());
-        let in_theirs = theirs_map.get(name.as_str());
-
-        match (in_base, in_ours, in_theirs) {
-            (Some(b), Some(o), Some(t)) => {
-                if o == t {
-                    merged_members.push(o.to_string());
-                } else if b == o {
-                    merged_members.push(t.to_string());
-                } else if b == t {
-                    merged_members.push(o.to_string());
-                } else if let Some(merged) = diffy_merge(b, o, t) {
-                    merged_members.push(merged);
-                } else if let Some(merged) = git_merge_string(b, o, t) {
-                    merged_members.push(merged);
-                } else {
-                    has_conflict = true;
-                    merged_members.push(scoped_conflict_marker(
-                        name,
-                        Some(b),
-                        Some(o),
-                        Some(t),
-                        false,
-                        false,
-                        marker_format,
-                    ));
-                }
-            }
-            (Some(b), Some(o), None) => {
-                if *b != *o {
-                    merged_members.push(o.to_string());
-                }
-            }
-            (Some(b), None, Some(t)) => {
-                if *b != *t {
-                    merged_members.push(t.to_string());
-                }
-            }
-            (None, Some(o), None) => merged_members.push(o.to_string()),
-            (None, None, Some(t)) => merged_members.push(t.to_string()),
-            (None, Some(o), Some(t)) => {
-                if o == t {
-                    merged_members.push(o.to_string());
-                } else {
-                    has_conflict = true;
-                    merged_members.push(scoped_conflict_marker(
-                        name,
-                        None,
-                        Some(o),
-                        Some(t),
-                        false,
-                        false,
-                        marker_format,
-                    ));
-                }
-            }
-            (Some(_), None, None) | (None, None, None) => {}
-        }
-    }
-
-    let has_multiline_members =
-        has_multiline_hint || merged_members.iter().any(|m| m.contains('\n'));
-    let mut result = String::new();
-    result.push_str(ours_header);
-    if !ours_header.ends_with('\n') {
-        result.push('\n');
-    }
-    for (i, member) in merged_members.iter().enumerate() {
-        result.push_str(member);
-        if !member.ends_with('\n') {
-            result.push('\n');
-        }
-        if i < merged_members.len() - 1 && has_multiline_members && !member.ends_with("\n\n") {
-            result.push('\n');
-        }
-    }
-    result.push_str(ours_footer);
-    if !ours_footer.ends_with('\n') && ours.ends_with('\n') {
-        result.push('\n');
-    }
-
-    Some(InnerMergeResult {
-        content: result,
-        has_conflicts: has_conflict,
-    })
-}
-
-/// Extract the header (class declaration) and footer (closing brace) from a container.
-/// Supports both brace-delimited (JS/TS/Java/Rust/C) and indentation-based (Python) containers.
 /// Detect whether a container entity uses Python-style indentation (`:` terminated
 /// declaration) or brace-delimited style (`{`). Only inspects the declaration
 /// line(s), not the body, so dict literals / set comprehensions inside methods
@@ -3432,7 +2231,7 @@ fn is_python_style_container(lines: &[&str]) -> bool {
 /// like `})`, `});`, `}),`, `])`. This lets object literals passed as call
 /// arguments (`configure({ ... })`, `defineConfig({ ... })`) decompose into
 /// per-member chunks instead of collapsing into one whole-entity conflict.
-fn is_container_close_line(trimmed: &str) -> bool {
+pub(crate) fn is_container_close_line(trimmed: &str) -> bool {
     let mut chars = trimmed.chars();
     if chars.next() != Some('}') {
         return false;
@@ -3440,7 +2239,13 @@ fn is_container_close_line(trimmed: &str) -> bool {
     chars.all(|c| matches!(c, ')' | ']' | ';' | ',' | ' ' | '\t'))
 }
 
-fn extract_container_wrapper(content: &str) -> Option<(&str, &str)> {
+/// Extract the header (class declaration) and footer (closing brace) from a
+/// container, so the members between them can be merged on their own.
+///
+/// Handles both brace-delimited (JS/TS/Java/Rust/C) and indentation-based
+/// (Python) containers — which one this is comes from
+/// [`is_python_style_container`], read off the declaration line only.
+pub(crate) fn extract_container_wrapper(content: &str) -> Option<(&str, &str)> {
     let lines: Vec<&str> = content.lines().collect();
     if lines.len() < 2 {
         return None;
@@ -3477,141 +2282,8 @@ fn extract_container_wrapper(content: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// Extract named member chunks from a container body.
-///
-/// Identifies member boundaries by indentation: members start at the first
-/// indentation level inside the container. Each member extends until the next
-/// member starts or the container closes.
-fn extract_member_chunks(content: &str) -> Option<Vec<MemberChunk>> {
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.len() < 2 {
-        return None;
-    }
-
-    // Check if Python-style (indentation-based)
-    let is_python_style = is_python_style_container(&lines);
-
-    // Find the body range
-    let body_start = if is_python_style {
-        lines.iter().position(|l| l.trim().ends_with(':'))? + 1
-    } else {
-        lines.iter().position(|l| l.contains('{'))? + 1
-    };
-    let body_end = if is_python_style {
-        // Python: body extends to end of content
-        lines.len()
-    } else {
-        lines
-            .iter()
-            .rposition(|l| is_container_close_line(l.trim()))?
-    };
-
-    if body_start >= body_end {
-        return None;
-    }
-
-    // Determine member indentation level by looking at first non-empty body line
-    let member_indent = lines[body_start..body_end]
-        .iter()
-        .find(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())?;
-
-    let mut chunks: Vec<MemberChunk> = Vec::new();
-    let mut current_chunk_lines: Vec<&str> = Vec::new();
-    let mut current_name: Option<String> = None;
-
-    for line in &lines[body_start..body_end] {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            // Blank lines: if we have a current chunk, include them
-            if current_name.is_some() {
-                // Only include if not trailing blanks
-                current_chunk_lines.push(line);
-            }
-            continue;
-        }
-
-        let indent = line.len() - line.trim_start().len();
-
-        // Is this a new member declaration at the member indent level?
-        // Exclude closing braces, comments, and decorators/annotations
-        if indent == member_indent
-            && !trimmed.starts_with("//")
-            && !trimmed.starts_with("/*")
-            && !trimmed.starts_with("*")
-            && !trimmed.starts_with("#")
-            && !trimmed.starts_with("@")
-            && !trimmed.starts_with("}")
-            && trimmed != ","
-        {
-            // Save previous chunk
-            if let Some(name) = current_name.take() {
-                // Trim trailing blank lines
-                while current_chunk_lines
-                    .last()
-                    .is_some_and(|l| l.trim().is_empty())
-                {
-                    current_chunk_lines.pop();
-                }
-                if !current_chunk_lines.is_empty() {
-                    chunks.push(MemberChunk {
-                        name,
-                        content: current_chunk_lines.join("\n"),
-                    });
-                }
-                current_chunk_lines.clear();
-            }
-
-            // Start new chunk — extract member name
-            let name = extract_member_name(trimmed);
-            current_name = Some(name);
-            current_chunk_lines.push(line);
-        } else if current_name.is_some() {
-            // Continuation of current member (body lines, nested blocks)
-            current_chunk_lines.push(line);
-        } else {
-            // Content before first member (decorators, comments for first member)
-            // Attach to next member
-            current_chunk_lines.push(line);
-        }
-    }
-
-    // Save last chunk
-    if let Some(name) = current_name {
-        while current_chunk_lines
-            .last()
-            .is_some_and(|l| l.trim().is_empty())
-        {
-            current_chunk_lines.pop();
-        }
-        if !current_chunk_lines.is_empty() {
-            chunks.push(MemberChunk {
-                name,
-                content: current_chunk_lines.join("\n"),
-            });
-        }
-    }
-
-    // Post-process: if any chunk has a brace-only name (anonymous struct literal
-    // entries like Go's `{ Name: "x", ... }`), derive a name from the first
-    // key-value field inside the chunk to avoid HashMap collisions.
-    for chunk in &mut chunks {
-        if chunk.name == "{" || chunk.name == "{}" {
-            if let Some(better) = derive_name_from_struct_literal(&chunk.content) {
-                chunk.name = better;
-            }
-        }
-    }
-
-    if chunks.is_empty() {
-        None
-    } else {
-        Some(chunks)
-    }
-}
-
 /// Extract a member name from a declaration line.
-fn extract_member_name(line: &str) -> String {
+pub(crate) fn extract_member_name(line: &str) -> String {
     let trimmed = line.trim();
 
     // Go method receiver: `func (c *Calculator) Add(` -> skip receiver, find name before second `(`
@@ -3698,7 +2370,7 @@ fn extract_member_name(line: &str) -> String {
 /// For anonymous struct literal entries (e.g., Go slice entries starting with `{`),
 /// derive a name from the first key-value field inside the chunk.
 /// E.g., `{ Name: "panelTitleSearch", ... }` → `panelTitleSearch`
-fn derive_name_from_struct_literal(content: &str) -> Option<String> {
+pub(crate) fn derive_name_from_struct_literal(content: &str) -> Option<String> {
     for line in content.lines().skip(1) {
         let trimmed = line.trim().trim_end_matches(',');
         // Look for `Key: "value"` or `Key: value` pattern
@@ -3714,24 +2386,33 @@ fn derive_name_from_struct_literal(content: &str) -> Option<String> {
     None
 }
 
-/// Returns true for data/config file formats where Sesame separator expansion
-/// (`{`, `}`, `;`) is counterproductive because those chars are structural
-/// content rather than code block separators.
+/// Is this content binary? A NUL byte in the first 8KB, the same heuristic git
+/// uses.
 ///
-/// Note: template files like .svelte/.vue are NOT included here because their
-/// embedded `<script>` sections contain real code where Sesame helps.
-/// Check if content looks binary (contains null bytes in first 8KB).
-fn is_binary(content: &str) -> bool {
+/// Public because the merge driver has to answer it too, before it has a
+/// result to report — and it was answering it with its own byte-identical copy,
+/// so the two crates could have drifted about what weave refuses to touch.
+pub fn is_binary(content: &str) -> bool {
     content.as_bytes().iter().take(8192).any(|&b| b == 0)
 }
 
 /// Check if content already contains git conflict markers.
 /// This happens with AU/AA conflicts where git stores markers in stage blobs.
-fn has_conflict_markers(content: &str) -> bool {
+pub(crate) fn has_conflict_markers(content: &str) -> bool {
     content.contains("<<<<<<<") && content.contains(">>>>>>>")
 }
 
-fn skip_sesame(file_path: &str) -> bool {
+/// Returns true for data/config file formats where separator expansion
+/// (`{`, `}`, `;`) is counterproductive because those chars are structural
+/// content rather than code block separators.
+///
+/// Reached only on the line-level fallback route — the one a file takes after
+/// the typed `Unsupported` verdict — so it is asked only of files weave has
+/// already declined to merge at entity granularity.
+///
+/// Note: template files like .svelte/.vue are NOT included here because their
+/// embedded `<script>` sections contain real code where separator expansion helps.
+fn skip_expansion(file_path: &str) -> bool {
     let path_lower = file_path.to_lowercase();
     let extensions = [
         // Data/config formats
@@ -3760,14 +2441,45 @@ fn skip_sesame(file_path: &str) -> bool {
     extensions.iter().any(|ext| path_lower.ends_with(ext))
 }
 
+/// The byte that marks a line break the expansion invented.
+///
+/// U+0001 (SOH) is a C0 control character: no mainstream programming-language
+/// grammar admits it outside a string literal, and `expansion_safe` refuses the
+/// whole transform on any input that contains one, so a marker in the expanded
+/// text can only be one this function wrote.
+const EXPANSION_MARK: u8 = 0x01;
+
+/// Can this triple be expanded and collapsed without ambiguity?
+///
+/// Exactly one precondition: none of the three versions already contains the
+/// marker byte. Then `collapse_separators ∘ expand_separators = id`, and every
+/// marker the merge sees is the expander's own.
+fn expansion_safe(base: &str, ours: &str, theirs: &str) -> bool {
+    let has_mark = |s: &str| s.as_bytes().contains(&EXPANSION_MARK);
+    !has_mark(base) && !has_mark(ours) && !has_mark(theirs)
+}
+
 /// Expand syntactic separators into separate lines for finer merge alignment.
-/// Inspired by Sesame (arXiv:2407.18888): isolating separators lets line-based
-/// merge tools see block boundaries as independent change units.
+/// Isolating separators lets line-based merge see block boundaries as
+/// independent change units.
 /// Uses byte-level iteration since separators ({, }, ;) and string delimiters
 /// (", ', `) are all ASCII.
+///
+/// **Every line break this inserts is marked.** The expansion is a lens, not a
+/// reformat: the merge happens in the expanded world and the answer is read
+/// back in the original one, so the transform has to be exactly invertible. It
+/// was not. `collapse_separators` used to guess which separator-only lines it
+/// had created, and its one join branch was unreachable (`result` always ends
+/// with `\n` at the top of the loop), so collapse was a no-op and any file that
+/// took this path came back with every `{`, `}` and `;` on a line of its own
+/// and a blank line after each one — text every version agreed on, destroyed by
+/// a merge that reported success, and a real regression in files where a
+/// separator sits at a line boundary the merge collapses. Marking the
+/// inserted breaks makes the inverse a deletion of marked bytes rather than a
+/// guess.
 fn expand_separators(content: &str) -> String {
     let bytes = content.as_bytes();
-    let mut result = Vec::with_capacity(content.len() * 2);
+    let mut result = Vec::with_capacity(content.len() * 3);
     let mut in_string = false;
     let mut escape_next = false;
     let mut string_char = b'"';
@@ -3797,9 +2509,11 @@ fn expand_separators(content: &str) -> String {
 
         if !in_string && (b == b'{' || b == b'}' || b == b';') {
             if result.last() != Some(&b'\n') && !result.is_empty() {
+                result.push(EXPANSION_MARK);
                 result.push(b'\n');
             }
             result.push(b);
+            result.push(EXPANSION_MARK);
             result.push(b'\n');
         } else {
             result.push(b);
@@ -3810,55 +2524,40 @@ fn expand_separators(content: &str) -> String {
     unsafe { String::from_utf8_unchecked(result) }
 }
 
-/// Collapse separator expansion back to original formatting.
-/// Uses the base formatting as a guide where possible.
-fn collapse_separators(merged: &str, _base: &str) -> String {
-    // Simple approach: join lines that contain only a separator with adjacent lines
-    let lines: Vec<&str> = merged.lines().collect();
-    let mut result = String::new();
+/// Collapse separator expansion back to original formatting: the exact inverse
+/// of [`expand_separators`] under [`expansion_safe`].
+///
+/// A marked line break is one the expander invented, so undoing the expansion
+/// is deleting every `MARK NL` pair — and nothing else. Text the merge carried
+/// through from any version keeps its own bytes, including its blank lines and
+/// its trailing newline, because this function never writes a byte of its own.
+/// A bare marker with no newline after it can only come from a merge that split
+/// the pair; dropping it keeps the output free of control characters.
+fn collapse_separators(merged: &str) -> String {
+    let bytes = merged.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
     let mut i = 0;
-
-    while i < lines.len() {
-        let trimmed = lines[i].trim();
-        if (trimmed == "{" || trimmed == "}" || trimmed == ";") && trimmed.len() == 1 {
-            // This is a separator-only line we may have created
-            // Try to join with previous line if it doesn't end with a separator
-            if !result.is_empty() && !result.ends_with('\n') {
-                // Peek: if it's an opening brace, join with previous
-                if trimmed == "{" {
-                    result.push(' ');
-                    result.push_str(trimmed);
-                    result.push('\n');
-                } else if trimmed == "}" {
-                    result.push('\n');
-                    result.push_str(trimmed);
-                    result.push('\n');
-                } else {
-                    result.push_str(trimmed);
-                    result.push('\n');
-                }
+    while i < bytes.len() {
+        if bytes[i] == EXPANSION_MARK {
+            // MARK NL is one inserted break; a lone MARK is debris.
+            if bytes.get(i + 1) == Some(&b'\n') {
+                i += 2;
             } else {
-                result.push_str(lines[i]);
-                result.push('\n');
+                i += 1;
             }
-        } else {
-            result.push_str(lines[i]);
-            result.push('\n');
+            continue;
         }
+        result.push(bytes[i]);
         i += 1;
     }
-
-    // Trim any trailing extra newlines to match original style
-    while result.ends_with("\n\n") {
-        result.pop();
-    }
-
-    result
+    // Safe: deleting whole ASCII bytes from valid UTF-8 leaves valid UTF-8.
+    unsafe { String::from_utf8_unchecked(result) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::binding::replace_at_word_boundaries;
 
     #[test]
     fn test_replace_at_word_boundaries() {
@@ -4011,7 +2710,7 @@ export function agentB() {
         let base = "a\nb\nc\nd\ne\n";
         let ours = "A\nb\nc\nd\ne\n";
         let theirs = "a\nb\nc\nd\nE\n";
-        let result = line_level_fallback(base, ours, theirs, "test.rs");
+        let result = line_level_fallback(base, ours, theirs, "test.rs", &Host::default());
         assert!(result.is_clean());
         assert!(result.stats.used_fallback);
         assert_eq!(result.content, "A\nb\nc\nd\nE\n");
@@ -4023,7 +2722,7 @@ export function agentB() {
         let base = "a\nb\nc\n";
         let ours = "X\nb\nc\n";
         let theirs = "Y\nb\nc\n";
-        let result = line_level_fallback(base, ours, theirs, "test.rs");
+        let result = line_level_fallback(base, ours, theirs, "test.rs", &Host::default());
         assert!(!result.is_clean());
         assert!(result.stats.used_fallback);
     }
@@ -4032,18 +2731,19 @@ export function agentB() {
     fn test_expand_separators() {
         let code = "function foo() { return 1; }";
         let expanded = expand_separators(code);
-        // Separators should be on their own lines
+        // Separators are alone on their line, each break carrying its mark.
+        let seen: Vec<&str> = expanded.lines().map(str::trim_end).collect();
         assert!(
-            expanded.contains("{\n"),
-            "Opening brace should have newline after"
+            seen.iter().any(|l| l.trim_end_matches('\u{1}') == "{"),
+            "opening brace should stand alone: {expanded:?}"
         );
         assert!(
-            expanded.contains(";\n"),
-            "Semicolons should have newline after"
+            seen.iter().any(|l| l.trim_end_matches('\u{1}') == ";"),
+            "semicolon should stand alone: {expanded:?}"
         );
         assert!(
-            expanded.contains("\n}"),
-            "Closing brace should have newline before"
+            seen.iter().any(|l| l.trim_end_matches('\u{1}') == "}"),
+            "closing brace should stand alone: {expanded:?}"
         );
     }
 
@@ -4057,6 +2757,53 @@ export function agentB() {
             "Separators in strings should be preserved: {}",
             expanded
         );
+    }
+
+    /// Round-tripping the transform. Everything the fallback path claims rests
+    /// on this: the
+    /// merge is computed in the expanded world and read back in the original
+    /// one, so if the transform is not exactly invertible the merge ships a
+    /// reformat nobody asked for. It used to not be — collapse was a no-op.
+    #[test]
+    fn separator_expansion_is_invertible() {
+        for code in [
+            "function foo() { return 1; }",
+            "use crate::*;\nuse std::fs;\n",
+            "buildscript {\n    repositories {\n        jcenter()\n    }\n}\n\nrepositories {\n}\n",
+            "class A {\n\tint x = 1;\n\n\tvoid f() {\n\t\tg();\n\t}\n}\n",
+            r#"let x = "hello { world };";"#,
+            "no separators here at all\n",
+            "",
+            "trailing blank lines\n\n\n",
+            "\n\nleading blank lines\nx = 1;\n",
+        ] {
+            assert_eq!(
+                collapse_separators(&expand_separators(code)),
+                code,
+                "collapse ∘ expand must be the identity on {code:?}"
+            );
+        }
+    }
+
+    /// A reduced real-world case: one side reorders two `use` lines, the other
+    /// appends a third. No entity model reaches a bare `use` list, so this is
+    /// the fallback path, and it used to come back with every `;` on a line of
+    /// its own — three lines all three versions agreed on, gone from a merge
+    /// that exited clean.
+    #[test]
+    fn reordered_use_statements_keep_their_lines() {
+        let base = "use crate::*;\nuse std::fs;\n";
+        let ours = "use std::fs;\nuse crate::*;\n";
+        let theirs = "use crate::*;\nuse std::fs;\nuse itertools::Itertools;\n";
+        let out = line_level_fallback(base, ours, theirs, "x.rs", &Host::default());
+        assert!(out.is_clean(), "should still resolve: {:?}", out.content);
+        for line in ["use std::fs;", "use crate::*;", "use itertools::Itertools;"] {
+            assert!(
+                out.content.lines().any(|l| l.trim_end() == line),
+                "{line:?} must survive as a line, got {:?}",
+                out.content
+            );
+        }
     }
 
     #[test]
@@ -4097,7 +2844,7 @@ export function agentB() {
         let base = "import a from 'a';\nimport b from 'b';\n";
         let ours = "import a from 'a';\nimport b from 'b';\nimport c from 'c';\n";
         let theirs = "import a from 'a';\nimport b from 'b';\nimport d from 'd';\n";
-        let result = merge_imports_commutatively(base, ours, theirs);
+        let (result, _order_conflict) = merge_imports_commutatively(base, ours, theirs);
         assert!(result.contains("import a from 'a';"));
         assert!(result.contains("import b from 'b';"));
         assert!(result.contains("import c from 'c';"));
@@ -4110,7 +2857,7 @@ export function agentB() {
         let base = "import a from 'a';\nimport b from 'b';\nimport c from 'c';\n";
         let ours = "import a from 'a';\nimport c from 'c';\n";
         let theirs = "import a from 'a';\nimport b from 'b';\nimport c from 'c';\n";
-        let result = merge_imports_commutatively(base, ours, theirs);
+        let (result, _order_conflict) = merge_imports_commutatively(base, ours, theirs);
         assert!(result.contains("import a from 'a';"));
         assert!(
             !result.contains("import b from 'b';"),
@@ -4125,7 +2872,7 @@ export function agentB() {
         let base = "import a from 'a';\n";
         let ours = "import a from 'a';\nimport b from 'b';\n";
         let theirs = "import a from 'a';\nimport b from 'b';\n";
-        let result = merge_imports_commutatively(base, ours, theirs);
+        let (result, _order_conflict) = merge_imports_commutatively(base, ours, theirs);
         let count = result.matches("import b from 'b';").count();
         assert_eq!(count, 1, "Duplicate import should be deduplicated");
     }
@@ -4136,7 +2883,7 @@ export function agentB() {
         let base = "// @ts-nocheck\nimport { a } from \"./a\";\n";
         let ours = "// @ts-nocheck\nimport { a } from \"./a\";\nimport { b } from \"./b\";\n";
         let theirs = "// @ts-nocheck\nimport { a } from \"./a\";\nimport { c } from \"./c\";\n";
-        let result = merge_imports_commutatively(base, ours, theirs);
+        let (result, _order_conflict) = merge_imports_commutatively(base, ours, theirs);
         assert!(
             result.contains("// @ts-nocheck"),
             "Directive should be preserved. Got: {:?}",
@@ -4160,7 +2907,7 @@ export function agentB() {
         let ours = "#!/usr/bin/env node\nimport { a } from \"./a\";\nimport { b } from \"./b\";\n";
         let theirs =
             "#!/usr/bin/env node\nimport { a } from \"./a\";\nimport { c } from \"./c\";\n";
-        let result = merge_imports_commutatively(base, ours, theirs);
+        let (result, _order_conflict) = merge_imports_commutatively(base, ours, theirs);
         assert!(
             result.starts_with("#!/usr/bin/env node\n"),
             "Shebang must be first line. Got: {:?}",
@@ -4372,29 +3119,6 @@ export function agentB() {
     }
 
     #[test]
-    fn test_extract_member_chunks() {
-        let class_body = r#"export class Foo {
-    bar() {
-        return 1;
-    }
-
-    baz() {
-        return 2;
-    }
-}
-"#;
-        let chunks = extract_member_chunks(class_body).unwrap();
-        assert_eq!(
-            chunks.len(),
-            2,
-            "Should find 2 members, found {:?}",
-            chunks.iter().map(|c| &c.name).collect::<Vec<_>>()
-        );
-        assert_eq!(chunks[0].name, "bar");
-        assert_eq!(chunks[1].name, "baz");
-    }
-
-    #[test]
     fn test_extract_member_name() {
         assert_eq!(extract_member_name("add(a, b) {"), "add");
         assert_eq!(extract_member_name("fn add(&self, a: i32) -> i32 {"), "add");
@@ -4411,7 +3135,7 @@ export function agentB() {
         let base = "use std::io;\nuse std::fs;\n";
         let ours = "use std::io;\nuse std::fs;\nuse std::path::Path;\n";
         let theirs = "use std::io;\nuse std::fs;\nuse std::collections::HashMap;\n";
-        let result = merge_imports_commutatively(base, ours, theirs);
+        let (result, _order_conflict) = merge_imports_commutatively(base, ours, theirs);
         assert!(result.contains("use std::path::Path;"));
         assert!(result.contains("use std::collections::HashMap;"));
         assert!(result.contains("use std::io;"));
@@ -4490,19 +3214,22 @@ export function agentB() {
 
     #[test]
     fn test_python_both_add_different_decorators() {
-        // Both add different decorators to the same function
+        // Both add different decorators to the same function. Decorator
+        // application is function composition — non-commutative — so the
+        // stack order of two one-sided additions is a semantic decision
+        // neither side made (e.g. @cache outside @auth serves cached
+        // responses without an auth check). The merge must conflict, not
+        // fabricate an order.
         let base = "def foo():\n    return 1\n\ndef bar():\n    return 2\n";
         let ours = "@cache\ndef foo():\n    return 1\n\ndef bar():\n    return 2\n";
         let theirs = "@deprecated\ndef foo():\n    return 1\n\ndef bar():\n    return 2\n";
         let result = entity_merge(base, ours, theirs, "test.py");
         assert!(
-            result.is_clean(),
-            "Both adding different decorators should merge. Conflicts: {:?}",
-            result.conflicts,
+            !result.is_clean(),
+            "Both sides adding different decorators must conflict (order is semantic)",
         );
         assert!(result.content.contains("@cache"));
         assert!(result.content.contains("@deprecated"));
-        assert!(result.content.contains("def foo()"));
     }
 
     #[test]
@@ -4528,14 +3255,15 @@ export function agentB() {
         let ours = "class Foo {\n    @Injectable()\n    bar() {\n        return 1;\n    }\n}\n";
         let theirs = "class Foo {\n    @Deprecated()\n    bar() {\n        return 1;\n    }\n}\n";
         let result = entity_merge(base, ours, theirs, "test.ts");
+        // Non-commutative composition: two one-sided decorator additions
+        // must conflict rather than fabricate a stack order neither side
+        // wrote.
         assert!(
-            result.is_clean(),
-            "Both adding different decorators to same method should merge. Conflicts: {:?}",
-            result.conflicts,
+            !result.is_clean(),
+            "Both sides adding different decorators must conflict (order is semantic)",
         );
         assert!(result.content.contains("@Injectable()"));
         assert!(result.content.contains("@Deprecated()"));
-        assert!(result.content.contains("bar()"));
     }
 
     #[test]
@@ -5193,7 +3921,7 @@ export * from "./types";
         let base = "import os\nimport sys\n\nfrom collections import OrderedDict\nfrom typing import List\n";
         let ours = "import os\nimport sys\nimport json\n\nfrom collections import OrderedDict\nfrom typing import List\n";
         let theirs = "import os\nimport sys\n\nfrom collections import OrderedDict\nfrom collections import defaultdict\nfrom typing import List\n";
-        let result = merge_imports_commutatively(base, ours, theirs);
+        let (result, _order_conflict) = merge_imports_commutatively(base, ours, theirs);
         // json should be in the first group (stdlib), defaultdict in the second (collections)
         let lines: Vec<&str> = result.lines().collect();
         let json_idx = lines.iter().position(|l| l.contains("json"));
@@ -5234,15 +3962,19 @@ export * from "./types";
                 structural_hash: None,
                 start_line: i * 3 + 1,
                 end_line: i * 3 + 3,
+                start_byte: None,
+                end_byte: None,
                 metadata: None,
             })
             .collect();
-        // Default threshold (10): should trigger
-        assert!(has_excessive_duplicates(&entities));
-        // Set threshold to 20: should not trigger
-        std::env::set_var("WEAVE_MAX_DUPLICATES", "20");
-        assert!(!has_excessive_duplicates(&entities));
-        std::env::remove_var("WEAVE_MAX_DUPLICATES");
+        // The default host's threshold (10): should trigger.
+        assert!(has_excessive_duplicates(
+            &entities,
+            Host::default().max_duplicates
+        ));
+        // A host granting a threshold of 20: should not. No environment is
+        // read, and no other test in this process can see the change.
+        assert!(!has_excessive_duplicates(&entities, 20));
     }
 
     #[test]

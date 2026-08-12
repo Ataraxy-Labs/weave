@@ -1,15 +1,27 @@
+//! The arguments each tool accepts, and nothing else.
+//!
+//! `deny_unknown_fields` on every one of them is the point of this module.
+//! The decode is rmcp's, and an absent `arguments` object becomes `{}` before
+//! it ever reaches serde — so a struct whose fields are all optional (weave_check
+//! was one) accepted a call with nothing in it, or with nothing but misspelled
+//! keys, and answered confidently about revisions the caller never named. A
+//! caller who wrote `filepath` for `file_path` now gets `invalid_params`
+//! naming the field, instead of a good answer to a question they did not ask.
+
 use serde::Deserialize;
 
 // ── Tool parameter structs ──
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ExtractEntitiesParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExtractEntitiesParams {
     #[schemars(description = "Path to the file (relative to repo root)")]
     pub file_path: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ClaimEntityParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClaimEntityParams {
     #[schemars(description = "Agent identifier (e.g. 'agent-1')")]
     pub agent_id: String,
     #[schemars(description = "Path to the file containing the entity")]
@@ -19,7 +31,8 @@ pub struct ClaimEntityParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ReleaseEntityParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReleaseEntityParams {
     #[schemars(description = "Agent identifier")]
     pub agent_id: String,
     #[schemars(description = "Path to the file containing the entity")]
@@ -29,13 +42,15 @@ pub struct ReleaseEntityParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct StatusParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct StatusParams {
     #[schemars(description = "Path to the file to check status for")]
     pub file_path: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct WhoIsEditingParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct WhoIsEditingParams {
     #[schemars(description = "Path to the file")]
     pub file_path: String,
     #[schemars(description = "Name of the entity to check")]
@@ -43,13 +58,15 @@ pub struct WhoIsEditingParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct PotentialConflictsParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct PotentialConflictsParams {
     #[schemars(description = "Optional: filter conflicts to those involving this agent")]
     pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct PreviewMergeParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreviewMergeParams {
     #[schemars(description = "Base branch to merge from (e.g. 'main')")]
     pub base_branch: String,
     #[schemars(description = "Target branch to merge into (e.g. 'feature-x')")]
@@ -59,7 +76,8 @@ pub struct PreviewMergeParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct AgentRegisterParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentRegisterParams {
     #[schemars(description = "Agent identifier")]
     pub agent_id: String,
     #[schemars(description = "Branch the agent is working on")]
@@ -67,7 +85,8 @@ pub struct AgentRegisterParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct AgentHeartbeatParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentHeartbeatParams {
     #[schemars(description = "Agent identifier")]
     pub agent_id: String,
     #[schemars(description = "List of entity IDs the agent is currently working on")]
@@ -75,7 +94,8 @@ pub struct AgentHeartbeatParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct EntityDepsParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct EntityDepsParams {
     #[schemars(description = "Path to the file containing the entity")]
     pub file_path: String,
     #[schemars(description = "Name of the entity to analyze")]
@@ -83,7 +103,8 @@ pub struct EntityDepsParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ImpactAnalysisParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct ImpactAnalysisParams {
     #[schemars(description = "Path to the file containing the entity")]
     pub file_path: String,
     #[schemars(description = "Name of the entity to analyze impact for")]
@@ -91,7 +112,8 @@ pub struct ImpactAnalysisParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ValidateMergeParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct ValidateMergeParams {
     #[schemars(description = "Base branch (e.g. 'main')")]
     pub base_branch: String,
     #[schemars(description = "Target branch to validate merge of")]
@@ -101,13 +123,15 @@ pub struct ValidateMergeParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MergeSummaryParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct MergeSummaryParams {
     #[schemars(description = "Path to a file containing weave conflict markers")]
     pub file_path: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct DiffParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct DiffParams {
     #[schemars(
         description = "Base ref to compare from (branch, tag, or commit hash, e.g. 'main')"
     )]
@@ -121,7 +145,8 @@ pub struct DiffParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MergeAuditParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct MergeAuditParams {
     #[schemars(description = "Base branch to merge from (e.g. 'main')")]
     pub base_branch: String,
     #[schemars(description = "Target branch to merge into (e.g. 'feature-x')")]
@@ -133,7 +158,8 @@ pub struct MergeAuditParams {
 // ── New v2 tools ──
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct UpdateEntityContentParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateEntityContentParams {
     #[schemars(description = "Agent identifier")]
     pub agent_id: String,
     #[schemars(description = "Path to the file containing the entity")]
@@ -145,7 +171,8 @@ pub struct UpdateEntityContentParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct GetEntityContentParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct GetEntityContentParams {
     #[schemars(description = "Path to the file containing the entity")]
     pub file_path: String,
     #[schemars(description = "Name of the entity to read")]
@@ -153,13 +180,41 @@ pub struct GetEntityContentParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MergeFileParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct MergeFileParams {
     #[schemars(description = "Path to the file to merge")]
     pub file_path: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ResolveConflictParams {
+#[serde(deny_unknown_fields)]
+pub(crate) struct FindingsParams {
+    #[schemars(description = "Base branch to merge from (e.g. 'main')")]
+    pub base_branch: String,
+    #[schemars(description = "Target branch to merge into (e.g. 'feature-x')")]
+    pub target_branch: String,
+    #[schemars(description = "Optional: analyze only this file")]
+    pub file_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CheckParams {
+    #[schemars(
+        description = "Merge base revision. Optional: defaults to the merge base of ours and theirs."
+    )]
+    pub base: Option<String>,
+    #[schemars(description = "Our side (branch, tag or SHA). Optional: defaults to HEAD.")]
+    pub ours: Option<String>,
+    #[schemars(
+        description = "Their side (branch, tag or SHA). Optional: defaults to MERGE_HEAD, i.e. the merge currently in progress."
+    )]
+    pub theirs: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResolveConflictParams {
     #[schemars(description = "Agent identifier")]
     pub agent_id: String,
     #[schemars(description = "Path to the file containing the entity")]

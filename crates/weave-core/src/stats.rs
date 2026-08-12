@@ -1,6 +1,26 @@
+//! The lifetime merge counter behind `weave stats` — opt-in, and honest about
+//! being opt-in.
+//!
+//! One file, `~/.weave/stats.json`, written by `weave-driver` only when
+//! `WEAVE_STATS=1` is set, and read by the `weave stats` command. The default
+//! merge path touches no file except the merge's own inputs and output, so an
+//! empty counter almost always means "never switched on" rather than "never
+//! merged" — which is why `weave stats` says so instead of printing zeros.
+//!
+//! *Where* the file lives is the caller's to decide, not this module's. It
+//! used to read `HOME` itself, which meant a zero-argument `load()` reached the
+//! environment and the disk while the `WEAVE_STATS` gate that was supposed to
+//! protect it lived in another crate entirely. [`default_path`] still offers
+//! the conventional location, but a caller has to ask for it and hand it
+//! over — and a test can hand over somewhere else.
+//!
+//! It is deliberately a counter and not a log: no file paths, no entity names,
+//! no timestamps beyond first and last run. Nothing here is consulted by any
+//! merge decision.
+
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::conflict::MergeStats;
@@ -20,11 +40,13 @@ pub struct WeaveLifetimeStats {
     pub confidence_conflict: u64,
 }
 
-fn stats_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()?;
-    Some(PathBuf::from(home).join(".weave").join("stats.json"))
+/// The conventional location, `~/.weave/stats.json`, or `None` when the home
+/// directory cannot be determined.
+///
+/// This is the one function here that reads the environment, it is not on any
+/// merge path, and the binaries call it themselves and pass the result down.
+pub fn default_path(home: Option<&str>) -> Option<PathBuf> {
+    Some(PathBuf::from(home?).join(".weave").join("stats.json"))
 }
 
 fn now_iso() -> String {
@@ -90,12 +112,11 @@ fn now_iso() -> String {
 }
 
 impl WeaveLifetimeStats {
-    pub fn load() -> Self {
-        let path = match stats_path() {
-            Some(p) => p,
-            None => return Self::default(),
-        };
-        fs::read_to_string(&path)
+    /// Read the counter at `path`, or a zeroed one if it is absent or
+    /// unreadable — the counter is advisory, and a missing file is the normal
+    /// state.
+    pub fn load(path: &Path) -> Self {
+        fs::read_to_string(path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
@@ -111,9 +132,7 @@ impl WeaveLifetimeStats {
 
         self.total_merges += 1;
 
-        let auto_resolved = stats.entities_ours_only
-            + stats.entities_theirs_only
-            + stats.entities_both_changed_merged;
+        let auto_resolved = stats.auto_resolved();
         let total_entities = auto_resolved
             + stats.entities_unchanged
             + stats.entities_conflicted
@@ -136,15 +155,20 @@ impl WeaveLifetimeStats {
         self
     }
 
-    pub fn save(self) -> Self {
-        if let Some(path) = stats_path() {
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if let Ok(json) = serde_json::to_string_pretty(&self) {
-                let _ = fs::write(&path, json);
+    /// Write the counter to `path`, creating its directory if need be.
+    ///
+    /// Returns whether the write landed. It used to return `Self` and swallow
+    /// both failures, so the driver's `let _ = ...` was discarding a result
+    /// that never said anything in the first place.
+    pub fn save(&self, path: &Path) -> bool {
+        if let Some(parent) = path.parent() {
+            if fs::create_dir_all(parent).is_err() {
+                return false;
             }
         }
-        self
+        match serde_json::to_string_pretty(self) {
+            Ok(json) => fs::write(path, json).is_ok(),
+            Err(_) => false,
+        }
     }
 }

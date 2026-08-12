@@ -1,0 +1,484 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://weave.ataraxylabs.dev/schema/weave-findings/1.2.0",
+  "title": "weave findings",
+  "description": "weave-patch-schema v1 — the READ side of weave's agent contract. What a merge did, what it might have broken, and what the caller could do about it. The finding classes below are the fixed set of class tags a finding can carry. The WRITE side (`weave patch`) is a separate schema: schema/weave-ops.schema.json.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "file",
+    "clean",
+    "confidence",
+    "findings",
+    "ops",
+    "bindings"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "description": "Semver of THIS schema. Consumers must reject a major they do not know. Additive fields are minor bumps; removing or re-meaning a field is a major bump. 1.1.0 added the optional `scope` and `findings[].side`. 1.2.0 added `findings[].hunks`, `findings[].refused_by` and `findings[].texts`: a CONFLICT finding now DIAGNOSES the disagreement (which lines of base each side rewrote, where those rewrites meet, and which refusal fired) and REFERENCES the three full texts by `path@rev` instead of carrying them. `base`/`ours`/`theirs` remain valid and were always optional, so a 1.2.0 document is readable by a 1.1.0 consumer; a consumer that DEPENDED on the texts being inlined should read `texts[*].path@rev` and fetch them, which costs one `git show` and is why the worst-case document for a large conflicted file fell from 450KB to under 30KB. A producer declares the lowest version whose fields it actually uses.",
+      "type": "string",
+      "enum": [
+        "1.0.0",
+        "1.1.0",
+        "1.2.0"
+      ]
+    },
+    "file": {
+      "description": "Repository-relative path of the merged file. For scope=repo this is the file the finding is ABOUT — the one still carrying the broken use, not the one that broke it (that file appears in `related[].file`).",
+      "type": "string"
+    },
+    "scope": {
+      "description": "What this document describes. `merge` (default when absent): one merge of one file, produced by the merge driver's read side. `repo`: a repo-scope binding check (`weave check`), which composes no text and therefore reports no ops — the cross-file half of the binding check, which a per-file driver structurally cannot see. Added in 1.1.0.",
+      "type": "string",
+      "enum": [
+        "merge",
+        "repo"
+      ]
+    },
+    "clean": {
+      "description": "True when the merge produced no conflict markers. NOTE: clean is not the same as safe — a clean merge can still carry findings (that is the entire point of this schema).",
+      "type": "boolean"
+    },
+    "confidence": {
+      "description": "weave's own confidence in the resolution, coarse and monotone.",
+      "type": "string",
+      "enum": [
+        "very_high",
+        "high",
+        "medium",
+        "low",
+        "conflict",
+        "unknown"
+      ]
+    },
+    "findings": {
+      "description": "Everything the caller should look at, in the finite class vocabulary. Empty means weave found nothing — NOT that nothing is wrong (the semantic layer is undecidable and is CI's job).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "ops": {
+      "description": "Per-entity composition record: what happened to each entity key in this merge.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/op"
+      }
+    },
+    "bindings": {
+      "$ref": "#/$defs/bindings"
+    },
+    "stats": {
+      "description": "Raw per-merge counters. Advisory; shape may grow.",
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "finding_class": {
+      "description": "The class tags a finding can carry: DANGLING, DUP, SHADOW and ORDER for name-resolution changes, plus INTERLEAVE for effectful order composition, LOSS for content that no side dropped, ASYM for direction-dependent results, and CONFLICT for the honest refusal.",
+      "type": "string",
+      "enum": [
+        "CONFLICT",
+        "LOSS",
+        "DUP",
+        "DANGLING",
+        "SHADOW",
+        "ORDER",
+        "INTERLEAVE",
+        "ASYM"
+      ]
+    },
+    "conflict_kind": {
+      "description": "Refines class=CONFLICT. Mirrors weave-core's ConflictKind.",
+      "type": "string",
+      "enum": [
+        "both_modified",
+        "modify_delete",
+        "both_added",
+        "rename_rename",
+        "rename_modify"
+      ]
+    },
+    "op_vocabulary": {
+      "description": "The per-entity actions. The first seven are the per-key actions a per-key matcher can emit on its own. The last four are the relational extension: they correlate several keys, which a per-key matcher cannot do. They are RESERVED — a v1 producer never emits split/merged/copied/moved; a v1 consumer must accept them without error.",
+      "type": "string",
+      "enum": [
+        "added",
+        "unchanged",
+        "edited",
+        "renamed",
+        "rename_edited",
+        "deleted",
+        "split",
+        "merged",
+        "copied",
+        "moved"
+      ]
+    },
+    "side": {
+      "description": "Which version of the merge triple a fact came from.",
+      "type": "string",
+      "enum": [
+        "base",
+        "ours",
+        "theirs",
+        "both"
+      ]
+    },
+    "finding": {
+      "type": "object",
+      "required": [
+        "class",
+        "entity",
+        "entity_type",
+        "source"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/finding_class"
+        },
+        "kind": {
+          "$ref": "#/$defs/conflict_kind"
+        },
+        "entity": {
+          "description": "Entity key the finding is about. `(file)` when the finding is about the file as a whole.",
+          "type": "string"
+        },
+        "entity_type": {
+          "description": "Parser-reported kind: function, class, method, interface, file, …",
+          "type": "string"
+        },
+        "source": {
+          "description": "Where the finding came from. `conflict`: weave refused to guess. `warning`: weave resolved but flagged semantic risk. `derived`: computed from the merge output plus binding facts (renames/deletes) — the read-only form of the binding pass.",
+          "type": "string",
+          "enum": [
+            "conflict",
+            "warning",
+            "derived"
+          ]
+        },
+        "side": {
+          "description": "Which side's change caused the finding — the actor, not the victim. For a repo-scope DANGLING this is the side that renamed or deleted the definition. Added in 1.1.0.",
+          "$ref": "#/$defs/side"
+        },
+        "complexity": {
+          "description": "Conflict complexity classification — which dimensions of the entity changed.",
+          "type": "string"
+        },
+        "confidence": {
+          "description": "How confident weave is that an automatic resolution would be right.",
+          "type": "string",
+          "enum": [
+            "high",
+            "medium",
+            "low",
+            "unknown"
+          ]
+        },
+        "base": {
+          "description": "Entity content in the merge base. Null when absent there. Since 1.2.0 the merge producer does not emit this: `texts` says where the content is and `hunks` says what changed in it. Still valid, still optional.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ours": {
+          "description": "Entity content on our side. Null when absent there. Since 1.2.0 the merge producer does not emit this: `texts` says where the content is and `hunks` says what changed in it. Still valid, still optional.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "theirs": {
+          "description": "Entity content on their side. Null when absent there. Since 1.2.0 the merge producer does not emit this: `texts` says where the content is and `hunks` says what changed in it. Still valid, still optional.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "suggestion": {
+          "description": "A concrete next action, in the imperative. Advisory — never a resolution weave applied.",
+          "type": "string"
+        },
+        "warning_kind": {
+          "description": "Present when source=warning: the underlying weave-core WarningKind, kept because the class mapping is lossy. `composition_licensed` is not a risk at all — it is a conflict weave RESOLVED under disjoint composition, carrying the two read/write sets that licensed it. `conflict_frame_duplicate` reports a line the frame of a conflicted output states more often than any union of the two sides could; it is the DUP class, found outside the markers, where no resolution removes it (added 1.2.0).",
+          "type": "string",
+          "enum": [
+            "dependency_also_modified",
+            "dependent_also_modified",
+            "parse_failed_after_merge",
+            "composition_licensed",
+            "conflict_frame_duplicate"
+          ]
+        },
+        "related": {
+          "description": "Other entities implicated in this finding.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "entity"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "entity": {
+                "type": "string"
+              },
+              "entity_type": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "hunks": {
+          "description": "The three-way alignment of this conflict, one entry per place the two sides' edits meet. Every field is READ OFF the two base-relative diffs weave already computed — nothing here is inferred and nothing is guessed. A finding without this reads as nearly useless to an agent trying to resolve the conflict — there is no per-hunk detail to act on. Added in 1.2.0.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hunk"
+          }
+        },
+        "refused_by": {
+          "description": "WHICH refusal fired. `kind` is the verdict (the two sides disagreed); this is the reason. The rungs are not interchangeable: `statement_fold` means diff3, the decorator merge and the container merge all passed and two edits landed in one statement, while `merge_ladder_exhausted` means every rung refused. Added in 1.2.0.",
+          "type": "string",
+          "enum": [
+            "merge_ladder_exhausted",
+            "statement_fold",
+            "container_member",
+            "modify_delete_guard",
+            "both_added_divergent",
+            "rename_rename_divergent",
+            "rename_vs_edit_guard"
+          ]
+        },
+        "texts": {
+          "description": "Where the three full texts are, rather than the three full texts. Added in 1.2.0.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "base": {
+              "$ref": "#/$defs/text_ref"
+            },
+            "ours": {
+              "$ref": "#/$defs/text_ref"
+            },
+            "theirs": {
+              "$ref": "#/$defs/text_ref"
+            }
+          }
+        }
+      }
+    },
+    "op": {
+      "type": "object",
+      "required": [
+        "entity",
+        "entity_type",
+        "op"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "entity": {
+          "type": "string"
+        },
+        "entity_type": {
+          "type": "string"
+        },
+        "op": {
+          "$ref": "#/$defs/op_vocabulary"
+        },
+        "from": {
+          "description": "Previous name. Present for op=renamed / rename_edited.",
+          "type": "string"
+        },
+        "to": {
+          "description": "New name. Present for op=renamed / rename_edited.",
+          "type": "string"
+        },
+        "conflicted": {
+          "description": "True when this op describes the SHAPE of a conflict rather than an applied resolution. The entity also appears in `findings` with class=CONFLICT.",
+          "type": "boolean"
+        },
+        "fallback": {
+          "description": "True when weave could not use entity-level merging here and fell back to line-level merge. The op is then a best-effort description.",
+          "type": "boolean"
+        }
+      }
+    },
+    "bindings": {
+      "description": "The facts a caller needs to check name resolution itself — the inputs to the DANGLING / DUP / SHADOW classes.",
+      "type": "object",
+      "required": [
+        "renames",
+        "references"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "renames": {
+          "description": "Every rename weave observed, with the side that performed it. A caller repairing call sites needs exactly this.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "from",
+              "to",
+              "side"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              },
+              "side": {
+                "$ref": "#/$defs/side"
+              }
+            }
+          }
+        },
+        "references": {
+          "description": "Per entity key touched by this merge: is it still defined in the merged output, and is it still referenced there? `referenced && !defined` is precisely the DANGLING condition, and is reported as a derived finding.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "entity",
+              "defined_in_output",
+              "referenced_in_output"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "entity": {
+                "type": "string"
+              },
+              "defined_in_output": {
+                "type": "boolean"
+              },
+              "referenced_in_output": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "hunk": {
+      "type": "object",
+      "required": [
+        "base_start",
+        "base_end",
+        "ours",
+        "theirs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "base_start": {
+          "description": "First base line this hunk replaces, 1-based and inclusive, counted INSIDE the entity's own base text (the one `texts.base` references) — not inside the file. A finding is about an entity, and a range stated against anything else would need a second coordinate system to be checkable.",
+          "type": "integer"
+        },
+        "base_end": {
+          "description": "Last base line this hunk replaces, inclusive. `base_end < base_start` is a pure INSERTION before `base_start`: an insertion has a position, not an extent.",
+          "type": "integer"
+        },
+        "ours": {
+          "$ref": "#/$defs/side_edit"
+        },
+        "theirs": {
+          "$ref": "#/$defs/side_edit"
+        },
+        "collision": {
+          "description": "The base lines BOTH sides rewrote or deleted — the lines two developers each had an opinion about, which is the question the marker is asking. Absent or empty means the two edits are merely ADJACENT: one hunk because nothing separates them, not because they contradict.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "side_edit": {
+      "type": "object",
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "What this side did to this hunk. `untouched` means only the OTHER side touched it.",
+          "type": "string",
+          "enum": [
+            "untouched",
+            "added",
+            "removed",
+            "modified"
+          ]
+        },
+        "removed": {
+          "description": "Base lines this side deleted, verbatim and in order.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "added": {
+          "description": "Lines this side wrote in their place, verbatim and in order.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tokens_added": {
+          "description": "Identifiers present in what this side wrote and absent from what it deleted — a set difference over tokens. It names what APPEARED. It does not claim to know why, because a merge tool that summarises intent is guessing.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tokens_removed": {
+          "description": "Identifiers present in what this side deleted and absent from what it wrote.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "text_ref": {
+      "type": "object",
+      "required": [
+        "path",
+        "lines",
+        "bytes",
+        "content_hash"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Repository-relative path the text lives in.",
+          "type": "string"
+        },
+        "rev": {
+          "description": "The revision to read it at: `git show <rev>:<path>`. Absent when the producer genuinely does not know one — the merge driver is handed three temp files by git and a `rev` it invented would be worse than none.",
+          "type": "string"
+        },
+        "lines": {
+          "description": "How many lines the entity's text has there, so a reader can budget the fetch.",
+          "type": "integer"
+        },
+        "bytes": {
+          "description": "How many bytes.",
+          "type": "integer"
+        },
+        "content_hash": {
+          "description": "A 16-hex-digit fingerprint of the entity's text, for answering “is this still the version the finding was computed against”. A fingerprint, NOT a cryptographic commitment: it is Rust's `DefaultHasher`, and the schema says so rather than letting the field name imply otherwise.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

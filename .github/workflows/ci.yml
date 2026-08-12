@@ -15,6 +15,16 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+      # The in-tree behaviour suite, named explicitly. `cargo test --workspace`
+      # above already runs it, but only implicitly: if these files were ever
+      # moved or renamed, that step would keep passing while testing nothing of
+      # the merge's actual behaviour. Naming the targets makes that a hard
+      # failure instead of a silent one.
+      - name: In-tree behaviour suite (must exist, must run)
+        run: |
+          cargo test -p weave-core --test public_properties
+          cargo test -p weave-driver --test public_properties

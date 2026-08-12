@@ -1,6 +1,6 @@
 [package]
 name = "weave-driver"
-version = "0.3.6"
+version = "0.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Git merge driver for entity-level semantic merging. Drop-in replacement for git's default merge strategy."
@@ -11,12 +11,18 @@ categories = ["command-line-utilities", "development-tools"]
 readme = "../../README.md"
 
 [dependencies]
-weave-core = { path = "../weave-core", version = "0.3.6" }
+weave-core = { path = "../weave-core", version = "0.5.0" }
 sem-core = "0.21.0"
-weave-crdt = { path = "../weave-crdt", version = "0.3.6", optional = true }
+weave-crdt = { path = "../weave-crdt", version = "0.5.0", optional = true }
 serde_json = "1"
+thiserror = "2"
+# Installs the global logger so that RUST_LOG surfaces what the dependency
+# tree logs through the `log` facade (git2, notably). weave-driver itself logs
+# nothing, so it takes no direct dependency on `log`.
 env_logger = "0.11"
-log = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"

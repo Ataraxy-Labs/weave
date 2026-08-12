@@ -1,7 +1,7 @@
 use std::fs;
 use weave_core::parse_weave_conflicts;
 
-pub fn run(file_path: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn run(file_path: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let content = fs::read_to_string(file_path)
         .map_err(|e| format!("Failed to read {}: {}", file_path, e))?;
 
@@ -16,7 +16,7 @@ pub fn run(file_path: &str, json: bool) -> Result<(), Box<dyn std::error::Error>
                     "kind": c.entity_kind,
                     "complexity": format!("{}", c.complexity),
                     "confidence": c.confidence,
-                    "hint": c.hint,
+                    "refused_by": c.refusal,
                 })
             })
             .collect();
@@ -45,7 +45,7 @@ pub fn run(file_path: &str, json: bool) -> Result<(), Box<dyn std::error::Error>
                 c.complexity,
                 c.confidence
             );
-            println!("     Hint: {}\n", c.hint);
+            println!("     refused_by: {}\n", c.refusal);
         }
     }
 

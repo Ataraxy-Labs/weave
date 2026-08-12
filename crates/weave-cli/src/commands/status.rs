@@ -3,8 +3,11 @@ use sem_core::parser::plugins::create_default_registry;
 use weave_core::git::find_repo_root;
 use weave_crdt::{get_agent_status, get_entities_for_file, sync_from_files, EntityStateDoc};
 
-pub fn run(file: Option<&str>, agent: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    let repo_root = find_repo_root()?;
+pub(crate) fn run(
+    file: Option<&str>,
+    agent: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_root = find_repo_root(std::path::Path::new("."))?;
     let state_path = repo_root.join(".weave").join("state.automerge");
     let mut state = EntityStateDoc::open(&state_path)?;
 

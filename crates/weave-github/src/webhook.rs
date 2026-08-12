@@ -2,6 +2,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use hmac::{Hmac, Mac};
+use serde::Deserialize;
 use sha2::Sha256;
 
 use crate::merge::handle_pull_request;
@@ -38,23 +39,29 @@ pub async fn handle_webhook(
         return StatusCode::OK;
     }
 
-    // Parse payload
-    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+    // Parse payload. GitHub sends a large document; this decodes the parts
+    // weave acts on and nothing else. It used to be a `serde_json::Value`
+    // indexed by string, where a missing key and a hostile one were the same
+    // answer — `payload["action"].as_str().unwrap_or("")` returned `""` for
+    // both, fell through the match below, and returned 200 on a body that had
+    // never been read.
+    let payload: PullRequestPayload = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(_) => return StatusCode::BAD_REQUEST,
+        Err(e) => {
+            tracing::warn!("webhook body did not decode as a pull_request event: {e}");
+            return StatusCode::BAD_REQUEST;
+        }
     };
 
     // Only handle opened, synchronize (new push), reopened
-    let action = payload["action"].as_str().unwrap_or("");
-    if !matches!(action, "opened" | "synchronize" | "reopened") {
+    if !matches!(
+        payload.action.as_str(),
+        "opened" | "synchronize" | "reopened"
+    ) {
         return StatusCode::OK;
     }
 
-    // Extract fields we need
-    let pr = match parse_pr_event(&payload) {
-        Some(pr) => pr,
-        None => return StatusCode::BAD_REQUEST,
-    };
+    let pr = payload.into_event();
 
     // Spawn background task, return 200 immediately
     tokio::spawn(async move {
@@ -81,27 +88,66 @@ pub struct PrEvent {
     pub base_sha: String,
 }
 
-fn parse_pr_event(payload: &serde_json::Value) -> Option<PrEvent> {
-    let installation_id = payload["installation"]["id"].as_u64()?;
-    let repo_full_name = payload["repository"]["full_name"].as_str()?.to_string();
-    let pr = &payload["pull_request"];
-    let pr_number = pr["number"].as_u64()?;
-    let head_sha = pr["head"]["sha"].as_str()?.to_string();
-    let base_sha = pr["base"]["sha"].as_str()?.to_string();
+/// The parts of GitHub's `pull_request` event weave acts on.
+///
+/// Not `deny_unknown_fields`: this document is GitHub's, it carries dozens of
+/// fields weave has no use for, and it grows without asking. Denying here would
+/// mean a new GitHub field breaks the webhook. The closed-schema rule applies to
+/// documents whose shape weave publishes — the ops document and the tool
+/// arguments — not to somebody else's payload.
+#[derive(Debug, Deserialize)]
+struct PullRequestPayload {
+    action: String,
+    installation: Installation,
+    repository: Repository,
+    pull_request: PullRequest,
+}
 
-    let (owner, repo) = repo_full_name.split_once('/')?;
-    let owner = owner.to_string();
-    let repo = repo.to_string();
+#[derive(Debug, Deserialize)]
+struct Installation {
+    id: u64,
+}
 
-    Some(PrEvent {
-        installation_id,
-        repo_full_name,
-        owner,
-        repo,
-        pr_number,
-        head_sha,
-        base_sha,
-    })
+#[derive(Debug, Deserialize)]
+struct Repository {
+    full_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PullRequest {
+    number: u64,
+    head: Commit,
+    base: Commit,
+}
+
+#[derive(Debug, Deserialize)]
+struct Commit {
+    sha: String,
+}
+
+impl PullRequestPayload {
+    /// `owner/repo` is one field on the wire and two everywhere else. A name
+    /// without a slash keeps the whole string as the owner and leaves the repo
+    /// empty, which the API call will reject — the same outcome the old
+    /// `split_once('/')?` produced, minus the silent 400 with no reason.
+    fn into_event(self) -> PrEvent {
+        let (owner, repo) = self
+            .repository
+            .full_name
+            .split_once('/')
+            .map(|(o, r)| (o.to_string(), r.to_string()))
+            .unwrap_or_else(|| (self.repository.full_name.clone(), String::new()));
+
+        PrEvent {
+            installation_id: self.installation.id,
+            repo_full_name: self.repository.full_name,
+            owner,
+            repo,
+            pr_number: self.pull_request.number,
+            head_sha: self.pull_request.head.sha,
+            base_sha: self.pull_request.base.sha,
+        }
+    }
 }
 
 fn verify_signature(secret: &str, body: &[u8], signature: &str) -> bool {

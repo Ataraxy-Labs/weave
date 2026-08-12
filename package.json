@@ -1,6 +1,6 @@
 {
   "name": "@ataraxy-labs/weave",
-  "version": "0.3.4",
+  "version": "0.5.0",
   "description": "npm wrapper for the weave CLI, driver, and MCP server. Downloads matching release binaries and exposes weave, weave-driver, and weave-mcp commands.",
   "license": "MIT OR Apache-2.0",
   "type": "module",
@@ -28,6 +28,7 @@
     "scripts/verify-checksum.mjs",
     "scripts/sync-package-version.mjs",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE-APACHE",
     "LICENSE-MIT"
   ]

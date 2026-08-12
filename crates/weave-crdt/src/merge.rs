@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
@@ -39,8 +40,8 @@ impl VersionVector {
     /// `Some(Ordering::Greater)` if self dominates other,
     /// `Some(Ordering::Equal)` if equal,
     /// `None` if concurrent (neither dominates).
-    pub fn partial_cmp(&self, other: &VersionVector) -> Option<std::cmp::Ordering> {
-        let all_keys: std::collections::HashSet<&String> =
+    pub fn partial_cmp(&self, other: &VersionVector) -> Option<Ordering> {
+        let all_keys: HashSet<&String> =
             self.counters.keys().chain(other.counters.keys()).collect();
 
         let mut has_greater = false;
@@ -63,9 +64,9 @@ impl VersionVector {
         }
 
         match (has_greater, has_less) {
-            (false, false) => Some(std::cmp::Ordering::Equal),
-            (true, false) => Some(std::cmp::Ordering::Greater),
-            (false, true) => Some(std::cmp::Ordering::Less),
+            (false, false) => Some(Ordering::Equal),
+            (true, false) => Some(Ordering::Greater),
+            (false, true) => Some(Ordering::Less),
             (true, true) => None, // Concurrent (already returned above, but for safety)
         }
     }
@@ -85,41 +86,14 @@ impl VersionVector {
         self.counters.is_empty() || self.counters.values().all(|&v| v == 0)
     }
 
-    /// Get all agent IDs in this vector.
-    pub fn agents(&self) -> Vec<&String> {
-        self.counters.keys().collect()
-    }
-
     /// Get the raw counters map.
-    pub fn counters(&self) -> &HashMap<String, u64> {
+    pub(crate) fn counters(&self) -> &HashMap<String, u64> {
         &self.counters
     }
 
     /// Create from a HashMap.
-    pub fn from_map(map: HashMap<String, u64>) -> Self {
+    pub(crate) fn from_map(map: HashMap<String, u64>) -> Self {
         Self { counters: map }
-    }
-}
-
-/// The merge state of an entity in the CRDT.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum MergeState {
-    Clean,
-    Conflict {
-        ours: String,
-        theirs: String,
-        base: String,
-        ours_agent: String,
-        theirs_agent: String,
-    },
-}
-
-impl MergeState {
-    pub fn as_str(&self) -> &str {
-        match self {
-            MergeState::Clean => "clean",
-            MergeState::Conflict { .. } => "conflict",
-        }
     }
 }
 
@@ -178,8 +152,8 @@ mod tests {
         b.increment("agent-2");
 
         // a < b (b dominates a)
-        assert_eq!(a.partial_cmp(&b), Some(std::cmp::Ordering::Less));
-        assert_eq!(b.partial_cmp(&a), Some(std::cmp::Ordering::Greater));
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Less));
+        assert_eq!(b.partial_cmp(&a), Some(Ordering::Greater));
     }
 
     #[test]
@@ -205,6 +179,6 @@ mod tests {
         let mut b = VersionVector::new();
         b.increment("agent-1");
 
-        assert_eq!(a.partial_cmp(&b), Some(std::cmp::Ordering::Equal));
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Equal));
     }
 }

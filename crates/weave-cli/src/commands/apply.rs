@@ -9,12 +9,12 @@ use weave_crdt::{reconstruct_file_from_crdt, EntityStateDoc};
 /// the file from its entities plus the interstitial text between them. It is
 /// the counterpart to editing entities in the CRDT (via the MCP tools or
 /// `weave claim` flows): edit entities, then `weave apply` to write the files.
-pub fn run(files: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn run(files: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if files.is_empty() {
         return Err("Specify one or more files to apply, e.g. `weave apply src/lib.rs`".into());
     }
 
-    let repo_root = find_repo_root()?;
+    let repo_root = find_repo_root(std::path::Path::new("."))?;
     let state_path = repo_root.join(".weave").join("state.automerge");
     let state = EntityStateDoc::open(&state_path)?;
 

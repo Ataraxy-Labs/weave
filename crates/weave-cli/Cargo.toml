@@ -1,6 +1,6 @@
 [package]
 name = "weave-cli"
-version = "0.3.6"
+version = "0.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Entity-level semantic merge CLI. Resolves conflicts at the function/class level instead of lines."
@@ -10,20 +10,27 @@ keywords = ["merge", "semantic", "git", "cli", "conflict-resolution"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "../../README.md"
 
+[lib]
+name = "weave_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "weave"
 path = "src/main.rs"
 
 [dependencies]
-weave-core = { path = "../weave-core", version = "0.3.6" }
-weave-crdt = { path = "../weave-crdt", version = "0.3.6" }
+weave-core = { path = "../weave-core", version = "0.5.0" }
+weave-crdt = { path = "../weave-crdt", version = "0.5.0" }
 sem-core = "0.21.0"
 clap = { version = "4", features = ["derive"] }
 colored = "3"
 diffy = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
 openssl = { version = "0.10", features = ["vendored"], optional = true }
+
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
@@ -35,4 +42,11 @@ pkg-fmt = "zip"
 
 [features]
 default = []
+# Not used in any `use` statement — the point is the link, not the API.
+# `--features vendored-openssl` is what the cross-compile jobs in
+# .github/workflows pass so openssl is built from source rather than
+# found on the runner. cargo-machete cannot see that, hence the ignore.
 vendored-openssl = ["openssl"]
+
+[package.metadata.cargo-machete]
+ignored = ["openssl"]

@@ -5,6 +5,7 @@ use weave_core::entity_merge_with_registry;
 use weave_core::MergeResult;
 
 use crate::comment::format_comment;
+use crate::error::{GitHubError, Reason};
 use crate::github::GitHubClient;
 use crate::webhook::PrEvent;
 use crate::AppState;
@@ -16,7 +17,7 @@ pub struct FileMergeResult {
 }
 
 /// Handle a pull_request event end-to-end.
-pub async fn handle_pull_request(state: &AppState, pr: &PrEvent) -> Result<(), String> {
+pub async fn handle_pull_request(state: &AppState, pr: &PrEvent) -> Result<(), GitHubError> {
     let gh = GitHubClient::for_installation(&state.config, pr.installation_id).await?;
 
     // Poll mergeable status (GitHub computes it async)
@@ -69,7 +70,8 @@ pub async fn handle_pull_request(state: &AppState, pr: &PrEvent) -> Result<(), S
         return Ok(());
     }
 
-    // Merge each file
+    // Merge each file. The host was granted once, when the server started.
+    let host = state.host;
     let mut file_results = Vec::new();
     let mut total_stats = MergeStats::default();
 
@@ -94,26 +96,17 @@ pub async fn handle_pull_request(state: &AppState, pr: &PrEvent) -> Result<(), S
                 &file_path,
                 &reg,
                 &weave_core::MarkerFormat::default(),
+                &host,
             )
         })
         .await
-        .map_err(|e| format!("merge task panicked: {e}"))?;
+        .map_err(|e| GitHubError::new("merge", Reason::MergeTaskLost(e)))?;
 
-        // Accumulate stats
-        total_stats.entities_unchanged += result.stats.entities_unchanged;
-        total_stats.entities_ours_only += result.stats.entities_ours_only;
-        total_stats.entities_theirs_only += result.stats.entities_theirs_only;
-        total_stats.entities_both_changed_merged += result.stats.entities_both_changed_merged;
-        total_stats.entities_conflicted += result.stats.entities_conflicted;
-        total_stats.entities_added_ours += result.stats.entities_added_ours;
-        total_stats.entities_added_theirs += result.stats.entities_added_theirs;
-        total_stats.entities_deleted += result.stats.entities_deleted;
-        total_stats.semantic_warnings += result.stats.semantic_warnings;
-        total_stats.resolved_via_diffy += result.stats.resolved_via_diffy;
-        total_stats.resolved_via_inner_merge += result.stats.resolved_via_inner_merge;
-        if result.stats.used_fallback {
-            total_stats.used_fallback = true;
-        }
+        // Accumulate stats. The fold belongs to the type, in the crate that
+        // owns the table — this crate used to sum it field by field, which is
+        // how nine fields came to have two writing modules and how
+        // `references_rewritten` came to be missing from every PR total.
+        total_stats.absorb(&result.stats);
 
         file_results.push(FileMergeResult {
             path: path.clone(),
@@ -159,19 +152,33 @@ pub async fn handle_pull_request(state: &AppState, pr: &PrEvent) -> Result<(), S
 }
 
 /// Poll GitHub for the PR's mergeable status, retrying up to 5 times.
+///
+/// Two things can make an attempt inconclusive, and they are not the same
+/// thing: GitHub has not finished computing the answer yet (a successful call
+/// returning `None`), or the call itself did not get through. Both are worth
+/// another attempt inside the same budget. A 401, a 404 or a body we could not
+/// read are not — they will say the same thing in eight seconds — so they
+/// return immediately. That distinction is exactly what `String` errors could
+/// not express here.
 async fn poll_mergeable(
     gh: &GitHubClient,
     owner: &str,
     repo: &str,
     pr_number: u64,
-) -> Result<Option<bool>, String> {
+) -> Result<Option<bool>, GitHubError> {
+    let mut last_transient: Option<GitHubError> = None;
     for attempt in 0..5 {
-        let mergeable = gh.get_pr_mergeable(owner, repo, pr_number).await?;
-        if mergeable.is_some() {
-            return Ok(mergeable);
+        match gh.get_pr_mergeable(owner, repo, pr_number).await {
+            Ok(Some(mergeable)) => return Ok(Some(mergeable)),
+            // Computed, but not yet known: back off and ask again.
+            Ok(None) => {}
+            Err(e) if e.is_transient() => last_transient = Some(e),
+            Err(e) => return Err(e),
         }
-        // GitHub hasn't computed it yet, back off
         tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(attempt))).await;
     }
-    Ok(None)
+    match last_transient {
+        Some(e) => Err(e),
+        None => Ok(None),
+    }
 }

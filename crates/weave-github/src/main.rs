@@ -1,5 +1,6 @@
 mod comment;
 mod config;
+mod error;
 mod github;
 mod merge;
 mod webhook;
@@ -19,6 +20,9 @@ use crate::config::Config;
 pub struct AppState {
     pub config: Arc<Config>,
     pub registry: Arc<ParserRegistry>,
+    /// What a merge run by this server may reach outside itself. Built once,
+    /// here, and copied into every merge task.
+    pub host: weave_core::host::Host,
 }
 
 #[tokio::main]
@@ -36,6 +40,10 @@ async fn main() {
     let state = AppState {
         config: Arc::clone(&config),
         registry,
+        host: weave_core::host::Host {
+            line_merge: Some(weave_core::host::git_line_merge),
+            ..Default::default()
+        },
     };
 
     let app = Router::new()

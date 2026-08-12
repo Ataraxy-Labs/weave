@@ -3,5 +3,8 @@
 node_modules/
 .DS_Store
 .sem/
+# WEAVE_AUDIT=1 / --audit writes these next to the merged file.
+*.weave-audit.json
 *.o
 *.rcgu.o
+.claude/worktrees/

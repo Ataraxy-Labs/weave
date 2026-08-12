@@ -1,10 +1,21 @@
 use weave_core::stats::WeaveLifetimeStats;
 
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let stats = WeaveLifetimeStats::load();
+pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+    let stats = match weave_core::stats::default_path(home.as_deref()) {
+        Some(path) => WeaveLifetimeStats::load(&path),
+        None => WeaveLifetimeStats::default(),
+    };
 
     if stats.total_merges == 0 {
-        println!("No weave merges recorded yet. Run some merges first!");
+        // Recording is opt-in: the merge driver does no filesystem work beyond
+        // the files it was handed unless asked to, so an empty counter usually
+        // means "never switched on", not "never merged".
+        println!("No weave merges recorded yet.");
+        println!("Recording is off by default — set WEAVE_STATS=1 in the environment");
+        println!("git or jj runs weave in, and counters will accumulate from the next merge.");
         return Ok(());
     }
 

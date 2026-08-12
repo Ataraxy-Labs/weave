@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://weave.ataraxylabs.dev/schema/weave-event/1.0.0",
+  "title": "weave event",
+  "description": "weave-event v1 — one JSON line per merge, written to stderr by weave-driver behind the `weave-event: ` prefix when WEAVE_EVENT=1 is set. Off by default. A findings document says what one merge did in detail; an event line says what happened, in one row per merge, so a run of thousands can be queried without joining four stderr channels by hand. Every field is a fact the driver already had — the exit code, the entity summary the audit writes, the counts the conflict report prints — so turning the channel on costs one line and no extra work. A line is written for every outcome, including the ones that produced nothing: a channel that only records successes cannot answer why a run went wrong.",
+  "type": "object",
+  "required": ["schema", "schema_version", "weave_version", "outcome", "exit_code"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "description": "Which document this is. Consumers should key on the pair (schema, schema_version).",
+      "type": "string",
+      "const": "weave-event"
+    },
+    "schema_version": {
+      "description": "Semver of THIS schema. Consumers must reject a major they do not know. Adding a field is a minor bump; removing one or changing what it means is a major bump.",
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "weave_version": {
+      "description": "The weave-driver build that wrote the line. On the line rather than inferred from a deployment, because a fleet is rarely on one version and 'which build decided this' is the first question a surprising verdict raises.",
+      "type": "string"
+    },
+    "outcome": {
+      "description": "What happened, in the same three states as the exit code. `clean` and `conflict` both wrote a usable file; `error` wrote nothing that can be trusted.",
+      "type": "string",
+      "enum": ["clean", "conflict", "error"]
+    },
+    "exit_code": {
+      "description": "The process exit code, stated rather than left to be inferred from `outcome`. 0 clean, 1 conflict, 2 error.",
+      "type": "integer",
+      "enum": [0, 1, 2]
+    },
+    "refusal": {
+      "description": "Present only when outcome=error: which refusal it was, as a stable name. `flag_needs_value | not_enough_arguments | unreadable_input | binary_input | unwritable_output`. All five exit 2, and they are five different problems.",
+      "type": "string"
+    },
+    "message": {
+      "description": "Present only when outcome=error: the same sentence stderr carries, for a person reading one line rather than querying many.",
+      "type": "string"
+    },
+    "file": {
+      "description": "The repository path of the file merged, as git supplied it (%P), falling back to the output path.",
+      "type": "string"
+    },
+    "confidence": {
+      "description": "The merge's own confidence, as `weave check` and the audit report it: very_high | high | medium | conflict.",
+      "type": "string"
+    },
+    "entities": {
+      "description": "The whole entity summary, not a count of it — the same object the audit document carries under `stats`. Grouping a run by any one of its fields is the reason the line is wide.",
+      "type": "object"
+    },
+    "conflicts": {
+      "description": "Entities left conflicted, and therefore marker boxes in the output.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "warnings": {
+      "description": "Advisory findings on a merge that may still be clean — the `weave-warning:` lines, counted. A clean merge with warnings is a real state.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "findings": {
+      "description": "conflicts + warnings: everything about this merge somebody might want to look at.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "audit_rows": {
+      "description": "Per-entity decisions recorded. Zero means the file took the line-level route, which no other field states directly.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "bytes_base": { "description": "Size of the base input.", "type": "integer", "minimum": 0 },
+    "bytes_ours": { "description": "Size of the ours input.", "type": "integer", "minimum": 0 },
+    "bytes_theirs": { "description": "Size of the theirs input.", "type": "integer", "minimum": 0 },
+    "bytes_out": { "description": "Size of what was written.", "type": "integer", "minimum": 0 },
+    "markers": {
+      "description": "Which conflict marker format the output uses: `enhanced` (weave's, with entity metadata) or `standard` (git-compatible, selected by -l).",
+      "type": "string",
+      "enum": ["enhanced", "standard"]
+    },
+    "line_merge_granted": {
+      "description": "Whether this run was given the `git merge-file` route. False means the merge was a function of its three inputs and nothing else.",
+      "type": "boolean"
+    },
+    "max_duplicates": {
+      "description": "The threshold in force for this merge: how often one name may repeat before identity stops meaning anything and the file takes the line-level route.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "ms_read": { "description": "Milliseconds spent reading the three inputs.", "type": "number", "minimum": 0 },
+    "ms_merge": { "description": "Milliseconds spent in the merge itself — the number a performance question is actually about.", "type": "number", "minimum": 0 },
+    "ms_total": { "description": "Milliseconds from process start to the decision, including reads and the write.", "type": "number", "minimum": 0 }
+  }
+}

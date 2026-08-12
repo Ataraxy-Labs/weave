@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://weave.ataraxylabs.dev/schema/weave-ops/1.0.0",
+  "title": "weave ops",
+  "description": "weave-ops v1 — the WRITE side of weave's agent contract, symmetric to schema/weave-findings.schema.json. A findings document says what a merge DID; an ops document says what a caller WANTS, in the same op vocabulary over the same entity keys. Produced by `weave patch extract`, consumed by `weave patch apply`. Applying is a three-way entity merge — base = the base these ops were extracted from, ours = the target on disk, theirs = these ops replayed onto that base — so a target that has drifted is merged rather than clobbered or rejected.",
+  "type": "object",
+  "required": ["schema_version", "file", "exact", "ops"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "description": "Semver of THIS schema. Consumers must reject a major they do not know. Additive fields are minor bumps; removing or re-meaning a field is a major bump.",
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "file": {
+      "description": "Path the ops were extracted from. Its extension selects the parser; `apply` may target a different path entirely.",
+      "type": "string"
+    },
+    "base": {
+      "description": "What the ops were computed against. Absent means the ops are anchorless: `apply` then treats the target as the base and cannot detect drift, which it reports as mode=no_base rather than hiding.",
+      "type": "object",
+      "required": ["sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "sha256": {
+          "description": "SHA-256 of the base content, lowercase hex. `apply` refuses a supplied base that does not hash to this — merging against the wrong ancestor produces a confidently wrong answer, which is the one outcome worth refusing.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "inline": {
+          "description": "The base content itself. Optional and usually large; when present the document is self-contained and `apply` can run the real three-way merge with no other inputs.",
+          "type": "string"
+        }
+      }
+    },
+    "exact": {
+      "description": "True when replaying these ops onto the declared base reproduces the changed file BYTE-FOR-BYTE at entity granularity. `weave patch extract` verifies this on itself rather than asserting it. False means entity granularity could not express the change (module-level code, reordering, an encoding change) and a whole-file fallback op is present: the round trip still holds, but applying to a drifted target degrades to a whole-file merge.",
+      "type": "boolean"
+    },
+    "ops": {
+      "description": "The intent, one op per entity. Ops are keyed by the entity's name IN THE BASE, so they can still be located in a target that has not seen the change. Order is significant only in that deletions precede edits precede additions; `apply` is otherwise order-independent because every op is resolved against the ORIGINAL line indices.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/op" }
+    }
+  },
+  "$defs": {
+    "op_vocabulary": {
+      "description": "The same alphabet as the read side. A v1 producer emits only `added | edited | renamed | rename_edited | deleted`: `unchanged` carries no intent, and the relational four (`split | merged | copied | moved`) are RESERVED — they correlate several entity keys, which a per-key matcher cannot express. A v1 consumer must accept the reserved ops without error and must not act on them.",
+      "type": "string",
+      "enum": [
+        "added",
+        "unchanged",
+        "edited",
+        "renamed",
+        "rename_edited",
+        "deleted",
+        "split",
+        "merged",
+        "copied",
+        "moved"
+      ]
+    },
+    "op": {
+      "type": "object",
+      "required": ["op", "entity", "entity_type"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "$ref": "#/$defs/op_vocabulary" },
+        "entity": {
+          "description": "The key this op is about: the entity's name in the base. `(file)` on the whole-file fallback op.",
+          "type": "string"
+        },
+        "entity_type": {
+          "description": "Parser-reported kind: function, class, method, interface, file, …",
+          "type": "string"
+        },
+        "from": {
+          "description": "Previous name. Present for op=renamed / rename_edited.",
+          "type": "string"
+        },
+        "to": {
+          "description": "New name. Present for op=renamed / rename_edited.",
+          "type": "string"
+        },
+        "content": {
+          "description": "The entity's full new text, including any leading comment or decorator block that belongs to it. Absent for op=deleted.",
+          "type": "string"
+        },
+        "after": {
+          "description": "For op=added: the entity this one follows, named as it appears IN THE BASE. Absent means the top of the file. An anchor missing from the target is not an error — the entity is appended and the op is reported as placed by fallback, because dropping an addition silently would be worse than misplacing it.",
+          "type": "string"
+        },
+        "separator": {
+          "description": "For op=added: the whitespace or comment gap that separated this entity from its anchor, so an insertion does not weld two definitions together.",
+          "type": "string"
+        },
+        "fallback": {
+          "description": "True on the whole-file escape hatch (entity=\"(file)\"): weave could not express the change at entity granularity and is shipping the file. Mirrors ResolutionStrategy::Fallback on the read side — a caller reading a bare `edited` would over-trust the granularity.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 use weave_crdt::{
-    get_entity_content, get_entity_status, record_modification, resolve_entity_conflict,
-    set_entity_conflict, update_entity_content, upsert_entity, EntityStateDoc, VersionVector,
+    get_entity_content, get_entity_status, resolve_entity_conflict, set_entity_conflict,
+    update_entity_content, upsert_entity, EntityStateDoc, VersionVector,
 };
 
 fn setup() -> EntityStateDoc {
@@ -145,15 +145,19 @@ fn test_resolve_non_conflict_fails() {
     assert!(result.is_err());
 }
 
-// ── Version vector in record_modification ──
+// ── Version vector on a content update ──
+//
+// Was `record_modification`, deleted as a weaker duplicate of
+// `update_entity_content` (no `writes` register entry). Repointed at the live
+// door; the vector-clock expectations are unchanged.
 
 #[test]
-fn test_record_modification_uses_vv() {
+fn test_update_entity_content_uses_vv() {
     let mut state = setup_with_entity("eid1", "my_func");
 
-    record_modification(&mut state, "agent-1", "eid1", "h1").unwrap();
-    record_modification(&mut state, "agent-2", "eid1", "h2").unwrap();
-    record_modification(&mut state, "agent-1", "eid1", "h3").unwrap();
+    update_entity_content(&mut state, "agent-1", "eid1", "fn a() {}", "h1").unwrap();
+    update_entity_content(&mut state, "agent-2", "eid1", "fn b() {}", "h2").unwrap();
+    update_entity_content(&mut state, "agent-1", "eid1", "fn c() {}", "h3").unwrap();
 
     let status = get_entity_status(&state, "eid1").unwrap();
     assert_eq!(status.version_vector.get("agent-1"), 2);
@@ -192,7 +196,14 @@ fn test_upsert_creates_v2_fields() {
 #[test]
 fn test_migration_preserves_existing_data() {
     let mut state = setup_with_entity("eid1", "my_func");
-    record_modification(&mut state, "agent-1", "eid1", "modified_hash").unwrap();
+    update_entity_content(
+        &mut state,
+        "agent-1",
+        "eid1",
+        "fn my_func() {}",
+        "modified_hash",
+    )
+    .unwrap();
 
     let status = get_entity_status(&state, "eid1").unwrap();
     assert_eq!(status.name, "my_func");

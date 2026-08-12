@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
+use crate::error::{GitHubError, Reason};
+
+/// The status/body pair GitHub answered a declined call with.
+async fn declined(call: &'static str, resp: reqwest::Response) -> GitHubError {
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    GitHubError::new(call, Reason::Status { status, body })
+}
 
 /// GitHub API client for a specific installation.
 pub struct GitHubClient {
@@ -46,6 +54,15 @@ struct ContentResponse {
     encoding: Option<String>,
 }
 
+/// The one field this crate reads off a pull request. GitHub sends dozens;
+/// naming the one we use keeps `serde_json::Value` out of the call's return
+/// path, where `pr["mergeable"]` would have answered `None` identically for
+/// "not computed yet" and "we asked for the wrong key".
+#[derive(Deserialize)]
+struct PullRequest {
+    mergeable: Option<bool>,
+}
+
 #[derive(Serialize)]
 struct CheckRunRequest {
     name: String,
@@ -63,7 +80,10 @@ struct CheckRunOutput {
 
 impl GitHubClient {
     /// Create a client authenticated as a GitHub App installation.
-    pub async fn for_installation(config: &Config, installation_id: u64) -> Result<Self, String> {
+    pub async fn for_installation(
+        config: &Config,
+        installation_id: u64,
+    ) -> Result<Self, GitHubError> {
         let jwt = create_jwt(config)?;
         let client = reqwest::Client::new();
 
@@ -77,18 +97,16 @@ impl GitHubClient {
             .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
             .await
-            .map_err(|e| format!("token request failed: {e}"))?;
+            .map_err(|e| GitHubError::new("for_installation", Reason::Transport(e)))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("token exchange failed ({status}): {body}"));
+            return Err(declined("for_installation", resp).await);
         }
 
         let token: InstallationToken = resp
             .json()
             .await
-            .map_err(|e| format!("token parse failed: {e}"))?;
+            .map_err(|e| GitHubError::new("for_installation", Reason::Decode(e)))?;
 
         Ok(GitHubClient {
             client,
@@ -115,7 +133,7 @@ impl GitHubClient {
         repo: &str,
         base: &str,
         head: &str,
-    ) -> Result<CompareResponse, String> {
+    ) -> Result<CompareResponse, GitHubError> {
         let url = format!("https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}");
         let resp = self
             .client
@@ -123,17 +141,15 @@ impl GitHubClient {
             .headers(self.api_headers())
             .send()
             .await
-            .map_err(|e| format!("compare failed: {e}"))?;
+            .map_err(|e| GitHubError::new("compare", Reason::Transport(e)))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("compare failed ({status}): {body}"));
+            return Err(declined("compare", resp).await);
         }
 
         resp.json()
             .await
-            .map_err(|e| format!("compare parse failed: {e}"))
+            .map_err(|e| GitHubError::new("compare", Reason::Decode(e)))
     }
 
     /// Fetch file content at a specific ref.
@@ -143,7 +159,7 @@ impl GitHubClient {
         repo: &str,
         path: &str,
         ref_: &str,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<String>, GitHubError> {
         let url = format!("https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref_}");
         let resp = self
             .client
@@ -151,32 +167,30 @@ impl GitHubClient {
             .headers(self.api_headers())
             .send()
             .await
-            .map_err(|e| format!("contents fetch failed: {e}"))?;
+            .map_err(|e| GitHubError::new("get_file_content", Reason::Transport(e)))?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("contents fetch failed ({status}): {body}"));
+            return Err(declined("get_file_content", resp).await);
         }
 
         let content: ContentResponse = resp
             .json()
             .await
-            .map_err(|e| format!("contents parse failed: {e}"))?;
+            .map_err(|e| GitHubError::new("get_file_content", Reason::Decode(e)))?;
 
         match (content.content, content.encoding.as_deref()) {
             (Some(encoded), Some("base64")) => {
                 let cleaned: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
                 let decoded = base64::engine::general_purpose::STANDARD
                     .decode(&cleaned)
-                    .map_err(|e| format!("base64 decode failed: {e}"))?;
+                    .map_err(|e| GitHubError::new("get_file_content", Reason::NotBase64(e)))?;
                 String::from_utf8(decoded)
                     .map(Some)
-                    .map_err(|e| format!("utf8 decode failed: {e}"))
+                    .map_err(|e| GitHubError::new("get_file_content", Reason::NotUtf8(e)))
             }
             (Some(raw), _) => Ok(Some(raw)),
             (None, _) => Ok(None),
@@ -190,7 +204,7 @@ impl GitHubClient {
         repo: &str,
         pr_number: u64,
         body: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), GitHubError> {
         let url =
             format!("https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments");
         let resp = self
@@ -200,12 +214,10 @@ impl GitHubClient {
             .json(&serde_json::json!({ "body": body }))
             .send()
             .await
-            .map_err(|e| format!("comment post failed: {e}"))?;
+            .map_err(|e| GitHubError::new("post_comment", Reason::Transport(e)))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("comment post failed ({status}): {body}"));
+            return Err(declined("post_comment", resp).await);
         }
 
         Ok(())
@@ -220,7 +232,7 @@ impl GitHubClient {
         conclusion: &str,
         title: &str,
         summary: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), GitHubError> {
         let url = format!("https://api.github.com/repos/{owner}/{repo}/check-runs");
         let req = CheckRunRequest {
             name: "weave".to_string(),
@@ -240,12 +252,10 @@ impl GitHubClient {
             .json(&req)
             .send()
             .await
-            .map_err(|e| format!("check run failed: {e}"))?;
+            .map_err(|e| GitHubError::new("create_check_run", Reason::Transport(e)))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("check run failed ({status}): {body}"));
+            return Err(declined("create_check_run", resp).await);
         }
 
         Ok(())
@@ -257,7 +267,7 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
         pr_number: u64,
-    ) -> Result<Option<bool>, String> {
+    ) -> Result<Option<bool>, GitHubError> {
         let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}");
         let resp = self
             .client
@@ -265,27 +275,27 @@ impl GitHubClient {
             .headers(self.api_headers())
             .send()
             .await
-            .map_err(|e| format!("PR fetch failed: {e}"))?;
+            .map_err(|e| GitHubError::new("get_pr_mergeable", Reason::Transport(e)))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("PR fetch failed ({status}): {body}"));
+            return Err(declined("get_pr_mergeable", resp).await);
         }
 
-        let pr: serde_json::Value = resp
+        let pr: PullRequest = resp
             .json()
             .await
-            .map_err(|e| format!("PR parse failed: {e}"))?;
+            .map_err(|e| GitHubError::new("get_pr_mergeable", Reason::Decode(e)))?;
 
-        Ok(pr["mergeable"].as_bool())
+        Ok(pr.mergeable)
     }
 }
 
-fn create_jwt(config: &Config) -> Result<String, String> {
+fn create_jwt(config: &Config) -> Result<String, GitHubError> {
+    let credentials =
+        |what: String| GitHubError::new("for_installation", Reason::Credentials(what));
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("time error: {e}"))?
+        .map_err(|e| credentials(format!("the system clock is before the epoch: {e}")))?
         .as_secs();
 
     let claims = JwtClaims {
@@ -295,8 +305,8 @@ fn create_jwt(config: &Config) -> Result<String, String> {
     };
 
     let key = EncodingKey::from_rsa_pem(config.private_key.as_bytes())
-        .map_err(|e| format!("invalid private key: {e}"))?;
+        .map_err(|e| credentials(format!("GITHUB_PRIVATE_KEY is not an RSA PEM key: {e}")))?;
 
     encode(&Header::new(Algorithm::RS256), &claims, &key)
-        .map_err(|e| format!("JWT encode failed: {e}"))
+        .map_err(|e| credentials(format!("the request token could not be signed: {e}")))
 }

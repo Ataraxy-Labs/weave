@@ -3,14 +3,21 @@ use sem_core::parser::plugins::create_default_registry;
 use weave_core::entity_merge_with_registry;
 use weave_core::git;
 
-pub fn run(branch: &str, file_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn run(
+    branch: &str,
+    file_path: Option<&str>,
+    host: &weave_core::host::Host,
+) -> Result<(), Box<dyn std::error::Error>> {
     let head = "HEAD";
-    let merge_base = git::find_merge_base(head, branch)?;
+    // Name the repository every git read runs in, rather than leaning on the
+    // process working directory.
+    let repo_root = git::find_repo_root(std::path::Path::new("."))?;
+    let merge_base = git::find_merge_base(&repo_root, head, branch)?;
 
     let files = if let Some(fp) = file_path {
         vec![fp.to_string()]
     } else {
-        git::get_changed_files(&merge_base, head, branch)?
+        git::get_changed_files(&repo_root, &merge_base, head, branch)?
     };
 
     if files.is_empty() {
@@ -26,9 +33,9 @@ pub fn run(branch: &str, file_path: Option<&str>) -> Result<(), Box<dyn std::err
     let mut total_auto_resolved = 0;
 
     for file in &files {
-        let base_content = git::git_show(&merge_base, file).unwrap_or_default();
-        let ours_content = git::git_show(head, file).unwrap_or_default();
-        let theirs_content = git::git_show(branch, file).unwrap_or_default();
+        let base_content = git::git_show(&repo_root, &merge_base, file).unwrap_or_default();
+        let ours_content = git::git_show(&repo_root, head, file).unwrap_or_default();
+        let theirs_content = git::git_show(&repo_root, branch, file).unwrap_or_default();
 
         if ours_content == theirs_content
             || base_content == ours_content
@@ -44,6 +51,7 @@ pub fn run(branch: &str, file_path: Option<&str>) -> Result<(), Box<dyn std::err
             file,
             &registry,
             &weave_core::MarkerFormat::default(),
+            host,
         );
 
         let status = if result.is_clean() {

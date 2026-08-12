@@ -1,6 +1,6 @@
 [package]
 name = "weave-crdt"
-version = "0.3.6"
+version = "0.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "CRDT-based coordination for multi-agent code editing. Entity-level claims, conflict detection, and version tracking."
@@ -13,13 +13,19 @@ readme = "../../README.md"
 [features]
 test-helpers = []
 
+# The integration tests in tests/ link against this crate as an external
+# consumer, so `#[cfg(test)]` does not reach them and the test doors
+# (`new_memory`, `set_agent_last_seen`, `set_entity_conflict`) stay hidden.
+# Depending on ourselves with the feature on is how a `tests/` target turns
+# them on without shipping them to real consumers.
+[dev-dependencies]
+weave-crdt = { path = ".", features = ["test-helpers"] }
+
 [dependencies]
 automerge = "0.10"
 sem-core = "0.21.0"
-weave-core = { path = "../weave-core", version = "0.3.6" }
+weave-core = { path = "../weave-core", version = "0.5.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
-[dev-dependencies]
-weave-crdt = { path = ".", features = ["test-helpers"] }

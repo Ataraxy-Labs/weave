@@ -8,3 +8,12 @@ members = [
     "crates/weave-github",
 ]
 resolver = "2"
+
+# The merge core is compute-bound on tree-sitter parsing — three parses of the
+# three inputs are ~94% of a real merge (profiled on a 51KB django file). That
+# work crosses crate boundaries (weave-core -> sem-core -> tree-sitter), so
+# cross-crate inlining is worth real time here, and the driver is a
+# short-lived process where a fatter link is paid once at build time.
+[profile.release]
+lto = "thin"
+codegen-units = 1

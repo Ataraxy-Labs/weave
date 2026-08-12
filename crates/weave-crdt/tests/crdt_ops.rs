@@ -1,8 +1,7 @@
 use weave_crdt::{
     agent_heartbeat, claim_entity, cleanup_stale_agents, detect_potential_conflicts,
-    get_agent_status, get_entities_for_file, get_entity_status, record_modification,
-    register_agent, release_entity, set_agent_last_seen, upsert_entity, ClaimResult,
-    EntityStateDoc,
+    get_agent_status, get_entities_for_file, get_entity_status, register_agent, release_entity,
+    set_agent_last_seen, update_entity_content, upsert_entity, ClaimResult, EntityStateDoc,
 };
 
 fn setup_state_with_entity(entity_id: &str, name: &str, file_path: &str) -> EntityStateDoc {
@@ -108,12 +107,19 @@ fn test_get_entities_for_file() {
     assert!(names.contains(&"func_b"));
 }
 
-// ── Record modification tests ──
+// ── Content update tests ──
+//
+// These used to call `record_modification`. That function was deleted as a
+// strictly weaker duplicate of `update_entity_content`: same vector-clock
+// increment and the same three summary writes, but no entry in the `writes`
+// register, so it could leave `content_hash` naming a write no replica could
+// join. The tests are repointed at the live door, which takes the content
+// alongside its hash. Every assertion below is the one the old tests made.
 
 #[test]
-fn test_record_modification() {
+fn test_update_entity_content() {
     let mut state = setup_state_with_entity("eid1", "my_func", "src/lib.rs");
-    record_modification(&mut state, "agent-1", "eid1", "newhash").unwrap();
+    update_entity_content(&mut state, "agent-1", "eid1", "fn my_func() {}", "newhash").unwrap();
 
     let status = get_entity_status(&state, "eid1").unwrap();
     assert_eq!(status.content_hash, "newhash");
@@ -122,10 +128,10 @@ fn test_record_modification() {
 }
 
 #[test]
-fn test_record_modification_increments_version() {
+fn test_update_entity_content_increments_version() {
     let mut state = setup_state_with_entity("eid1", "my_func", "src/lib.rs");
-    record_modification(&mut state, "agent-1", "eid1", "h1").unwrap();
-    record_modification(&mut state, "agent-2", "eid1", "h2").unwrap();
+    update_entity_content(&mut state, "agent-1", "eid1", "fn v1() {}", "h1").unwrap();
+    update_entity_content(&mut state, "agent-2", "eid1", "fn v2() {}", "h2").unwrap();
 
     let status = get_entity_status(&state, "eid1").unwrap();
     assert_eq!(status.version, 2);
