@@ -590,6 +590,82 @@ pub(crate) fn member_texts(content: &str) -> Option<Vec<((String, u32), String)>
     Some(d.members.into_iter().map(|m| (m.key, m.text)).collect())
 }
 
+/// The members each side changed or added, when a container merged clean.
+///
+/// `ours_added` / `theirs_added` are members present on that side and absent in
+/// base; `ours_changed` / `theirs_changed` are members present in base whose
+/// body that side rewrote substantively. Members appear as names, without the
+/// ordinal that separates same-named siblings inside the model.
+pub(crate) struct SiblingCoChange {
+    pub(crate) ours_added: Vec<String>,
+    pub(crate) ours_changed: Vec<String>,
+    pub(crate) theirs_added: Vec<String>,
+    pub(crate) theirs_changed: Vec<String>,
+}
+
+/// The co-occupancy fact of a clean member-wise merge: each side changed or
+/// added a set of members, and those two sets are DISJOINT siblings.
+///
+/// `None` when the fact does not hold — one side changed nothing substantive,
+/// the two sides' changed members overlap (the same member is a conflict or an
+/// identical edit, not co-occupancy), or a body will not decompose. The
+/// decomposition is the same indentation reading `member_texts` gives, read of
+/// each of the three pre-merge bodies; a change is substantive when it is not
+/// whitespace-only, the predicate the merge itself uses one level up.
+pub(crate) fn sibling_co_change(base: &str, ours: &str, theirs: &str) -> Option<SiblingCoChange> {
+    let base_members = member_texts(base)?;
+    let ours_members = member_texts(ours)?;
+    let theirs_members = member_texts(theirs)?;
+    let base_by: HashMap<&MemberKey, &str> =
+        base_members.iter().map(|(k, t)| (k, t.as_str())).collect();
+
+    // (added keys, changed keys) for one side against base. A key absent in base
+    // is an addition; a key present in both whose text moved non-trivially is a
+    // change. A whitespace-only edit is not a change here, so a re-indent or a
+    // blank-line churn does not raise the advisory.
+    let touched = |side: &[(MemberKey, String)]| -> (Vec<MemberKey>, Vec<MemberKey>) {
+        let mut added = Vec::new();
+        let mut changed = Vec::new();
+        for (k, txt) in side {
+            match base_by.get(k) {
+                None => added.push(k.clone()),
+                Some(bt) => {
+                    if txt.as_str() != *bt && !crate::merge::is_whitespace_only_diff(bt, txt) {
+                        changed.push(k.clone());
+                    }
+                }
+            }
+        }
+        (added, changed)
+    };
+    let (o_added, o_changed) = touched(&ours_members);
+    let (t_added, t_changed) = touched(&theirs_members);
+
+    let ours_keys: HashSet<&MemberKey> = o_added.iter().chain(&o_changed).collect();
+    let theirs_keys: HashSet<&MemberKey> = t_added.iter().chain(&t_changed).collect();
+    if ours_keys.is_empty() || theirs_keys.is_empty() {
+        return None;
+    }
+    if !ours_keys.is_disjoint(&theirs_keys) {
+        return None;
+    }
+
+    // Names, deduplicated and ordered, so the same three inputs always render
+    // the same advisory regardless of hash iteration order.
+    let names = |keys: Vec<MemberKey>| -> Vec<String> {
+        let mut v: Vec<String> = keys.into_iter().map(|(name, _)| name).collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    Some(SiblingCoChange {
+        ours_added: names(o_added),
+        ours_changed: names(o_changed),
+        theirs_added: names(t_added),
+        theirs_changed: names(t_changed),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn container_merge(
     base: &str,

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://weave.ataraxylabs.dev/schema/weave-event/1.0.0",
+  "$id": "https://weave.ataraxylabs.dev/schema/weave-event/1.1.0",
   "title": "weave event",
   "description": "weave-event v1 — one JSON line per merge, written to stderr by weave-driver behind the `weave-event: ` prefix when WEAVE_EVENT=1 is set. Off by default. A findings document says what one merge did in detail; an event line says what happened, in one row per merge, so a run of thousands can be queried without joining four stderr channels by hand. Every field is a fact the driver already had — the exit code, the entity summary the audit writes, the counts the conflict report prints — so turning the channel on costs one line and no extra work. A line is written for every outcome, including the ones that produced nothing: a channel that only records successes cannot answer why a run went wrong.",
   "type": "object",
@@ -13,9 +13,9 @@
       "const": "weave-event"
     },
     "schema_version": {
-      "description": "Semver of THIS schema. Consumers must reject a major they do not know. Adding a field is a minor bump; removing one or changing what it means is a major bump.",
+      "description": "Semver of THIS schema. Consumers must reject a major they do not know. Adding a field is a minor bump; removing one or changing what it means is a major bump. 1.1.0 added the optional `advisories` count.",
       "type": "string",
-      "const": "1.0.0"
+      "enum": ["1.0.0", "1.1.0"]
     },
     "weave_version": {
       "description": "The weave-driver build that wrote the line. On the line rather than inferred from a deployment, because a fleet is rarely on one version and 'which build decided this' is the first question a surprising verdict raises.",
@@ -58,6 +58,11 @@
     },
     "warnings": {
       "description": "Advisory findings on a merge that may still be clean — the `weave-warning:` lines, counted. A clean merge with warnings is a real state.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "advisories": {
+      "description": "The advisory register, a subset of `warnings`: clean container merges in which each side changed different siblings, counted (schema 1.1.0). Non-blocking — never moves `outcome` or `exit_code`.",
       "type": "integer",
       "minimum": 0
     },

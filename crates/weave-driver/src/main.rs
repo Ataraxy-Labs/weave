@@ -466,6 +466,11 @@ fn run(started: std::time::Instant) -> Result<Verdict, Refusal> {
             "entities": result.stats,
             "conflicts": result.conflicts.len(),
             "warnings": result.warnings.len(),
+            // A subset of `warnings`: the advisory register, counted on its own
+            // so a run can be queried for co-occupancy without joining the
+            // findings documents. Advisory is non-blocking — it never moves
+            // `outcome` or `exit_code`.
+            "advisories": advisory_count(&result),
             "findings": result.conflicts.len() + result.warnings.len(),
             "audit_rows": result.audit.len(),
             "bytes_base": base.len(),
@@ -544,7 +549,23 @@ fn read_input(path: &str, label: &'static str) -> Result<String, Refusal> {
 /// version says which fields it may rely on. Additive fields are a minor bump;
 /// removing one or changing what it means is a major.
 const EVENT_SCHEMA: &str = "weave-event";
-const EVENT_SCHEMA_VERSION: &str = "1.0.0";
+const EVENT_SCHEMA_VERSION: &str = "1.1.0";
+
+/// How many of a merge's warnings are advisories (the co-occupancy register).
+/// Additive on the event line, so a consumer that does not know the field is
+/// unaffected.
+fn advisory_count(result: &weave_core::MergeResult) -> usize {
+    result
+        .warnings
+        .iter()
+        .filter(|w| {
+            matches!(
+                w.kind,
+                weave_core::validate::WarningKind::SiblingCoChange { .. }
+            )
+        })
+        .count()
+}
 
 /// Write one event line on the stable stderr channel.
 fn emit_event(payload: serde_json::Value) {
@@ -587,6 +608,7 @@ fn println_warning(w: &SemanticWarning) {
         WarningKind::ParseFailedAfterMerge => "parse_failed_after_merge",
         WarningKind::CompositionLicensed { .. } => "composition_licensed",
         WarningKind::ConflictFrameDuplicate { .. } => "conflict_frame_duplicate",
+        WarningKind::SiblingCoChange { .. } => "sibling_co_change",
     };
     // Emit both read and write sets on the warning line, so a reader can inspect
     // the evidence a resolution rests on rather than only being told it was
@@ -611,6 +633,19 @@ fn println_warning(w: &SemanticWarning) {
             "line": line,
             "found": found,
             "allowed": allowed,
+        })),
+        // The advisory's evidence is the two disjoint member sets: which
+        // siblings each side changed or added in the container that merged clean.
+        WarningKind::SiblingCoChange {
+            ours_added,
+            ours_changed,
+            theirs_added,
+            theirs_changed,
+        } => Some(serde_json::json!({
+            "ours_added": ours_added,
+            "ours_changed": ours_changed,
+            "theirs_added": theirs_added,
+            "theirs_changed": theirs_changed,
         })),
         _ => None,
     };

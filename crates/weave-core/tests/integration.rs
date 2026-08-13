@@ -3581,3 +3581,190 @@ fn is_inside_conflict_markers(content: &str, needle: &str) -> bool {
     }
     false
 }
+
+// =============================================================================
+// Sibling co-change advisory: a clean container merge in which both sides
+// changed DIFFERENT members. The merge output and verdict are unaffected; the
+// only thing under test is the advisory on the findings channel.
+// =============================================================================
+
+use weave_core::validate::WarningKind;
+
+/// The members each side names in a sibling co-change advisory, if the merge
+/// produced exactly one. `None` when the merge raised no co-change advisory.
+fn co_change(result: &weave_core::MergeResult) -> Option<(Vec<String>, Vec<String>)> {
+    result.warnings.iter().find_map(|w| match &w.kind {
+        WarningKind::SiblingCoChange {
+            ours_added,
+            ours_changed,
+            theirs_added,
+            theirs_changed,
+        } => {
+            let ours: Vec<String> = ours_added.iter().chain(ours_changed).cloned().collect();
+            let theirs: Vec<String> = theirs_added.iter().chain(theirs_changed).cloned().collect();
+            Some((ours, theirs))
+        }
+        _ => None,
+    })
+}
+
+#[test]
+fn co_change_advisory_fires_when_both_sides_change_different_siblings() {
+    let base = r#"export class UserService {
+    getUser(id: string): User {
+        return this.db.find(id);
+    }
+
+    createUser(data: UserData): User {
+        return this.db.create(data);
+    }
+}
+"#;
+    // ours changes getUser
+    let ours = r#"export class UserService {
+    getUser(id: string): User {
+        const cached = this.cache.get(id);
+        if (cached) return cached;
+        return this.db.find(id);
+    }
+
+    createUser(data: UserData): User {
+        return this.db.create(data);
+    }
+}
+"#;
+    // theirs changes createUser
+    let theirs = r#"export class UserService {
+    getUser(id: string): User {
+        return this.db.find(id);
+    }
+
+    createUser(data: UserData): User {
+        if (!data.email) throw new Error("email required");
+        return this.db.create(data);
+    }
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "user-service.ts");
+    assert!(
+        result.is_clean(),
+        "the merge must stay clean: {:?}",
+        result.conflicts
+    );
+    // The output still carries both sides' work — the advisory changed no byte.
+    assert!(result.content.contains("cache.get"));
+    assert!(result.content.contains("email required"));
+
+    let (ours_m, theirs_m) =
+        co_change(&result).expect("a disjoint sibling co-change must be advised");
+    assert_eq!(ours_m, vec!["getUser".to_string()], "ours changed getUser");
+    assert_eq!(
+        theirs_m,
+        vec!["createUser".to_string()],
+        "theirs changed createUser"
+    );
+}
+
+#[test]
+fn co_change_advisory_fires_when_one_side_adds_and_other_changes() {
+    let base = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b;
+    }
+}
+"#;
+    // ours changes add
+    let ours = r#"export class Calculator {
+    add(a: number, b: number): number {
+        console.log("add called");
+        return a + b;
+    }
+}
+"#;
+    // theirs adds multiply
+    let theirs = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b;
+    }
+
+    multiply(a: number, b: number): number {
+        return a * b;
+    }
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "calc.ts");
+    assert!(result.is_clean(), "{:?}", result.conflicts);
+    let (ours_m, theirs_m) = co_change(&result).expect("add-vs-modify is co-occupancy");
+    assert_eq!(ours_m, vec!["add".to_string()]);
+    assert_eq!(theirs_m, vec!["multiply".to_string()]);
+}
+
+#[test]
+fn no_co_change_advisory_when_the_same_member_conflicts() {
+    // Both sides rewrite the SAME method incompatibly: a conflict, not a
+    // co-occupancy. The advisory must stay silent.
+    let base = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b;
+    }
+}
+"#;
+    let ours = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b + 1;
+    }
+}
+"#;
+    let theirs = r#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b + 2;
+    }
+}
+"#;
+    let result = entity_merge(base, ours, theirs, "calc.ts");
+    assert!(
+        !result.is_clean(),
+        "the same member changed two ways must conflict"
+    );
+    assert!(
+        co_change(&result).is_none(),
+        "a conflicted member is not a sibling co-change: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn no_co_change_advisory_when_only_one_side_changes_a_member() {
+    // ours changes getUser; theirs leaves the class untouched. One side is not
+    // co-occupancy.
+    let base = r#"export class UserService {
+    getUser(id: string): User {
+        return this.db.find(id);
+    }
+
+    createUser(data: UserData): User {
+        return this.db.create(data);
+    }
+}
+"#;
+    let ours = r#"export class UserService {
+    getUser(id: string): User {
+        const cached = this.cache.get(id);
+        if (cached) return cached;
+        return this.db.find(id);
+    }
+
+    createUser(data: UserData): User {
+        return this.db.create(data);
+    }
+}
+"#;
+    let theirs = base;
+    let result = entity_merge(base, ours, theirs, "user-service.ts");
+    assert!(result.is_clean(), "{:?}", result.conflicts);
+    assert!(
+        co_change(&result).is_none(),
+        "one-sided change is not co-occupancy: {:?}",
+        result.warnings
+    );
+}

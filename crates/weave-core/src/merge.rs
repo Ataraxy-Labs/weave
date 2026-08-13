@@ -37,6 +37,55 @@ use serde::Serialize;
 pub(crate) static PARSER_REGISTRY: LazyLock<ParserRegistry> =
     LazyLock::new(create_default_registry);
 
+/// Extensions that PARSE but merge worse than git's own line strategy, so
+/// `weave setup` must not claim them for `merge=weave`. Their entity model
+/// boxes disjoint additions and cuts the marker mid-definition; the observed
+/// output for each is recorded in `weave-core/tests/language_coverage.rs`.
+///
+/// This is the *only* subtraction applied to the registry's supported set —
+/// everything else the parser recognises is entity-merged. An extension earns a
+/// place here by failing the coverage sweep, not by taste. The whole `.svelte*`
+/// family is listed because every one of those compound suffixes routes to the
+/// Svelte plugin, which merges the same way; the parity guard in
+/// `weave-core/tests/setup_extension_coverage.rs` fails if the registry ever
+/// grows a Svelte (or Vue/ERB/Haskell) suffix this list forgot.
+pub const DECLINED_EXTENSIONS: &[&str] = &[
+    ".hs",
+    ".vue",
+    ".erb",
+    ".svelte",
+    ".svelte.js",
+    ".svelte.ts",
+    ".svelte.test.js",
+    ".svelte.test.ts",
+    ".svelte.spec.js",
+    ".svelte.spec.ts",
+];
+
+/// The file extensions `weave setup` should write `*.<ext> merge=weave` lines
+/// for: every extension the parser registry recognises in this build, minus
+/// [`DECLINED_EXTENSIONS`]. Each entry keeps its leading dot (e.g. `".ts"`) and
+/// the result is sorted and deduplicated.
+///
+/// This is the single source of truth for setup's language coverage. Because it
+/// reads the live [`ParserRegistry`], adding a grammar to `sem-core` (a new
+/// `LanguageConfig`, or `.mts`/`.cts` on an existing one) extends what setup
+/// claims automatically — the two can no longer drift. `weave-cli`'s setup
+/// command consumes this; `weave-core/tests/setup_extension_coverage.rs` guards
+/// the parity.
+pub fn supported_merge_extensions() -> Vec<String> {
+    let declined: HashSet<&str> = DECLINED_EXTENSIONS.iter().copied().collect();
+    let mut exts: Vec<String> = PARSER_REGISTRY
+        .registered_extensions()
+        .into_iter()
+        .filter(|ext| !declined.contains(ext))
+        .map(str::to_string)
+        .collect();
+    exts.sort_unstable();
+    exts.dedup();
+    exts
+}
+
 use crate::conflict::{classify_conflict, ConflictKind, EntityConflict, MarkerFormat, MergeStats};
 use crate::host::{Host, LineMergeStyle};
 use crate::region::FileRegion;

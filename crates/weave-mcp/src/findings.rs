@@ -28,7 +28,7 @@ use weave_core::conflict::{ConflictKind, EntityConflict};
 use weave_core::validate::{SemanticWarning, WarningKind};
 use weave_core::{MergeResult, ResolutionStrategy};
 
-pub(crate) const SCHEMA_VERSION: &str = "1.2.0";
+pub(crate) const SCHEMA_VERSION: &str = "1.3.0";
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -79,8 +79,31 @@ pub(crate) struct Finding {
     pub suggestion: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning_kind: Option<&'static str>,
+    /// The members each side changed or added, when this finding is a
+    /// sibling co-change advisory (schema 1.3.0). Present only on
+    /// `class=COOCCUPANCY` / `source=advisory` findings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cochange: Option<CoChange>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub related: Vec<RelatedRef>,
+}
+
+/// Which members each side of a clean container merge changed or added — the
+/// structured half of a sibling co-change advisory. The two lists never share a
+/// member: a member both sides touched is a conflict or an identical edit, which
+/// is not what this advisory reports.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub(crate) struct CoChange {
+    pub ours: Vec<CoChangeMember>,
+    pub theirs: Vec<CoChangeMember>,
+}
+
+/// One member one side changed or added.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub(crate) struct CoChangeMember {
+    pub member: String,
+    /// `added` | `changed`.
+    pub change: &'static str,
 }
 
 /// One hunk of a conflict, as the wire states it.
@@ -368,6 +391,11 @@ pub(crate) fn class_of_warning(k: &WarningKind) -> (&'static str, &'static str) 
         // only difference from the clean-merge case is where it was found, and
         // the whole point of this check is that "where" stopped exempting it.
         WarningKind::ConflictFrameDuplicate { .. } => ("DUP", "conflict_frame_duplicate"),
+        // A clean container merge in which each side changed different siblings.
+        // Its own class, because it is neither a rebinding nor a loss nor a
+        // duplicate — it is the co-occupancy of two disjoint edits, reported so a
+        // human can confirm the coexistence weave cannot judge.
+        WarningKind::SiblingCoChange { .. } => ("COOCCUPANCY", "sibling_co_change"),
     }
 }
 
@@ -441,6 +469,7 @@ fn finding_of_conflict(
         }),
         suggestion: Some(suggestion),
         warning_kind: None,
+        cochange: None,
         related: vec![],
     }
 }
@@ -520,6 +549,12 @@ fn confidence_of_complexity(c: &weave_core::conflict::ConflictComplexity) -> &'s
 
 fn finding_of_warning(w: &SemanticWarning) -> Finding {
     let (class, wire_kind) = class_of_warning(&w.kind);
+    // A co-change is the lowest register on this channel: not a warning about
+    // risk, an advisory about a fact. Everything else here is `warning`.
+    let source = match &w.kind {
+        WarningKind::SiblingCoChange { .. } => "advisory",
+        _ => "warning",
+    };
     let suggestion = match &w.kind {
         WarningKind::ParseFailedAfterMerge => {
             "The merged file no longer parses. Do not commit it — re-run the merge \
@@ -537,18 +572,43 @@ fn finding_of_warning(w: &SemanticWarning) -> Finding {
             ours_binds.join(", "),
             theirs_binds.join(", "),
         ),
+        WarningKind::SiblingCoChange {
+            ours_added,
+            ours_changed,
+            theirs_added,
+            theirs_changed,
+        } => format!(
+            "`{}` merged clean, but both sides changed different siblings ({}; {}). \
+             Nothing conflicted — confirm the two sets of members are meant to coexist \
+             before trusting the merge.",
+            w.entity_name,
+            weave_core::validate::co_change_side_phrase("ours", ours_added, ours_changed),
+            weave_core::validate::co_change_side_phrase("theirs", theirs_added, theirs_changed),
+        ),
         _ => format!(
             "`{}` was auto-merged and is coupled to another entity changed in this \
              same merge. Re-read both together before trusting the result.",
             w.entity_name
         ),
     };
+    let cochange = match &w.kind {
+        WarningKind::SiblingCoChange {
+            ours_added,
+            ours_changed,
+            theirs_added,
+            theirs_changed,
+        } => Some(CoChange {
+            ours: cochange_members(ours_added, ours_changed),
+            theirs: cochange_members(theirs_added, theirs_changed),
+        }),
+        _ => None,
+    };
     Finding {
         class,
         kind: None,
         entity: w.entity_name.clone(),
         entity_type: w.entity_type.clone(),
-        source: "warning",
+        source,
         complexity: None,
         confidence: None,
         hunks: Vec::new(),
@@ -557,6 +617,7 @@ fn finding_of_warning(w: &SemanticWarning) -> Finding {
         texts: None,
         suggestion: Some(suggestion),
         warning_kind: Some(wire_kind),
+        cochange,
         related: w
             .related
             .iter()
@@ -567,6 +628,21 @@ fn finding_of_warning(w: &SemanticWarning) -> Finding {
             })
             .collect(),
     }
+}
+
+/// The structured member list for one side: additions then changes, each tagged.
+fn cochange_members(added: &[String], changed: &[String]) -> Vec<CoChangeMember> {
+    added
+        .iter()
+        .map(|m| CoChangeMember {
+            member: m.clone(),
+            change: "added",
+        })
+        .chain(changed.iter().map(|m| CoChangeMember {
+            member: m.clone(),
+            change: "changed",
+        }))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -727,6 +803,7 @@ pub(crate) fn build(
                     ),
                 }),
                 warning_kind: None,
+                cochange: None,
                 related: vec![],
             });
         }
@@ -769,6 +846,7 @@ pub(crate) fn build(
                          definition; the duplicate is a merge artifact, not an authored change."
                     )),
                     warning_kind: None,
+                    cochange: None,
                     related: vec![],
                 });
             }
@@ -815,7 +893,7 @@ mod tests {
         "moved",
     ];
 
-    const FINDING_CLASSES: [&str; 8] = [
+    const FINDING_CLASSES: [&str; 9] = [
         "CONFLICT",
         "LOSS",
         "DUP",
@@ -824,6 +902,7 @@ mod tests {
         "ORDER",
         "INTERLEAVE",
         "ASYM",
+        "COOCCUPANCY",
     ];
 
     /// Every ResolutionStrategy variant, exhaustively. If weave-core adds one,
@@ -939,6 +1018,12 @@ mod tests {
             WarningKind::DependencyAlsoModified,
             WarningKind::DependentAlsoModified,
             WarningKind::ParseFailedAfterMerge,
+            WarningKind::SiblingCoChange {
+                ours_added: vec!["bar".into()],
+                ours_changed: vec![],
+                theirs_added: vec![],
+                theirs_changed: vec!["baz".into()],
+            },
         ] {
             let (class, wire) = class_of_warning(&k);
             assert!(
@@ -952,6 +1037,49 @@ mod tests {
         }
     }
 
+    /// The advisory is the lowest register: a fact about a CLEAN merge. It must
+    /// map to `source=advisory`, keep `clean=true`, and carry the two disjoint
+    /// member sets structurally — none of which a conflict finding does.
+    #[test]
+    fn a_sibling_co_change_maps_to_a_clean_advisory_with_both_member_sets() {
+        let w = SemanticWarning {
+            entity_name: "Foo".into(),
+            entity_type: "class".into(),
+            file_path: "app.py".into(),
+            kind: WarningKind::SiblingCoChange {
+                ours_added: vec!["bar".into()],
+                ours_changed: vec![],
+                theirs_added: vec![],
+                theirs_changed: vec!["baz".into()],
+            },
+            related: vec![],
+        };
+        let f = finding_of_warning(&w);
+        assert_eq!(f.class, "COOCCUPANCY");
+        assert_eq!(f.source, "advisory");
+        assert_eq!(f.warning_kind, Some("sibling_co_change"));
+        let c = f.cochange.expect("advisory carries its member sets");
+        assert_eq!(
+            c.ours,
+            vec![CoChangeMember {
+                member: "bar".into(),
+                change: "added"
+            }]
+        );
+        assert_eq!(
+            c.theirs,
+            vec![CoChangeMember {
+                member: "baz".into(),
+                change: "changed"
+            }]
+        );
+        let s = f.suggestion.unwrap();
+        assert!(
+            s.contains("bar") && s.contains("baz") && s.contains("coexist"),
+            "{s}"
+        );
+    }
+
     // --- end-to-end over a real merge -------------------------------------
 
     #[test]
@@ -962,7 +1090,7 @@ mod tests {
         let result = weave_core::entity_merge(base, ours, theirs, "app.py");
         let f = build("app.py", &result, ours, theirs, &Revs::default());
 
-        assert_eq!(f.schema_version, "1.2.0");
+        assert_eq!(f.schema_version, "1.3.0");
         assert!(f.clean);
         assert!(
             f.findings.is_empty(),

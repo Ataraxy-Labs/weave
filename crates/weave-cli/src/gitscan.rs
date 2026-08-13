@@ -5,8 +5,9 @@
 //! only thing it needs from git is "give me every supported file at this rev".
 
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::repo_scope::{is_supported, Tree};
 
@@ -23,6 +24,76 @@ fn git(dir: &Path, args: &[&str]) -> R<String> {
         .into());
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// The blobs at `<rev>:<path>` for a *bounded* set of paths, fetched in ONE
+/// `git cat-file --batch` process instead of a `git show` fork per path.
+///
+/// This is what lets the working-tree check scope to the files a merge touched:
+/// `read_rev_tree` reads the WHOLE tree at a rev with a subprocess per file, an
+/// O(repo) cost that dominates on a large monorepo. Here the caller names the
+/// handful of paths it actually needs and pays one process for all of them.
+///
+/// A path absent at that rev (git answers `… missing`) is simply not inserted —
+/// the same silent skip `read_rev_tree` gives an unreadable blob.
+fn read_paths_at_rev(dir: &Path, rev: &str, paths: &[String]) -> R<Tree> {
+    let mut tree = Tree::new();
+    if paths.is_empty() {
+        return Ok(tree);
+    }
+    let mut child = Command::new("git")
+        .args(["cat-file", "--batch"])
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    // Feed every request, then close stdin so git flushes and exits. The order
+    // of requests is the order of replies, so we replay `paths` to label them.
+    {
+        let mut stdin = child.stdin.take().ok_or("cat-file stdin")?;
+        let mut buf = String::new();
+        for p in paths {
+            buf.push_str(rev);
+            buf.push(':');
+            buf.push_str(p);
+            buf.push('\n');
+        }
+        stdin.write_all(buf.as_bytes())?;
+        // stdin dropped here → EOF to git.
+    }
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Err("git cat-file --batch failed".into());
+    }
+
+    // Reply framing: `<oid> <type> <size>\n<size bytes>\n`, or `<spec> missing\n`.
+    let bytes = &out.stdout;
+    let mut pos = 0usize;
+    for p in paths {
+        // Read one header line.
+        let Some(nl) = bytes[pos..].iter().position(|&b| b == b'\n') else {
+            break;
+        };
+        let header = String::from_utf8_lossy(&bytes[pos..pos + nl]).to_string();
+        pos += nl + 1;
+        let fields: Vec<&str> = header.rsplitn(3, ' ').collect();
+        // `rsplitn(3)` yields [size, type, oid] for a found object; a `missing`
+        // line has no size to parse.
+        if fields.len() == 3 {
+            if let Ok(size) = fields[0].parse::<usize>() {
+                let content = &bytes[pos..pos + size];
+                if let Ok(s) = std::str::from_utf8(content) {
+                    tree.insert(p.clone(), s.to_string());
+                }
+                pos += size + 1; // trailing newline after the payload
+                continue;
+            }
+        }
+        // `missing` / malformed: nothing consumed past the header, skip the path.
+    }
+    Ok(tree)
 }
 
 pub(crate) fn rev_exists(dir: &Path, rev: &str) -> bool {
@@ -122,10 +193,6 @@ pub fn merge_scope(dir: &Path) -> R<Option<MergeScope>> {
     let base_rev = git(dir, &["merge-base", &ours_rev, &theirs_rev])?
         .trim()
         .to_string();
-    let base = read_rev_tree(dir, &base_rev)?;
-    let ours = read_rev_tree(dir, &ours_rev)?;
-    let theirs = read_rev_tree(dir, &theirs_rev)?;
-    let work = read_worktree(dir)?;
 
     // The subjects are every file this merge PRODUCED: whatever either side
     // moved. Restricting it to files both sides moved was the obvious-looking
@@ -133,13 +200,21 @@ pub fn merge_scope(dir: &Path) -> R<Option<MergeScope>> {
     // cross-file one, where one side renames a definition in `a.py` and the
     // other adds a caller in `b.py`, and neither file is contested. A checker
     // that only looks where git had to choose cannot see it.
-    let mut subjects: BTreeSet<String> = base
-        .keys()
-        .chain(ours.keys())
-        .chain(theirs.keys())
-        .filter(|p| ours.get(*p) != base.get(*p) || theirs.get(*p) != base.get(*p))
-        .cloned()
-        .collect();
+    //
+    // This is asked of git by NAME — a name-only diff of each side against the
+    // base — and never by reading the two whole trees and comparing them in
+    // process. On a large monorepo that whole-tree read is the check's dominant
+    // cost, and it buys nothing: the answer is exactly the set git already has
+    // as the merge's changed paths.
+    let mut subjects: BTreeSet<String> = BTreeSet::new();
+    for side in [&ours_rev, &theirs_rev] {
+        let list = git(dir, &["diff", "--name-only", "-z", &base_rev, side])?;
+        subjects.extend(
+            list.split('\0')
+                .filter(|p| !p.is_empty() && is_supported(p))
+                .map(str::to_string),
+        );
+    }
     // …plus whatever git still calls unmerged, whether or not both sides moved
     // it: git's own verdict about what is unresolved outranks ours.
     if let Ok(list) = git(dir, &["diff", "--name-only", "--diff-filter=U", "-z"]) {
@@ -150,6 +225,20 @@ pub fn merge_scope(dir: &Path) -> R<Option<MergeScope>> {
         );
     }
     let subjects: Vec<String> = subjects.into_iter().collect();
+
+    // Read the three merge stages for the SUBJECTS ONLY — one `cat-file --batch`
+    // process per rev, not a `git show` per file over the whole tree. The
+    // dangling pass proves this is exact: a name is only ever "gone" from a file
+    // both a stage and the working tree disagree about, which is a subject; an
+    // untouched file's stage and its working-tree copy are identical, so it can
+    // neither create a dangling finding nor host the definition that resolves
+    // one from stage data. Suppression by an untouched file's *surviving*
+    // definition is the working tree's job, and `work` below stays repo-wide for
+    // exactly that.
+    let base = read_paths_at_rev(dir, &base_rev, &subjects)?;
+    let ours = read_paths_at_rev(dir, &ours_rev, &subjects)?;
+    let theirs = read_paths_at_rev(dir, &theirs_rev, &subjects)?;
+    let work = read_worktree(dir)?;
     let scope = format!(
         "working tree vs the three merge stages of {ours_rev} × {theirs_rev} \
          (base {}, merge {moment}) — {} file(s) either side changed",

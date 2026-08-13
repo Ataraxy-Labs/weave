@@ -123,6 +123,14 @@ fn working_tree(json: bool) -> R<()> {
                     "detail": f.detail,
                     "suggestion": f.suggestion,
                 })).collect::<Vec<_>>(),
+                // Advisories are non-blocking: they ride beside the verdict and
+                // never move `ok` or the exit code.
+                "advisories": v.advisories.iter().map(|a| serde_json::json!({
+                    "class": "COOCCUPANCY",
+                    "entity": a.entity,
+                    "entity_type": a.entity_type,
+                    "detail": a.detail,
+                })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);

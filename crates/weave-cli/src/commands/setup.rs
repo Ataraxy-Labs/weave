@@ -4,25 +4,22 @@ use std::process::Command;
 
 use colored::Colorize;
 
-/// The extensions `weave setup` writes `merge=weave` lines for.
+/// The `*.<ext>` glob patterns `weave setup` writes `merge=weave` lines for.
 ///
-/// Every entry here is a promise that a file with that extension gets an
-/// entity-level merge, so an extension earns its place by passing the sweep in
-/// `weave-core/tests/language_coverage.rs`: two sides adding different
-/// definitions merges clean, two sides rewriting one definition conflicts, and
-/// nothing is dropped. An extension the engine merely *parses* is not enough —
-/// `.hs`, `.vue`, `.svelte` and `.erb` all parse and are deliberately absent,
-/// because their entity model boxes disjoint additions and cuts the marker
-/// mid-definition. That file records why for each.
-const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.jsx", "*.py", "*.go", "*.rs", "*.java", "*.c",
-    "*.h", "*.cpp", "*.cc", "*.cxx", "*.hpp", "*.hh", "*.hxx", "*.rb", "*.cs", "*.php", "*.swift",
-    "*.ex", "*.exs", "*.sh", "*.f90", "*.f95", "*.f03", "*.f08", "*.xml", "*.plist", "*.svg",
-    "*.csproj", "*.fsproj", "*.vbproj", "*.json", "*.yaml", "*.yml", "*.toml", "*.md", "*.scala",
-    "*.sc", "*.sbt", "*.kojo", "*.mill", "*.dart", "*.kt", "*.tf", "*.hcl", "*.ml", "*.mli",
-    "*.zig", "*.elm", "*.clj", "*.edn", "*.d", "*.lua", "*.fish", "*.nix", "*.sql", "*.tex",
-    "*.pl", "*.csv",
-];
+/// Derived — not hand-listed. The one owner of "which extensions get an
+/// entity-level merge" is the parser registry in `sem-core`, surfaced through
+/// [`weave_core::supported_merge_extensions`]; this maps each supported
+/// extension (e.g. `".ts"`) to its git-attributes glob (`"*.ts"`). Adding a
+/// grammar upstream extends what setup claims automatically, so the attribute
+/// list can no longer drift behind the parser. The handful of extensions that
+/// parse but merge worse than git (`.hs`, `.vue`, `.svelte`, `.erb`) are
+/// subtracted at the source, in `weave_core::DECLINED_EXTENSIONS`.
+fn supported_patterns() -> Vec<String> {
+    weave_core::supported_merge_extensions()
+        .into_iter()
+        .map(|ext| format!("*{}", ext))
+        .collect()
+}
 
 pub(crate) fn run(
     driver_path: Option<&str>,
@@ -206,8 +203,8 @@ fn global_attributes_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
 
 fn add_supported_patterns(existing: &mut String) -> usize {
     let mut added = 0;
-    for ext in SUPPORTED_EXTENSIONS {
-        let pattern = format!("{} merge=weave", ext);
+    for glob in supported_patterns() {
+        let pattern = format!("{} merge=weave", glob);
         if !existing.contains(&pattern) {
             if !existing.is_empty() && !existing.ends_with('\n') {
                 existing.push('\n');
@@ -298,7 +295,7 @@ fn which_driver() -> Result<String, Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_supported_patterns, SUPPORTED_EXTENSIONS};
+    use super::{add_supported_patterns, supported_patterns};
 
     #[test]
     fn add_supported_patterns_adds_all_supported_patterns() {
@@ -306,9 +303,9 @@ mod tests {
 
         let added = add_supported_patterns(&mut existing);
 
-        assert_eq!(added, SUPPORTED_EXTENSIONS.len());
-        for ext in SUPPORTED_EXTENSIONS {
-            assert!(existing.contains(&format!("{} merge=weave", ext)));
+        assert_eq!(added, supported_patterns().len());
+        for glob in supported_patterns() {
+            assert!(existing.contains(&format!("{} merge=weave", glob)));
         }
     }
 
@@ -320,7 +317,7 @@ mod tests {
         let after_first = existing.clone();
         let second_added = add_supported_patterns(&mut existing);
 
-        assert_eq!(first_added, SUPPORTED_EXTENSIONS.len() - 1);
+        assert_eq!(first_added, supported_patterns().len() - 1);
         assert_eq!(second_added, 0);
         assert_eq!(existing, after_first);
     }
@@ -328,26 +325,54 @@ mod tests {
     #[test]
     fn every_pattern_is_listed_once() {
         // A duplicate would inflate the count `add_supported_patterns` returns
-        // and put the same line in .gitattributes twice.
-        let mut seen: Vec<&str> = SUPPORTED_EXTENSIONS.to_vec();
+        // and put the same line in .gitattributes twice. The derived list is
+        // sorted+deduped at the source, so this is a regression guard on that.
+        let patterns = supported_patterns();
+        let mut seen = patterns.clone();
         seen.sort_unstable();
         let before = seen.len();
         seen.dedup();
-        assert_eq!(before, seen.len(), "SUPPORTED_EXTENSIONS has a duplicate");
+        assert_eq!(before, seen.len(), "supported_patterns() has a duplicate");
+    }
+
+    #[test]
+    fn every_pattern_is_a_single_extension_glob() {
+        // Each line must be a `*.<ext> merge=weave` glob git can match.
+        for glob in supported_patterns() {
+            assert!(glob.starts_with("*."), "{glob} is not a `*.<ext>` glob");
+        }
+    }
+
+    #[test]
+    fn the_mts_cts_and_registry_langs_are_claimed() {
+        // The drift this whole derivation exists to kill: `.mts`/`.cts` and the
+        // registry's newer languages parse and entity-merge, so setup must emit
+        // them. Sourcing the list from `sem-core` is what makes this hold.
+        let patterns = supported_patterns();
+        for ext in [
+            ".mts", ".cts", ".mjs", ".cjs", ".kt", ".tf", ".hcl", ".ml", ".mli", ".zig", ".elm",
+            ".clj", ".edn", ".d", ".lua", ".fish", ".nix", ".sql", ".tex", ".pl", ".csv",
+        ] {
+            assert!(
+                patterns.contains(&format!("*{ext}")),
+                "setup must write `*{ext} merge=weave`"
+            );
+        }
     }
 
     #[test]
     fn the_languages_that_fail_the_coverage_sweep_are_not_listed() {
-        // These four parse but merge badly — two sides adding different
-        // definitions conflicts, and the marker cuts a definition in half.
+        // These parse but merge badly — two sides adding different definitions
+        // conflicts, and the marker cuts a definition in half.
         // `weave-core/tests/language_coverage.rs` records the observed output
-        // for each. Routing them through weave would be worse than leaving
-        // them to git, so setup must not claim them.
-        for ext in &["*.hs", "*.vue", "*.svelte", "*.erb"] {
+        // for each; `weave_core::DECLINED_EXTENSIONS` subtracts them at the
+        // source. Routing them through weave would be worse than leaving them to
+        // git, so setup must not claim them.
+        let patterns = supported_patterns();
+        for ext in [".hs", ".vue", ".svelte", ".erb"] {
             assert!(
-                !SUPPORTED_EXTENSIONS.contains(ext),
-                "{} fails the language coverage sweep and must not be claimed here",
-                ext
+                !patterns.contains(&format!("*{ext}")),
+                "{ext} fails the coverage sweep and must not be claimed here"
             );
         }
     }

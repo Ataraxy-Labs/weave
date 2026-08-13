@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://weave.ataraxylabs.dev/schema/weave-findings/1.2.0",
+  "$id": "https://weave.ataraxylabs.dev/schema/weave-findings/1.3.0",
   "title": "weave findings",
   "description": "weave-patch-schema v1 — the READ side of weave's agent contract. What a merge did, what it might have broken, and what the caller could do about it. The finding classes below are the fixed set of class tags a finding can carry. The WRITE side (`weave patch`) is a separate schema: schema/weave-ops.schema.json.",
   "type": "object",
@@ -16,12 +16,13 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "description": "Semver of THIS schema. Consumers must reject a major they do not know. Additive fields are minor bumps; removing or re-meaning a field is a major bump. 1.1.0 added the optional `scope` and `findings[].side`. 1.2.0 added `findings[].hunks`, `findings[].refused_by` and `findings[].texts`: a CONFLICT finding now DIAGNOSES the disagreement (which lines of base each side rewrote, where those rewrites meet, and which refusal fired) and REFERENCES the three full texts by `path@rev` instead of carrying them. `base`/`ours`/`theirs` remain valid and were always optional, so a 1.2.0 document is readable by a 1.1.0 consumer; a consumer that DEPENDED on the texts being inlined should read `texts[*].path@rev` and fetch them, which costs one `git show` and is why the worst-case document for a large conflicted file fell from 450KB to under 30KB. A producer declares the lowest version whose fields it actually uses.",
+      "description": "Semver of THIS schema. Consumers must reject a major they do not know. Additive fields are minor bumps; removing or re-meaning a field is a major bump. 1.1.0 added the optional `scope` and `findings[].side`. 1.2.0 added `findings[].hunks`, `findings[].refused_by` and `findings[].texts`: a CONFLICT finding now DIAGNOSES the disagreement (which lines of base each side rewrote, where those rewrites meet, and which refusal fired) and REFERENCES the three full texts by `path@rev` instead of carrying them. `base`/`ours`/`theirs` remain valid and were always optional, so a 1.2.0 document is readable by a 1.1.0 consumer; a consumer that DEPENDED on the texts being inlined should read `texts[*].path@rev` and fetch them, which costs one `git show` and is why the worst-case document for a large conflicted file fell from 450KB to under 30KB. 1.3.0 added the advisory register: a new `source` value `advisory`, a new `finding_class` value `COOCCUPANCY`, the `warning_kind` value `sibling_co_change`, and the optional `findings[].cochange` object. An advisory reports a derivable fact about a CLEAN merge — a container both sides changed different siblings of — and never a risk or a refusal, so it changes no verdict and no exit code; a 1.2.0 consumer that does not know the new `source`/`class` values should treat the finding as informational rather than rejecting the document. A producer declares the lowest version whose fields it actually uses. Only additive changes, so a 1.3.0 document remains readable by a 1.x consumer.",
       "type": "string",
       "enum": [
         "1.0.0",
         "1.1.0",
-        "1.2.0"
+        "1.2.0",
+        "1.3.0"
       ]
     },
     "file": {
@@ -76,7 +77,7 @@
   },
   "$defs": {
     "finding_class": {
-      "description": "The class tags a finding can carry: DANGLING, DUP, SHADOW and ORDER for name-resolution changes, plus INTERLEAVE for effectful order composition, LOSS for content that no side dropped, ASYM for direction-dependent results, and CONFLICT for the honest refusal.",
+      "description": "The class tags a finding can carry: DANGLING, DUP, SHADOW and ORDER for name-resolution changes, plus INTERLEAVE for effectful order composition, LOSS for content that no side dropped, ASYM for direction-dependent results, CONFLICT for the honest refusal, and COOCCUPANCY (1.3.0) for the advisory that a clean container merge composed different siblings from each side.",
       "type": "string",
       "enum": [
         "CONFLICT",
@@ -86,7 +87,8 @@
         "SHADOW",
         "ORDER",
         "INTERLEAVE",
-        "ASYM"
+        "ASYM",
+        "COOCCUPANCY"
       ]
     },
     "conflict_kind": {
@@ -126,6 +128,52 @@
         "both"
       ]
     },
+    "cochange": {
+      "description": "The members each side changed or added in a clean container merge. Added in 1.3.0.",
+      "type": "object",
+      "required": [
+        "ours",
+        "theirs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ours": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/cochange_member"
+          }
+        },
+        "theirs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/cochange_member"
+          }
+        }
+      }
+    },
+    "cochange_member": {
+      "description": "One member one side changed or added.",
+      "type": "object",
+      "required": [
+        "member",
+        "change"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "member": {
+          "description": "The member's name.",
+          "type": "string"
+        },
+        "change": {
+          "description": "What this side did to the member.",
+          "type": "string",
+          "enum": [
+            "added",
+            "changed"
+          ]
+        }
+      }
+    },
     "finding": {
       "type": "object",
       "required": [
@@ -151,12 +199,13 @@
           "type": "string"
         },
         "source": {
-          "description": "Where the finding came from. `conflict`: weave refused to guess. `warning`: weave resolved but flagged semantic risk. `derived`: computed from the merge output plus binding facts (renames/deletes) — the read-only form of the binding pass.",
+          "description": "Where the finding came from. `conflict`: weave refused to guess. `warning`: weave resolved but flagged semantic risk. `derived`: computed from the merge output plus binding facts (renames/deletes) — the read-only form of the binding pass. `advisory` (1.3.0): weave resolved cleanly and reports a fact, not a risk — the lowest register, never blocking. A clean merge with only `advisory` findings is still clean.",
           "type": "string",
           "enum": [
             "conflict",
             "warning",
-            "derived"
+            "derived",
+            "advisory"
           ]
         },
         "side": {
@@ -210,8 +259,13 @@
             "dependent_also_modified",
             "parse_failed_after_merge",
             "composition_licensed",
-            "conflict_frame_duplicate"
+            "conflict_frame_duplicate",
+            "sibling_co_change"
           ]
+        },
+        "cochange": {
+          "description": "Present when class=COOCCUPANCY (source=advisory): the members each side changed or added in a container that merged clean. The two member lists never share a member — a member both sides touched is a conflict or an identical edit, not co-occupancy. Added in 1.3.0.",
+          "$ref": "#/$defs/cochange"
         },
         "related": {
           "description": "Other entities implicated in this finding.",

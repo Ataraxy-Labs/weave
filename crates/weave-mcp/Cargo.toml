@@ -1,6 +1,6 @@
 [package]
 name = "weave-mcp"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "MCP server for entity-level semantic merge: read merge findings and cross-file binding risk, and coordinate live multi-agent edits via a shared CRDT. 22 tools."
@@ -15,10 +15,10 @@ name = "weave-mcp"
 path = "src/main.rs"
 
 [dependencies]
-weave-core = { path = "../weave-core", version = "0.5.0" }
-weave-crdt = { path = "../weave-crdt", version = "0.5.0" }
-weave-cli = { path = "../weave-cli", version = "0.5.0", default-features = false }
-sem-core = "0.21.0"
+weave-core = { path = "../weave-core", version = "0.5.1" }
+weave-crdt = { path = "../weave-crdt", version = "0.5.1" }
+weave-cli = { path = "../weave-cli", version = "0.5.1", default-features = false }
+sem-core = "0.21.1"
 lru = "0.18"
 rmcp = { version = "1.7", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["full"] }

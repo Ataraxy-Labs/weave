@@ -125,15 +125,32 @@ pub struct Finding {
     pub suggestion: Option<String>,
 }
 
+/// One advisory about one file — a fact weave surfaces without deciding it. It
+/// is NOT a finding: it never makes a verdict `FOUND`, never counts in the
+/// tally, and never changes the exit code. It rides beside the verdict as
+/// something a reviewer may want to glance at, not something they must fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Advisory {
+    /// The container the co-change happened in.
+    pub entity: String,
+    pub entity_type: String,
+    /// The one-line human reading, e.g. `both sides changed siblings (ours
+    /// added `bar`; theirs changed `baz`)`.
+    pub detail: String,
+}
+
 /// One file's verdict. An empty `findings` is the OK verdict and prints as a
-/// sentence.
+/// sentence. `advisories` are separate: a file may be OK and still carry them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
     pub file: String,
     pub findings: Vec<Finding>,
+    pub advisories: Vec<Advisory>,
 }
 
 impl Verdict {
+    /// OK is about FINDINGS only. Advisories never make a file not-OK — that is
+    /// the whole point of the register.
     pub fn ok(&self) -> bool {
         self.findings.is_empty()
     }
@@ -200,6 +217,15 @@ impl Report {
                 if let Some(s) = &f.suggestion {
                     out.push_str(&format!("    suggestion ({}): {}\n", f.class, s));
                 }
+            }
+            // Advisories print UNDER the verdict, tagged `review`, whether or not
+            // the file is OK. They are not problems — they carry no exit code and
+            // no "FOUND" — so they read as a glance, not a task.
+            for a in &v.advisories {
+                out.push_str(&format!(
+                    "    review (COOCCUPANCY): cleanly merged {} `{}` — {}; confirm they are meant to coexist\n",
+                    a.entity_type, a.entity, a.detail
+                ));
             }
         }
         let (good, bad, findings) = self.tally();
@@ -567,12 +593,35 @@ pub fn check(
     work: &Tree,
     subjects: &[String],
 ) -> Vec<Verdict> {
-    // Names still defined anywhere on disk, and where each stage defined what.
+    // Names still defined anywhere on disk. Repo-wide on purpose: a name a
+    // subject still calls is bound — not dangling — the moment ANY file, touched
+    // or not, still defines it, so the suppression set cannot be scoped to the
+    // subjects the way the stage trees are.
     let defined_now: BTreeSet<String> = work
         .iter()
         .filter(|(p, _)| is_supported(p))
         .flat_map(|(p, c)| entities_of(p, c).into_iter().map(|e| e.name))
         .collect();
+
+    // The names a merge stage defined that nothing on disk defines any more.
+    // This depends on the stages and the working tree, NOT on which subject we
+    // are looking at, so it is computed ONCE. Folding it into the per-file loop
+    // — as this once did — re-parses every stage of every file for every subject,
+    // an O(subjects × repo) cost that is the whole reason a large mid-merge tree
+    // hangs. The stage trees are already scoped to the subjects (see
+    // [`crate::gitscan::merge_scope`]); an untouched file's stage equals its
+    // working-tree copy, so it contributes only names that are in `defined_now`
+    // and can never be `gone`.
+    let mut gone: BTreeSet<String> = BTreeSet::new();
+    for stage in [base, ours, theirs] {
+        for (p, c) in stage.iter().filter(|(p, _)| is_supported(p)) {
+            for e in entities_of(p, c) {
+                if !defined_now.contains(&e.name) {
+                    gone.insert(e.name);
+                }
+            }
+        }
+    }
 
     let mut verdicts = Vec::new();
     for file in subjects {
@@ -585,6 +634,7 @@ pub fn check(
                         .to_string(),
                     suggestion: None,
                 }],
+                advisories: Vec::new(),
             });
             continue;
         };
@@ -595,44 +645,78 @@ pub fn check(
             theirs.get(file).map(String::as_str),
             w,
         );
-        findings.extend(dangling(file, base, ours, theirs, work, &defined_now));
+        findings.extend(dangling(w, base, work, &gone));
+        let advisories = advisories_for(
+            file,
+            base.get(file).map(String::as_str),
+            ours.get(file).map(String::as_str),
+            theirs.get(file).map(String::as_str),
+        );
         verdicts.push(Verdict {
             file: file.clone(),
             findings,
+            advisories,
         });
     }
     verdicts
 }
 
-/// Names a merge stage defined, that nothing on disk defines any more, and that
-/// the working tree still calls.
+/// The co-occupancy advisories weave's own merge of the three stages would
+/// raise: containers both sides changed different siblings of, which merged
+/// clean. Read off the three stage texts, not off the bytes on disk — the fact
+/// is about what the two authors did, and holds however the resolution was
+/// written. Empty when any stage lacks the file (an add or a delete is not a
+/// co-change) or nothing on disk parses it.
+fn advisories_for(
+    file: &str,
+    base: Option<&str>,
+    ours: Option<&str>,
+    theirs: Option<&str>,
+) -> Vec<Advisory> {
+    let (Some(b), Some(o), Some(t)) = (base, ours, theirs) else {
+        return Vec::new();
+    };
+    weave_core::entity_merge(b, o, t, file)
+        .warnings
+        .iter()
+        .filter_map(|w| match &w.kind {
+            weave_core::validate::WarningKind::SiblingCoChange {
+                ours_added,
+                ours_changed,
+                theirs_added,
+                theirs_changed,
+            } => Some(Advisory {
+                entity: w.entity_name.clone(),
+                entity_type: w.entity_type.clone(),
+                detail: format!(
+                    "both sides changed siblings ({}; {})",
+                    weave_core::validate::co_change_side_phrase("ours", ours_added, ours_changed),
+                    weave_core::validate::co_change_side_phrase(
+                        "theirs",
+                        theirs_added,
+                        theirs_changed
+                    ),
+                ),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The subset of the repo-wide vanished-name set (`gone`) that THIS file still
+/// calls without defining — the file's dangling references.
+///
+/// `gone` is computed once by the caller and shared across every subject,
+/// because it is a fact about the merge, not about the file being verified. Only
+/// the per-file half lives here: which of those vanished names this file's bytes
+/// actually call.
 ///
 /// The rename repair is the derivable half: when the vanished name has a
 /// same-file successor that IS defined now and did not exist in base, the fix
 /// is a rename and weave can say which one.
-fn dangling(
-    file: &str,
-    base: &Tree,
-    ours: &Tree,
-    theirs: &Tree,
-    work: &Tree,
-    defined_now: &BTreeSet<String>,
-) -> Vec<Finding> {
-    let mut gone: BTreeSet<String> = BTreeSet::new();
-    for stage in [base, ours, theirs] {
-        for (p, c) in stage.iter().filter(|(p, _)| is_supported(p)) {
-            for e in entities_of(p, c) {
-                if !defined_now.contains(&e.name) {
-                    gone.insert(e.name);
-                }
-            }
-        }
-    }
-    let Some(w) = work.get(file) else {
-        return Vec::new();
-    };
+fn dangling(w: &str, base: &Tree, work: &Tree, gone: &BTreeSet<String>) -> Vec<Finding> {
     let mut hits: Vec<(String, Option<(String, String)>)> = Vec::new();
-    for name in &gone {
+    for name in gone {
         if name.len() < 3 || has_definition(w, name) || !has_call_reference(w, name) {
             continue;
         }
@@ -804,6 +888,53 @@ mod tests {
             v[0].findings.iter().any(|f| f.class == "DANGLING"),
             "{:#?}",
             v[0]
+        );
+    }
+
+    #[test]
+    fn a_clean_container_co_change_is_an_advisory_not_a_finding() {
+        // Both sides change DIFFERENT methods of one class; the resolution on
+        // disk keeps both. The file is OK — no findings — yet the co-occupancy
+        // is surfaced as a non-blocking review advisory.
+        let base =
+            "class C:\n    def a(self):\n        return 1\n\n    def b(self):\n        return 2\n";
+        let ours = "class C:\n    def a(self):\n        return 1 + 10\n\n    def b(self):\n        return 2\n";
+        let theirs = "class C:\n    def a(self):\n        return 1\n\n    def b(self):\n        return 2 + 20\n";
+        let work = "class C:\n    def a(self):\n        return 1 + 10\n\n    def b(self):\n        return 2 + 20\n";
+        let v = check(
+            &tree(&[("m.py", base)]),
+            &tree(&[("m.py", ours)]),
+            &tree(&[("m.py", theirs)]),
+            &tree(&[("m.py", work)]),
+            &["m.py".to_string()],
+        );
+        assert!(
+            v[0].ok(),
+            "an advisory must not make the file not-OK: {:#?}",
+            v[0]
+        );
+        assert!(
+            v[0].findings.is_empty(),
+            "advisory is not a finding: {:#?}",
+            v[0]
+        );
+        assert_eq!(
+            v[0].advisories.len(),
+            1,
+            "the co-change must be advised: {:#?}",
+            v[0]
+        );
+        assert_eq!(v[0].advisories[0].entity, "C");
+        // The report renders it under `review`, and the tally/exit are untouched.
+        let report = Report {
+            scope: "test".to_string(),
+            verdicts: v,
+        };
+        assert_eq!(report.tally().1, 0, "no files with findings");
+        assert!(
+            report.render().contains("review (COOCCUPANCY)"),
+            "{}",
+            report.render()
         );
     }
 

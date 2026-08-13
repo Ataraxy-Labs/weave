@@ -21,7 +21,7 @@ pub mod validate;
 
 pub use conflict::{parse_weave_conflicts, MarkerFormat, ParsedConflict};
 pub use merge::{
-    entity_merge, entity_merge_fmt, entity_merge_with_registry, EntityAudit, MergeResult,
-    ResolutionStrategy,
+    entity_merge, entity_merge_fmt, entity_merge_with_registry, supported_merge_extensions,
+    EntityAudit, MergeResult, ResolutionStrategy, DECLINED_EXTENSIONS,
 };
 pub use validate::{validate_merge, ModifiedEntity, SemanticWarning};

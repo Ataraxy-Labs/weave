@@ -81,11 +81,84 @@ pub(crate) fn bind(
     contested_extraction(arena, triples, relational, resolved, ctx);
     // Last, so every refusal above has already been made: the license is only
     // ever granted over a conflict that has survived the whole binding stage.
-    let findings = footprint_license(arena, triples, resolved, ctx);
+    let mut findings = footprint_license(arena, triples, resolved, ctx);
+    // After every refusal AND the license, so the advisory speaks only of
+    // containers that are still a clean member-wise merge in the final result —
+    // not of one a later pass turned into a conflict.
+    findings.extend(sibling_co_change(arena, triples, resolved, ctx));
     BindReport {
         references_rewritten,
         findings,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Co-occupancy: both sides changed different siblings, and it merged clean
+// ---------------------------------------------------------------------------
+
+/// The advisory a clean container merge earns when each side changed or added a
+/// DIFFERENT member of the same container.
+///
+/// A member-wise merge composes two sides that never saw each other: ours adds
+/// one method, theirs changes another, and because the two edits touch different
+/// members nothing conflicts and the result is a container carrying both. That
+/// is usually exactly right — members are independent — but it is also the one
+/// clean outcome where the result is a body neither developer wrote, and whether
+/// the two changes were meant to coexist is not a question a merge tool can
+/// answer. So weave states the fact and decides nothing: it names the container
+/// and each side's members, on the advisory register, and changes no byte of the
+/// merge and no verdict.
+///
+/// Read-only over `resolved`: it reports, it does not revise. It reaches only a
+/// clean merge that COMPOSED two sides — the same gate `local_dangling` uses —
+/// so a container only one side touched, or one a later pass turned into a
+/// conflict, is not advised about. Which clean rung composed it (diff3, the
+/// container merge, the statement fold) does not change the fact the advisory
+/// reports: the disjointness of the two sides' member sets is read off the three
+/// pre-merge bodies, not off the rung.
+fn sibling_co_change(
+    arena: &Arena,
+    triples: &[Triple],
+    resolved: &[Resolved],
+    ctx: &BindCtx<'_>,
+) -> Vec<SemanticWarning> {
+    let mut findings = Vec::new();
+    for i in 0..triples.len() {
+        if !composed_by_the_merge(&resolved[i].strategy) {
+            continue;
+        }
+        if !matches!(resolved[i].disposition, Disposition::Emit { .. }) {
+            continue;
+        }
+        let (Some(b), Some(o), Some(t)) = (
+            triples[i].base_idx(),
+            triples[i].ours_idx(),
+            triples[i].theirs_idx(),
+        ) else {
+            continue;
+        };
+        let (be, oe, te) = (arena.get(b), arena.get(o), arena.get(t));
+        if !crate::merge::is_container_entity_type(be.entity_type()) {
+            continue;
+        }
+        let Some(co) = crate::container::sibling_co_change(&be.content, &oe.content, &te.content)
+        else {
+            continue;
+        };
+        findings.push(SemanticWarning {
+            entity_name: be.name().to_string(),
+            entity_type: be.entity_type().to_string(),
+            file_path: ctx.file_path.to_string(),
+            kind: WarningKind::SiblingCoChange {
+                ours_added: co.ours_added,
+                ours_changed: co.ours_changed,
+                theirs_added: co.theirs_added,
+                theirs_changed: co.theirs_changed,
+            },
+            related: Vec::new(),
+        });
+    }
+    findings
 }
 
 // ---------------------------------------------------------------------------

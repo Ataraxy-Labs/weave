@@ -76,6 +76,30 @@ pub enum WarningKind {
         /// The most times an honest union of the two sides could.
         allowed: usize,
     },
+    /// A container (class, impl, object, trait, enum) merged clean, but each
+    /// side changed or added a DIFFERENT set of sibling members. The merge is
+    /// correct at every member — nothing conflicted — yet the two sides' work
+    /// now coexists in one container though neither author saw the other's.
+    ///
+    /// This is not a risk weave can decide (deciding whether two disjoint edits
+    /// were MEANT to coexist is not something a merge tool can know), so it is
+    /// the lowest register on this channel: advisory, never a warning and never
+    /// a refusal. It surfaces one derivable fact — the container and each side's
+    /// changed/added members — and asks a human to confirm the coexistence.
+    ///
+    /// Fires only when both sides changed/added members and those two member
+    /// sets are disjoint (different siblings). A member both sides touched is
+    /// either a conflict already or an identical edit, and is not co-occupancy.
+    SiblingCoChange {
+        /// Members ours added that theirs did not touch.
+        ours_added: Vec<String>,
+        /// Existing members ours changed substantively.
+        ours_changed: Vec<String>,
+        /// Members theirs added that ours did not touch.
+        theirs_added: Vec<String>,
+        /// Existing members theirs changed substantively.
+        theirs_changed: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -238,7 +262,44 @@ impl std::fmt::Display for SemanticWarning {
                     self.file_path, line, found, allowed,
                 )
             }
+            WarningKind::SiblingCoChange {
+                ours_added,
+                ours_changed,
+                theirs_added,
+                theirs_changed,
+            } => {
+                write!(
+                    f,
+                    "advisory: cleanly merged {} `{}` — both sides changed different siblings ({}; {}); confirm they are meant to coexist",
+                    self.entity_type,
+                    self.entity_name,
+                    co_change_side_phrase("ours", ours_added, ours_changed),
+                    co_change_side_phrase("theirs", theirs_added, theirs_changed),
+                )
+            }
         }
+    }
+}
+
+/// One side of a sibling co-change, phrased once for every channel that renders
+/// it: `ours added `a`, `b`, changed `c``. The single owner of the wording, so
+/// the merge driver's warning line, the findings suggestion and `weave check`'s
+/// review line cannot drift apart.
+pub fn co_change_side_phrase(side: &str, added: &[String], changed: &[String]) -> String {
+    let list = |ms: &[String]| {
+        ms.iter()
+            .map(|m| format!("`{m}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match (added.is_empty(), changed.is_empty()) {
+        (false, false) => format!("{side} added {}, changed {}", list(added), list(changed)),
+        (false, true) => format!("{side} added {}", list(added)),
+        (true, false) => format!("{side} changed {}", list(changed)),
+        // Not reachable: the advisory fires only when this side touched a
+        // member. Stated rather than panicked, so a future caller cannot make
+        // it a crash.
+        (true, true) => format!("{side} changed nothing"),
     }
 }
 
