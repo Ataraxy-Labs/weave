@@ -329,4 +329,4 @@ Uses [sem-core](https://github.com/Ataraxy-Labs/sem) for entity extraction via t
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Ataraxy-Labs/weave&type=Date)](https://star-history.com/#Ataraxy-Labs/weave&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=Ataraxy-Labs/weave&type=Date)](https://star-history.dera.page/#Ataraxy-Labs/weave&Date)
