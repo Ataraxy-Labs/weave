@@ -21,6 +21,7 @@ pub(crate) mod identity;
 pub(crate) mod join;
 pub(crate) mod merge;
 pub(crate) mod ops;
+pub(crate) mod resolve;
 pub(crate) mod state;
 pub(crate) mod sync;
 
@@ -36,10 +37,10 @@ pub use ops::{
     get_agent_status, get_entities_for_file, get_entity_status, register_agent, release_entity,
     upsert_entity, AgentStatus, ClaimResult, EntityStatus, PotentialConflict,
 };
+pub use resolve::{resolve_entity, resolve_entity_or_error, EntityAddress, Resolution};
 pub use state::EntityStateDoc;
 pub use sync::{
-    extract_entity_ids, merge_file_entities, reconstruct_file_from_crdt, resolve_entity_id,
-    sync_from_files,
+    extract_entity_ids, merge_file_entities, reconstruct_file_from_crdt, sync_from_files,
 };
 
 // Test doors: they put a replica into a state only a fixture needs to reach,

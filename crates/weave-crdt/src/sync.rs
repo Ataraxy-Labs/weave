@@ -122,7 +122,7 @@ pub fn sync_from_files(
         // Any OTHER read failure (a permission error, a non-UTF-8 file, a
         // directory in its place) is not a deletion and must not be silently
         // swallowed: it is propagated so the caller learns the sync was partial
-        // rather than reading a hole as "nothing changed" (weave-ka7).
+        // rather than reading a hole as "nothing changed".
         let content = match std::fs::read_to_string(&full_path) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -182,8 +182,8 @@ pub fn sync_from_files(
                         // shares that ancestor; advancing base to the new file
                         // here makes the working-tree side of the eventual
                         // three-way merge equal base and be dropped — silent
-                        // loss (weave-xxs). base advances lawfully via
-                        // AdvanceBase once a sync observes file == crdt. The
+                        // loss. base advances only via AdvanceBase once a
+                        // sync observes file == crdt. The
                         // cost is that two external edits with no stabilising
                         // sync between them surface as a conflict rather than a
                         // second fast-forward — which weave prefers to a
@@ -301,20 +301,6 @@ pub fn extract_entity_ids(
         .collect()
 }
 
-/// Find entity ID by human-readable name and file path.
-pub fn resolve_entity_id(
-    content: &str,
-    file_path: &str,
-    entity_name: &str,
-    registry: &ParserRegistry,
-) -> Option<String> {
-    let entities = extract_entity_ids(content, file_path, registry);
-    entities
-        .into_iter()
-        .find(|(_, name, _)| name == entity_name)
-        .map(|(id, _, _)| id)
-}
-
 /// Reconstruct a file from CRDT state: anchor order + interstitials + the
 /// joined value of every entity.
 pub fn reconstruct_file_from_crdt(state: &EntityStateDoc, file_path: &str) -> Result<String> {
@@ -341,7 +327,7 @@ pub fn reconstruct_file_from_crdt(state: &EntityStateDoc, file_path: &str) -> Re
 
         // An entity in the anchor order whose content cannot be read is not a
         // blank line to skip past — dropping it silently reconstructs a file
-        // missing code. Propagate it (weave-ka7).
+        // missing code. Propagate it.
         let status = get_entity_content(state, entity_id)?;
         output.push_str(&status.content);
         if !status.content.is_empty() && !status.content.ends_with('\n') {

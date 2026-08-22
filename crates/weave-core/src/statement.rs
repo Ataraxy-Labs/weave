@@ -769,7 +769,15 @@ fn align(base: &Partition, side: &Partition) -> Option<Alignment> {
         }
         for (so, t) in taken.iter().enumerate() {
             if !t {
-                additions.push((bi, si + so));
+                // Anchor to the last matched statement this addition textually
+                // follows within the gap, not to the gap's base-index floor —
+                // `bi` alone puts every addition in the gap before EVERY
+                // statement in it, including ones `best_matching` paired as
+                // edits of an earlier base statement (exercised by
+                // `statement_fold_does_not_splice_an_insertion_before_the_binding_it_reads`
+                // in tests/integration.rs).
+                let after = matched.iter().filter(|&&(_, mso)| mso < so).count();
+                additions.push((bi + after, si + so));
             }
         }
         // Surplus base statements in this gap stay `Deleted`.
@@ -1549,6 +1557,42 @@ mod tests {
         )
         .expect("merges");
         assert!(r.has_conflicts, "{}", r.content);
+    }
+
+    /// Adversarial case for the gap-addition anchoring fix: `align` now anchors each side's
+    /// addition using that side's OWN matched pairs, computed independently
+    /// of the other side. When BOTH sides edit the same base statement
+    /// (differently, so neither edit is an exact-key LCS anchor) and BOTH
+    /// also insert a new statement right after their own edit, each side's
+    /// anchor is computed from a different edit — so this checks they still
+    /// converge on the SAME gap, and the existing same-gap collision
+    /// detection (`two_insertions_into_one_gap_are_a_conflict`, above) still
+    /// engages, rather than the two insertions silently landing at
+    /// independently-computed, no-longer-colliding positions.
+    #[test]
+    fn edit_plus_insert_on_both_sides_still_collides_in_the_same_gap() {
+        let base = "fn f() {\n    a();\n    z();\n}\n";
+        let ours = "fn f() {\n    a(1);\n    m();\n    z();\n}\n";
+        let theirs = "fn f() {\n    a(2);\n    n();\n    z();\n}\n";
+        let r = statement_merge(
+            base,
+            ours,
+            theirs,
+            &ScopeMarkers::bare(&MarkerFormat::default()),
+        )
+        .expect("merges");
+        assert!(r.has_conflicts, "{}", r.content);
+        // Both insertions must appear in ONE shared conflict scope (still
+        // recognized as the same gap), not split into two independently
+        // placed, non-colliding statements.
+        assert_eq!(
+            r.content.matches("inserted statements").count(),
+            2, // opening `<<<<<<<` + closing `>>>>>>>` marker for one scope
+            "m() and n() should collide in a single shared-gap conflict, not \
+             land independently: {}",
+            r.content
+        );
+        assert!(r.content.contains("m();") && r.content.contains("n();"));
     }
 
     #[test]

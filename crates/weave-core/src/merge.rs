@@ -4009,6 +4009,7 @@ export * from "./types";
                 content: format!("function test() {{ return {}; }}", i),
                 content_hash: format!("hash_{}", i),
                 structural_hash: None,
+                kappa: None,
                 start_line: i * 3 + 1,
                 end_line: i * 3 + 3,
                 start_byte: None,

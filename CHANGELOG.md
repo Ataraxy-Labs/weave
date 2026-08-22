@@ -7,6 +7,71 @@ Versions are shared across every crate in the workspace and the npm package,
 so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 `weave-github` and `@ataraxy-labs/weave` all move together.
 
+## 0.5.2
+
+sem-core bumped to 0.23.0. Entity identity and ids are unchanged for merges —
+this is a dependency bump, not a behavior change in how entities are
+recognized or matched.
+
+### New — typed entity addressing
+
+MCP tools and the CLI's `claim`/`release` commands used to resolve an entity
+by name alone, so two entities sharing a name meant whichever one happened to
+be found first — silently. `weave_crdt::resolve::EntityAddress` now carries an
+optional `entity_type`, `parent_name`, and `ordinal` alongside the name.
+MCP's six content-mutating tools (`claim_entity`, `release_entity`,
+`who_is_editing`, `update_entity_content`, `get_entity_content`,
+`resolve_conflict`) and its three read-only graph tools
+(`get_dependencies`, `get_dependents`, `impact_analysis`) all take the new
+optional fields; existing callers that only send a name are unaffected. An
+ambiguous name is now refused with the list of candidates instead of being
+resolved to the first match.
+
+### Fixed
+
+- A merge could splice an inserted statement above the binding it reads, when
+  the other side had edited the same function around it. Gap insertions are
+  now anchored after the matched statements they follow, so an inserted line
+  lands where it was written relative to what's still there.
+
+## 0.5.1
+
+sem-core bumped to 0.21.1.
+
+### New
+
+- `weave check` with no arguments re-scanned the whole tree on every run —
+  a `git show` per file plus a dangling-reference recompute across every
+  subject, which went from 59 seconds to effectively hanging on a large
+  monorepo. It's now scoped to the files a merge actually touched, with
+  batched reads instead of one process per file: 59.3s to 0.17s on a
+  4,000-file, 50-conflict tree, with an identical verdict.
+- `weave setup` emitted a hardcoded list of extensions it would install merge
+  drivers for, which had drifted from what the parser actually supports —
+  missing `.mts`/`.cts` and about thirty others. The list is now derived from
+  the parser registry itself, so the two can't drift apart again.
+- When a container (class, impl, object, trait, enum) merges clean but each
+  side changed or added a *different* set of sibling members, weave now
+  emits a clean-merge advisory naming the co-changed siblings, instead of
+  staying silent about a merge that was clean but still worth a second look.
+
+### Fixed
+
+- A stale peer clock could push the CRDT's staleness check backwards instead
+  of holding its ground; it now saturates rather than trusting whatever a
+  peer reports.
+- A contested entity claim used to resolve silently; contested claims are now
+  visible instead of picked for the caller.
+- The sync door merged into the writes register in some paths and replaced it
+  in others; it now always merges, never replaces.
+- A failed git read inside the MCP server used to come back as fabricated
+  empty content; it's now reported as a tool error.
+- Git reads now run in the repository they were asked about, instead of
+  whatever the process's ambient working directory happened to be.
+- A git refusal (e.g. an unrelated-history diff) used to be answered with an
+  empty change list, which read as "nothing changed" instead of "the request
+  couldn't be answered."
+
 ## 0.5.0
 
 ### New — one line per merge

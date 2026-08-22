@@ -28,6 +28,18 @@ pub(crate) struct ClaimEntityParams {
     pub file_path: String,
     #[schemars(description = "Name of the entity to claim")]
     pub entity_name: String,
+    #[schemars(
+        description = "Optional: entity kind to disambiguate same-named entities (e.g. 'function', 'class', 'method')"
+    )]
+    pub entity_type: Option<String>,
+    #[schemars(
+        description = "Optional: name of the enclosing entity (e.g. the class owning a method) to disambiguate same-named entities"
+    )]
+    pub parent_name: Option<String>,
+    #[schemars(
+        description = "Optional: 0-based occurrence index among matching entities in file order, for overloads or duplicate names"
+    )]
+    pub ordinal: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -39,6 +51,18 @@ pub(crate) struct ReleaseEntityParams {
     pub file_path: String,
     #[schemars(description = "Name of the entity to release")]
     pub entity_name: String,
+    #[schemars(
+        description = "Optional: entity kind to disambiguate same-named entities (e.g. 'function', 'class', 'method')"
+    )]
+    pub entity_type: Option<String>,
+    #[schemars(
+        description = "Optional: name of the enclosing entity (e.g. the class owning a method) to disambiguate same-named entities"
+    )]
+    pub parent_name: Option<String>,
+    #[schemars(
+        description = "Optional: 0-based occurrence index among matching entities in file order, for overloads or duplicate names"
+    )]
+    pub ordinal: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -55,6 +79,18 @@ pub(crate) struct WhoIsEditingParams {
     pub file_path: String,
     #[schemars(description = "Name of the entity to check")]
     pub entity_name: String,
+    #[schemars(
+        description = "Optional: entity kind to disambiguate same-named entities (e.g. 'function', 'class', 'method')"
+    )]
+    pub entity_type: Option<String>,
+    #[schemars(
+        description = "Optional: name of the enclosing entity (e.g. the class owning a method) to disambiguate same-named entities"
+    )]
+    pub parent_name: Option<String>,
+    #[schemars(
+        description = "Optional: 0-based occurrence index among matching entities in file order, for overloads or duplicate names"
+    )]
+    pub ordinal: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -100,6 +136,18 @@ pub(crate) struct EntityDepsParams {
     pub file_path: String,
     #[schemars(description = "Name of the entity to analyze")]
     pub entity_name: String,
+    #[schemars(
+        description = "Optional: entity kind to disambiguate same-named entities (e.g. 'function', 'class', 'method')"
+    )]
+    pub entity_type: Option<String>,
+    #[schemars(
+        description = "Optional: name of the enclosing entity (e.g. the class owning a method) to disambiguate same-named entities"
+    )]
+    pub parent_name: Option<String>,
+    #[schemars(
+        description = "Optional: 0-based occurrence index among matching entities in file order, for overloads or duplicate names"
+    )]
+    pub ordinal: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -109,6 +157,18 @@ pub(crate) struct ImpactAnalysisParams {
     pub file_path: String,
     #[schemars(description = "Name of the entity to analyze impact for")]
     pub entity_name: String,
+    #[schemars(
+        description = "Optional: entity kind to disambiguate same-named entities (e.g. 'function', 'class', 'method')"
+    )]
+    pub entity_type: Option<String>,
+    #[schemars(
+        description = "Optional: name of the enclosing entity (e.g. the class owning a method) to disambiguate same-named entities"
+    )]
+    pub parent_name: Option<String>,
+    #[schemars(
+        description = "Optional: 0-based occurrence index among matching entities in file order, for overloads or duplicate names"
+    )]
+    pub ordinal: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -168,6 +228,18 @@ pub(crate) struct UpdateEntityContentParams {
     pub entity_name: String,
     #[schemars(description = "New source code content for the entity")]
     pub content: String,
+    #[schemars(
+        description = "Optional: entity kind to disambiguate same-named entities (e.g. 'function', 'class', 'method')"
+    )]
+    pub entity_type: Option<String>,
+    #[schemars(
+        description = "Optional: name of the enclosing entity (e.g. the class owning a method) to disambiguate same-named entities"
+    )]
+    pub parent_name: Option<String>,
+    #[schemars(
+        description = "Optional: 0-based occurrence index among matching entities in file order, for overloads or duplicate names"
+    )]
+    pub ordinal: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -177,6 +249,18 @@ pub(crate) struct GetEntityContentParams {
     pub file_path: String,
     #[schemars(description = "Name of the entity to read")]
     pub entity_name: String,
+    #[schemars(
+        description = "Optional: entity kind to disambiguate same-named entities (e.g. 'function', 'class', 'method')"
+    )]
+    pub entity_type: Option<String>,
+    #[schemars(
+        description = "Optional: name of the enclosing entity (e.g. the class owning a method) to disambiguate same-named entities"
+    )]
+    pub parent_name: Option<String>,
+    #[schemars(
+        description = "Optional: 0-based occurrence index among matching entities in file order, for overloads or duplicate names"
+    )]
+    pub ordinal: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -223,4 +307,16 @@ pub(crate) struct ResolveConflictParams {
     pub entity_name: String,
     #[schemars(description = "Resolved source code content")]
     pub resolved_content: String,
+    #[schemars(
+        description = "Optional: entity kind to disambiguate same-named entities (e.g. 'function', 'class', 'method')"
+    )]
+    pub entity_type: Option<String>,
+    #[schemars(
+        description = "Optional: name of the enclosing entity (e.g. the class owning a method) to disambiguate same-named entities"
+    )]
+    pub parent_name: Option<String>,
+    #[schemars(
+        description = "Optional: 0-based occurrence index among matching entities in file order, for overloads or duplicate names"
+    )]
+    pub ordinal: Option<u32>,
 }

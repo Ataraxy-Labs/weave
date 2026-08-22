@@ -9,7 +9,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use sem_core::model::entity::SemanticEntity;
-use sem_core::parser::graph::EntityGraph;
+use sem_core::parser::graph::{EntityGraph, EntityInfo};
 use sem_core::parser::plugins::create_default_registry;
 use sem_core::parser::registry::ParserRegistry;
 use tokio::sync::Mutex;
@@ -17,9 +17,9 @@ use tokio::sync::Mutex;
 use weave_core::git;
 use weave_crdt::{
     claim_entity, detect_potential_conflicts, get_entities_for_file, get_entity_content,
-    get_entity_status, merge_file_entities, register_agent, release_entity,
-    resolve_entity_conflict, resolve_entity_id, sync_from_files, update_entity_content,
-    upsert_entity, EntityStateDoc,
+    get_entity_status, merge_file_entities, register_agent, release_entity, resolve_entity,
+    resolve_entity_conflict, sync_from_files, update_entity_content, upsert_entity, EntityAddress,
+    EntityStateDoc, Resolution,
 };
 
 use crate::error::{Reason, ToolError};
@@ -196,19 +196,190 @@ impl WeaveServer {
         })
     }
 
+    /// Resolve an entity address to its ID via weave-crdt's shared resolver.
+    ///
+    /// Never picks first: on ambiguity the error lists every candidate and
+    /// tells the caller which address field to add.
+    #[allow(clippy::too_many_arguments)]
     fn resolve_entity_sync(
         registry: &ParserRegistry,
         content: &str,
         file_path: &str,
         entity_name: &str,
+        entity_type: Option<&str>,
+        parent_name: Option<&str>,
+        ordinal: Option<u32>,
     ) -> Result<String, ToolError> {
-        resolve_entity_id(content, file_path, entity_name, registry).ok_or_else(|| {
-            Reason::EntityNotFound {
+        let mut address = EntityAddress::by_name(entity_name);
+        if let Some(t) = entity_type {
+            address = address.with_type(t);
+        }
+        if let Some(p) = parent_name {
+            address = address.with_parent(p);
+        }
+        if let Some(o) = ordinal {
+            address = address.with_ordinal(o);
+        }
+        match resolve_entity(content, file_path, registry, &address) {
+            Resolution::Resolved(id) => Ok(id),
+            Resolution::NotFound => Err(Reason::EntityNotFound {
                 entity: entity_name.to_string(),
                 file: file_path.to_string(),
             }
-            .into()
-        })
+            .into()),
+            resolution @ Resolution::Ambiguous(_) => Err(Reason::EntityAmbiguous(
+                resolution.describe_failure(&address, file_path),
+            )
+            .into()),
+        }
+    }
+
+    /// Derive the enclosing entity's display name from its ID.
+    ///
+    /// Private mirror of `weave_crdt::resolve`'s internal `parent_name_of`,
+    /// needed here to apply `parent_name` filters to graph nodes during the
+    /// repo-wide fallback below (parent IDs look like
+    /// `src/lib.rs::class::Animal`, with optional disambiguator suffixes such
+    /// as `Animal@L1#1`).
+    fn fallback_parent_name_of(entity: &EntityInfo) -> Option<String> {
+        let parent_id = entity.parent_id.as_deref()?;
+        let last = parent_id.rsplit("::").next().unwrap_or(parent_id);
+        let name = match last.split_once('@') {
+            Some((name, _)) => name,
+            None => last,
+        };
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+
+    /// Resolve an entity for the read-only graph-analysis tools.
+    ///
+    /// Primary path is the shared single-file resolver
+    /// ([`Self::resolve_entity_sync`]), which refuses ambiguity with a
+    /// candidate-listing error. An in-file [`Reason::EntityAmbiguous`] is
+    /// TERMINAL: the addressed file already has more than one candidate, so
+    /// naming it that precisely is itself sufficient information for the
+    /// caller to narrow with `entity_type`/`parent_name`/`ordinal` — falling
+    /// back to a repo-wide scan here would either re-derive the same
+    /// ambiguity under the misleading label "ambiguous across the repo" (the
+    /// candidates aren't spread across the repo, they're all in this one
+    /// file) or, worse, silently resolve if some other in-repo candidate set
+    /// happened to collapse to a single survivor. Only an in-file `NotFound`
+    /// falls back to scanning every graph node with the same progressive
+    /// filters (the old name-only lookup fell back from file-scoped to
+    /// whole-graph too) — again never picking first: multiple survivors are
+    /// an error listing each candidate (with its file), and `ordinal` indexes
+    /// survivors in deterministic (file path, start line) order. If nothing
+    /// matches anywhere, the resolver's original `NotFound` is surfaced. An
+    /// in-file resolution that already succeeded is trusted outright and
+    /// never overridden by the repo-wide scan — the addressed file is
+    /// sufficient disambiguation on its own.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_entity_for_graph(
+        registry: &ParserRegistry,
+        content: &str,
+        rel_path: &str,
+        graph: &EntityGraph,
+        entity_name: &str,
+        entity_type: Option<&str>,
+        parent_name: Option<&str>,
+        ordinal: Option<u32>,
+    ) -> Result<String, ToolError> {
+        let resolver_result = Self::resolve_entity_sync(
+            registry,
+            content,
+            rel_path,
+            entity_name,
+            entity_type,
+            parent_name,
+            ordinal,
+        );
+
+        // The addressed file already disambiguated the entity — trust it.
+        // Fall back to the repo-wide scan below ONLY when the in-file
+        // resolver found nothing at all (NotFound), so a same-named entity
+        // elsewhere in the repo never overrides an unambiguous in-file
+        // match. An in-file Ambiguous is terminal — never masked as
+        // repo-wide, and never re-collapsed by the graph-wide scan.
+        match resolver_result {
+            Ok(_) => return resolver_result,
+            Err(ToolError {
+                reason: Reason::EntityAmbiguous(_),
+                ..
+            }) => return resolver_result,
+            Err(_) => {}
+        }
+
+        let mut candidates: Vec<&EntityInfo> = graph
+            .entities
+            .values()
+            .filter(|e| e.name == entity_name)
+            .filter(|e| match entity_type {
+                Some(t) => e.entity_type == t,
+                None => true,
+            })
+            .filter(|e| match parent_name {
+                Some(p) => Self::fallback_parent_name_of(e).as_deref() == Some(p),
+                None => true,
+            })
+            .collect();
+        candidates.sort_by(|a, b| {
+            (&a.file_path, a.start_line, &a.id).cmp(&(&b.file_path, b.start_line, &b.id))
+        });
+
+        match candidates.len() {
+            0 => resolver_result,
+            // Unambiguous repo-wide: keep the historical cross-file lookup.
+            1 => Ok(candidates[0].id.clone()),
+            _ => {
+                if let Some(o) = ordinal {
+                    return candidates
+                        .get(o as usize)
+                        .map(|e| e.id.clone())
+                        .ok_or_else(|| {
+                            Reason::EntityAmbiguous(format!(
+                                "ordinal {} out of range: {} candidates named '{}' outside '{}'",
+                                o,
+                                candidates.len(),
+                                entity_name,
+                                rel_path
+                            ))
+                            .into()
+                        });
+                }
+                let type_q = entity_type.unwrap_or("<any>");
+                let parent_q = parent_name.unwrap_or("<any>");
+                let mut msg = format!(
+                    "Entity '{}' (type=`{}`, parent=`{}`) is ambiguous across the repo: \
+                     {} candidates match.\nCandidates (repo order):",
+                    entity_name,
+                    type_q,
+                    parent_q,
+                    candidates.len()
+                );
+                for c in candidates {
+                    msg.push_str(&format!(
+                        "\n  {} `{}` in `{}` (parent: {}) at line {}",
+                        c.entity_type,
+                        c.name,
+                        c.file_path,
+                        Self::fallback_parent_name_of(c)
+                            .as_deref()
+                            .unwrap_or("<none>"),
+                        c.start_line
+                    ));
+                }
+                msg.push_str(
+                    "\nDisambiguate by adding one of: entity_type, parent_name, or \
+                     ordinal (0-based, see list above), or point file_path at the \
+                     file containing the entity.",
+                );
+                Err(Reason::EntityAmbiguous(msg).into())
+            }
+        }
     }
 
     /// Extract entities with LRU caching. Cache hit skips tree-sitter parse entirely.
@@ -300,8 +471,15 @@ impl WeaveServer {
         let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
-        let entity_id =
-            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)?;
+        let entity_id = Self::resolve_entity_sync(
+            &self.registry,
+            &content,
+            &rel_path,
+            &params.entity_name,
+            params.entity_type.as_deref(),
+            params.parent_name.as_deref(),
+            params.ordinal,
+        )?;
 
         let mut state = ctx.state.lock().await;
         let entities = self.cached_extract_entities(&content, &rel_path).await;
@@ -398,8 +576,15 @@ impl WeaveServer {
         let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
-        let entity_id =
-            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)?;
+        let entity_id = Self::resolve_entity_sync(
+            &self.registry,
+            &content,
+            &rel_path,
+            &params.entity_name,
+            params.entity_type.as_deref(),
+            params.parent_name.as_deref(),
+            params.ordinal,
+        )?;
 
         let mut state = ctx.state.lock().await;
         release_entity(&mut state, &params.agent_id, &entity_id).map_err(internal_err)?;
@@ -466,8 +651,15 @@ impl WeaveServer {
         let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
-        let entity_id =
-            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)?;
+        let entity_id = Self::resolve_entity_sync(
+            &self.registry,
+            &content,
+            &rel_path,
+            &params.entity_name,
+            params.entity_type.as_deref(),
+            params.parent_name.as_deref(),
+            params.ordinal,
+        )?;
 
         let state = ctx.state.lock().await;
         match get_entity_status(&state, &entity_id) {
@@ -671,30 +863,25 @@ impl WeaveServer {
         Parameters(params): Parameters<EntityDepsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = self.get_context(Some(&params.file_path)).await?;
-        let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let content = Self::read_file_at(&abs_path, &rel_path)?;
 
         // Build graph from all supported files in the repo
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
         let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
 
-        // Find the entity by name in the target file
-        let entity_id = graph
-            .entities
-            .values()
-            .find(|e| e.name == params.entity_name && e.file_path == rel_path)
-            .or_else(|| {
-                graph
-                    .entities
-                    .values()
-                    .find(|e| e.name == params.entity_name)
-            })
-            .map(|e| e.id.clone())
-            .ok_or_else(|| {
-                internal_err(format!(
-                    "Entity '{}' not found in graph",
-                    params.entity_name
-                ))
-            })?;
+        // Shared typed resolver; falls back to a filtered, never-pick-first
+        // repo-wide scan (see resolve_entity_for_graph).
+        let entity_id = Self::resolve_entity_for_graph(
+            &self.registry,
+            &content,
+            &rel_path,
+            &graph,
+            &params.entity_name,
+            params.entity_type.as_deref(),
+            params.parent_name.as_deref(),
+            params.ordinal,
+        )?;
 
         let deps = graph.get_dependencies(&entity_id);
         let result: Vec<serde_json::Value> = deps
@@ -727,28 +914,24 @@ impl WeaveServer {
         Parameters(params): Parameters<EntityDepsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = self.get_context(Some(&params.file_path)).await?;
-        let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let content = Self::read_file_at(&abs_path, &rel_path)?;
 
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
         let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
 
-        let entity_id = graph
-            .entities
-            .values()
-            .find(|e| e.name == params.entity_name && e.file_path == rel_path)
-            .or_else(|| {
-                graph
-                    .entities
-                    .values()
-                    .find(|e| e.name == params.entity_name)
-            })
-            .map(|e| e.id.clone())
-            .ok_or_else(|| {
-                internal_err(format!(
-                    "Entity '{}' not found in graph",
-                    params.entity_name
-                ))
-            })?;
+        // Shared typed resolver; falls back to a filtered, never-pick-first
+        // repo-wide scan (see resolve_entity_for_graph).
+        let entity_id = Self::resolve_entity_for_graph(
+            &self.registry,
+            &content,
+            &rel_path,
+            &graph,
+            &params.entity_name,
+            params.entity_type.as_deref(),
+            params.parent_name.as_deref(),
+            params.ordinal,
+        )?;
 
         let deps = graph.get_dependents(&entity_id);
         let result: Vec<serde_json::Value> = deps
@@ -781,28 +964,24 @@ impl WeaveServer {
         Parameters(params): Parameters<ImpactAnalysisParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = self.get_context(Some(&params.file_path)).await?;
-        let (rel_path, _abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
+        let content = Self::read_file_at(&abs_path, &rel_path)?;
 
         let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
         let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
 
-        let entity_id = graph
-            .entities
-            .values()
-            .find(|e| e.name == params.entity_name && e.file_path == rel_path)
-            .or_else(|| {
-                graph
-                    .entities
-                    .values()
-                    .find(|e| e.name == params.entity_name)
-            })
-            .map(|e| e.id.clone())
-            .ok_or_else(|| {
-                internal_err(format!(
-                    "Entity '{}' not found in graph",
-                    params.entity_name
-                ))
-            })?;
+        // Shared typed resolver; falls back to a filtered, never-pick-first
+        // repo-wide scan (see resolve_entity_for_graph).
+        let entity_id = Self::resolve_entity_for_graph(
+            &self.registry,
+            &content,
+            &rel_path,
+            &graph,
+            &params.entity_name,
+            params.entity_type.as_deref(),
+            params.parent_name.as_deref(),
+            params.ordinal,
+        )?;
 
         let impact = graph.impact_analysis(&entity_id);
         let result: Vec<serde_json::Value> = impact
@@ -1209,6 +1388,9 @@ impl WeaveServer {
 
                 // Find entities modified in ours or theirs vs base
                 for entity in ours_entities.iter().chain(theirs_entities.iter()) {
+                    // Internal diff plumbing, not user-addressed: both sides enumerate
+                    // the file's entities across revisions, so there is no user-supplied
+                    // address for the resolver.
                     let base_match = base_entities.iter().find(|b| b.name == entity.name);
                     // No match in base means a new entity, so treat it as modified.
                     let is_modified =
@@ -1272,8 +1454,15 @@ impl WeaveServer {
         let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
-        let entity_id =
-            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)?;
+        let entity_id = Self::resolve_entity_sync(
+            &self.registry,
+            &content,
+            &rel_path,
+            &params.entity_name,
+            params.entity_type.as_deref(),
+            params.parent_name.as_deref(),
+            params.ordinal,
+        )?;
 
         // Compute content hash
         let hash = format!("{:x}", content_hash_u64(&params.content));
@@ -1327,8 +1516,15 @@ impl WeaveServer {
         let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
-        let entity_id =
-            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)?;
+        let entity_id = Self::resolve_entity_sync(
+            &self.registry,
+            &content,
+            &rel_path,
+            &params.entity_name,
+            params.entity_type.as_deref(),
+            params.parent_name.as_deref(),
+            params.ordinal,
+        )?;
 
         let state = ctx.state.lock().await;
         match get_entity_content(&state, &entity_id) {
@@ -1406,8 +1602,15 @@ impl WeaveServer {
         let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
-        let entity_id =
-            Self::resolve_entity_sync(&self.registry, &content, &rel_path, &params.entity_name)?;
+        let entity_id = Self::resolve_entity_sync(
+            &self.registry,
+            &content,
+            &rel_path,
+            &params.entity_name,
+            params.entity_type.as_deref(),
+            params.parent_name.as_deref(),
+            params.ordinal,
+        )?;
 
         let hash = format!("{:x}", content_hash_u64(&params.resolved_content));
 
@@ -1454,6 +1657,205 @@ impl ServerHandler for WeaveServer {
 
 fn internal_err(msg: impl ToString) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(msg.to_string(), None)
+}
+
+#[cfg(test)]
+mod resolve_entity_for_graph_tests {
+    use super::*;
+    use std::fs;
+
+    /// Writes `files` (relative path -> content) under a fresh temp dir and
+    /// returns the root. Each test gets its own directory (PID + a counter)
+    /// so parallel `cargo test` runs never collide.
+    fn write_fixture(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "weave-mcp-resolve-graph-test-{}-{}-{}",
+            std::process::id(),
+            name,
+            n
+        ));
+        fs::create_dir_all(&root).expect("create fixture dir");
+        for (rel, content) in files {
+            let path = root.join(rel);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create fixture subdir");
+            }
+            fs::write(&path, content).expect("write fixture file");
+        }
+        root
+    }
+
+    /// An entity that is perfectly unambiguous WITHIN its own file must
+    /// resolve to that file's entity, even when a same-named entity exists
+    /// elsewhere in the repo. Specifying `file_path` is supposed to be
+    /// sufficient disambiguation on its own — the repo-wide fallback exists
+    /// only for entities the in-file resolver could not find at all.
+    #[test]
+    fn in_file_unambiguous_match_wins_over_cross_file_namesake() {
+        let root = write_fixture(
+            "namesake",
+            &[
+                ("a.ts", "function helper(): string {\n  return \"a\";\n}\n"),
+                ("b.ts", "function helper(): string {\n  return \"b\";\n}\n"),
+            ],
+        );
+
+        let registry = create_default_registry();
+        let file_paths = vec!["a.ts".to_string(), "b.ts".to_string()];
+        let (graph, _entities) = EntityGraph::build(&root, &file_paths, &registry);
+
+        let content_a = fs::read_to_string(root.join("a.ts")).unwrap();
+
+        let result = WeaveServer::resolve_entity_for_graph(
+            &registry, &content_a, "a.ts", &graph, "helper", None, None, None,
+        );
+
+        let expected_id = graph
+            .entities
+            .values()
+            .find(|e| e.name == "helper" && e.file_path == "a.ts")
+            .map(|e| e.id.clone())
+            .expect("fixture entity must be in the graph");
+
+        match result {
+            Ok(id) => assert_eq!(
+                id, expected_id,
+                "an entity unambiguous within the addressed file must resolve to it, \
+                 not be reported ambiguous just because a same-named entity exists \
+                 in a different file"
+            ),
+            Err(e) => panic!(
+                "expected Ok({expected_id}), got Err({e}) — an entity unambiguous within \
+                 the addressed file must resolve to it, not be reported ambiguous just \
+                 because a same-named entity exists in a different file"
+            ),
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// When the addressed file has no entity of that name at all, the
+    /// historical repo-wide lookup still kicks in and resolves it if it's
+    /// unique elsewhere in the repo.
+    #[test]
+    fn falls_back_repo_wide_when_absent_from_target_file() {
+        let root = write_fixture(
+            "fallback-unique",
+            &[
+                ("a.ts", "function onlyInA(): string {\n  return \"a\";\n}\n"),
+                (
+                    "b.ts",
+                    "function elsewhereOnly(): string {\n  return \"b\";\n}\n",
+                ),
+            ],
+        );
+
+        let registry = create_default_registry();
+        let file_paths = vec!["a.ts".to_string(), "b.ts".to_string()];
+        let (graph, _entities) = EntityGraph::build(&root, &file_paths, &registry);
+        let content_a = fs::read_to_string(root.join("a.ts")).unwrap();
+
+        let result = WeaveServer::resolve_entity_for_graph(
+            &registry,
+            &content_a,
+            "a.ts",
+            &graph,
+            "elsewhereOnly",
+            None,
+            None,
+            None,
+        );
+
+        let expected_id = graph
+            .entities
+            .values()
+            .find(|e| e.name == "elsewhereOnly")
+            .map(|e| e.id.clone())
+            .expect("fixture entity must be in the graph");
+
+        assert_eq!(result.unwrap(), expected_id);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// When the addressed file has no entity of that name, and the name is
+    /// ambiguous elsewhere in the repo, the fallback refuses to pick first.
+    #[test]
+    fn repo_wide_fallback_refuses_ambiguity() {
+        let root = write_fixture(
+            "fallback-ambiguous",
+            &[
+                ("a.ts", "function onlyInA(): string {\n  return \"a\";\n}\n"),
+                ("b.ts", "function dup(): string {\n  return \"b\";\n}\n"),
+                ("c.ts", "function dup(): string {\n  return \"c\";\n}\n"),
+            ],
+        );
+
+        let registry = create_default_registry();
+        let file_paths = vec!["a.ts".to_string(), "b.ts".to_string(), "c.ts".to_string()];
+        let (graph, _entities) = EntityGraph::build(&root, &file_paths, &registry);
+        let content_a = fs::read_to_string(root.join("a.ts")).unwrap();
+
+        let result = WeaveServer::resolve_entity_for_graph(
+            &registry, &content_a, "a.ts", &graph, "dup", None, None, None,
+        );
+
+        let Err(e) = result else {
+            panic!("expected ambiguous error, got {result:?}");
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("ambiguous across the repo"), "{msg}");
+        assert!(msg.contains("b.ts") && msg.contains("c.ts"), "{msg}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Ambiguity that exists PURELY within the addressed file (no cross-file
+    /// duplicate at all, and the file is the only one in the graph) must be
+    /// reported as an in-file ambiguity — naming the file and listing both
+    /// candidates with their parents — and must NOT fall through to the
+    /// repo-wide scan and come back mislabeled "ambiguous across the repo"
+    /// when both candidates are actually in that one file.
+    #[test]
+    fn in_file_ambiguity_is_terminal_and_not_mislabeled_as_repo_wide() {
+        let root = write_fixture(
+            "in-file-only-ambiguous",
+            &[(
+                "dup.ts",
+                "class Animal {\n  run(): string { return \"a\"; }\n}\n\nclass Robot {\n  run(): string { return \"r\"; }\n}\n",
+            )],
+        );
+
+        let registry = create_default_registry();
+        let file_paths = vec!["dup.ts".to_string()];
+        let (graph, _entities) = EntityGraph::build(&root, &file_paths, &registry);
+        let content = fs::read_to_string(root.join("dup.ts")).unwrap();
+
+        let result = WeaveServer::resolve_entity_for_graph(
+            &registry, &content, "dup.ts", &graph, "run", None, None, None,
+        );
+
+        let Err(e) = result else {
+            panic!("expected ambiguous error, got {result:?}");
+        };
+        let msg = e.to_string();
+        assert!(
+            !msg.contains("ambiguous across the repo"),
+            "in-file-only ambiguity must not be labeled repo-wide: {msg}"
+        );
+        assert!(
+            msg.contains("dup.ts"),
+            "message should name the file: {msg}"
+        );
+        assert!(
+            msg.contains("Animal") && msg.contains("Robot"),
+            "both candidates' parents should be listed: {msg}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]

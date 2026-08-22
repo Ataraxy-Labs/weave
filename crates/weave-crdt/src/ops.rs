@@ -410,10 +410,10 @@ pub fn detect_potential_conflicts(state: &EntityStateDoc) -> Result<Vec<Potentia
         // Read EVERY claimant automerge holds, not the single one `get` picks:
         // two agents on two replicas each told `Claimed` for one entity leave
         // two concurrent `claimed_by` values, and reporting only the tiebreak
-        // winner is how the loser's contest became invisible (weave-dir). With
-        // all values, a two-claimant entity surfaces here as the collision the
-        // claim layer exists to catch, and the agent that lost has a door to
-        // learn it through.
+        // winner is how the loser's contest became invisible. With all values,
+        // a two-claimant entity surfaces here as the collision the claim layer
+        // exists to catch, and the agent that lost has a door to learn it
+        // through.
         for claimed_by in get_all_str(&state.doc, &entity_obj, "claimed_by") {
             let agents_list = entity_agents.entry(ek.clone()).or_default();
             if !agents_list.contains(&claimed_by) {

@@ -3768,3 +3768,53 @@ fn no_co_change_advisory_when_only_one_side_changes_a_member() {
         result.warnings
     );
 }
+
+// =============================================================================
+// The statement fold's gap-addition anchoring was a base-index constant, not
+// a within-gap position — an inserted statement that follows an EDITED
+// (fuzzy-matched, not exact-key) statement in the same LCS gap was spliced in
+// BEFORE that statement instead of after it. Reported clean, no conflict
+// markers. Fixed in crates/weave-core/src/statement.rs `align`, the
+// `additions.push(...)` line: an addition now anchors after the last matched
+// statement it textually follows in the gap, not before the whole gap.
+// =============================================================================
+
+#[test]
+fn statement_fold_does_not_splice_an_insertion_before_the_binding_it_reads() {
+    // theirs both EDITS `let (a, b) = f();` (a fuzzy match, not an exact key
+    // match, so it does NOT become an LCS anchor against base) AND INSERTS a
+    // new statement `let c = h(a, b);` immediately after it, in the same gap.
+    // ours edits the unrelated `g(a, b);` call only, so the merge takes the
+    // real 3-way fold instead of the trivial `base == ours` fast path.
+    let base = "fn m() {\n    let (a, b) = f();\n    g(a, b);\n}\n";
+    let ours = "fn m() {\n    let (a, b) = f();\n    g(a, b)?;\n}\n";
+    let theirs = "fn m() {\n    let (a, b) = f2();\n    let c = h(a, b);\n    g(a, b);\n}\n";
+
+    let result = entity_merge(base, ours, theirs, "probe.rs");
+
+    // A correct merge either (a) keeps `let c = h(a, b);` after the `let
+    // (a, b) = f2();` that defines the names it reads, wherever else it moves
+    // the surrounding code, or (b) refuses and reports a conflict instead of
+    // guessing. What it must never do is silently emit `c`'s binding before
+    // `a`/`b` exist — that is not a merge of either side's program, it is a
+    // third program neither side wrote and the compiler will reject.
+    if result.is_clean() {
+        let idx_let = result
+            .content
+            .find("let (a, b) = f2();")
+            .expect("theirs' edited binding should survive the merge");
+        let idx_c = result
+            .content
+            .find("let c = h(a, b);")
+            .expect("theirs' inserted statement should survive the merge");
+        assert!(
+            idx_c > idx_let,
+            "the insertion that reads `a, b` must not be placed before the \
+             statement that binds them — no silent use-before-define. \
+             Merged content:\n{}",
+            result.content
+        );
+    }
+    // else: a reported conflict is an acceptable, honest outcome here — the
+    // bug this test guards is the SILENT misordering, not "refuses to merge".
+}

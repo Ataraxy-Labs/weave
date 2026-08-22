@@ -1,7 +1,10 @@
 use colored::Colorize;
 use sem_core::parser::plugins::create_default_registry;
 use weave_core::git::find_repo_root;
-use weave_crdt::{claim_entity, resolve_entity_id, upsert_entity, ClaimResult, EntityStateDoc};
+use weave_crdt::{
+    claim_entity, resolve_entity_or_error, upsert_entity, ClaimResult, EntityAddress,
+    EntityStateDoc,
+};
 
 pub(crate) fn run(
     agent_id: &str,
@@ -16,9 +19,10 @@ pub(crate) fn run(
     // Read file content
     let content = std::fs::read_to_string(repo_root.join(file_path))?;
 
-    // Resolve entity name to ID
-    let entity_id = resolve_entity_id(&content, file_path, entity_name, &registry)
-        .ok_or_else(|| format!("Entity '{}' not found in '{}'", entity_name, file_path))?;
+    // Resolve entity name to ID (ambiguous names are an error, never pick-first)
+    let address = EntityAddress::by_name(entity_name);
+    let entity_id = resolve_entity_or_error(&content, file_path, &registry, &address)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     // Ensure entity exists in state
     let plugin = registry

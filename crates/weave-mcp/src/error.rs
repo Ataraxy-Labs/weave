@@ -37,9 +37,10 @@ impl ToolError {
     /// else is not.
     pub fn is_callers_fault(&self) -> bool {
         match &self.reason {
-            Reason::NoRepository | Reason::EntityNotFound { .. } | Reason::Unreadable { .. } => {
-                true
-            }
+            Reason::NoRepository
+            | Reason::EntityNotFound { .. }
+            | Reason::EntityAmbiguous(_)
+            | Reason::Unreadable { .. } => true,
             // A git query in this server always runs over refs and paths the
             // caller named, so git declining to resolve one is a mistake the
             // caller can fix by asking differently (a real ref, a fetched
@@ -94,6 +95,15 @@ pub enum Reason {
     /// The named entity is not in the named file.
     #[error("entity '{entity}' not found in '{file}'")]
     EntityNotFound { entity: String, file: String },
+
+    /// The named entity matched more than one candidate (in the addressed
+    /// file, or — for tools that also search the whole repo when the file
+    /// has no match — repo-wide). The message already lists every candidate
+    /// and names which address field (`entity_type`, `parent_name`,
+    /// `ordinal`) would narrow it to one; see
+    /// [`weave_crdt::Resolution::describe_failure`].
+    #[error("{0}")]
+    EntityAmbiguous(String),
 }
 
 impl Reason {

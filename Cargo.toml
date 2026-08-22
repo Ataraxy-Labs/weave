@@ -17,3 +17,8 @@ resolver = "2"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# The perf-fork patch that used to sit here (sem-core 0.21.0 plus a local
+# path-based override) is retired: the speedup it carried shipped upstream in
+# sem 0.22. All crates now depend on published sem-core 0.23.0 directly (see
+# crates/weave-core/Cargo.toml).
