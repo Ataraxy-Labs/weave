@@ -276,8 +276,16 @@ pub(crate) fn render(
         }
         out.push_str(footer);
     }
+    // A side with no entities keys its entire content as `file_only`. When
+    // the interstitial merge kept that text, it is text some version wrote —
+    // it must survive whether or not entities were rendered above it. Gating
+    // this on `items.is_empty()` dropped shared top-level statements, with
+    // exit 0, whenever any entity survived alongside them (#148).
     if let Some(only) = interstitials.merged.get("file_only") {
-        if items.is_empty() {
+        if !only.is_empty() {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
             out.push_str(only);
         }
     }
