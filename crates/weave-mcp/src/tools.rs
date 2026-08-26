@@ -52,6 +52,10 @@ pub(crate) struct ReleaseEntityParams {
     #[schemars(description = "Name of the entity to release")]
     pub entity_name: String,
     #[schemars(
+        description = "Optional: the entity_id returned by weave_claim_entity. Addresses the claim directly, independent of the entity's current name — a rename between claim and release does not break it. When present, name-based resolution is skipped entirely."
+    )]
+    pub entity_id: Option<String>,
+    #[schemars(
         description = "Optional: entity kind to disambiguate same-named entities (e.g. 'function', 'class', 'method')"
     )]
     pub entity_type: Option<String>,
@@ -228,6 +232,10 @@ pub(crate) struct UpdateEntityContentParams {
     pub entity_name: String,
     #[schemars(description = "New source code content for the entity")]
     pub content: String,
+    #[schemars(
+        description = "Optional: the entity_id returned by weave_claim_entity. Addresses the claim directly, independent of the entity's current name — a rename between claim and update does not break it. When present, name-based resolution is skipped entirely."
+    )]
+    pub entity_id: Option<String>,
     #[schemars(
         description = "Optional: entity kind to disambiguate same-named entities (e.g. 'function', 'class', 'method')"
     )]

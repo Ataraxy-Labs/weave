@@ -558,6 +558,12 @@ impl WeaveServer {
 
         let response = serde_json::json!({
             "result": serde_json::to_value(&result).unwrap_or_default(),
+            // The claim's own stable identity. Pass it back to
+            // weave_update_entity_content / weave_release_entity to address
+            // the claim directly — a rename of the entity between claim and
+            // update/release makes the *name* unresolvable against the file's
+            // current content, but never invalidates this id.
+            "entity_id": entity_id,
             "dependency_warnings": dep_warnings,
         });
 
@@ -576,15 +582,22 @@ impl WeaveServer {
         let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
-        let entity_id = Self::resolve_entity_sync(
-            &self.registry,
-            &content,
-            &rel_path,
-            &params.entity_name,
-            params.entity_type.as_deref(),
-            params.parent_name.as_deref(),
-            params.ordinal,
-        )?;
+        // The entity_id from weave_claim_entity addresses the claim directly —
+        // name resolution runs against the file's *current* content, so a
+        // rename between claim and release would make the old name
+        // unresolvable even though the claim is still held.
+        let entity_id = match params.entity_id {
+            Some(id) => id,
+            None => Self::resolve_entity_sync(
+                &self.registry,
+                &content,
+                &rel_path,
+                &params.entity_name,
+                params.entity_type.as_deref(),
+                params.parent_name.as_deref(),
+                params.ordinal,
+            )?,
+        };
 
         let mut state = ctx.state.lock().await;
         release_entity(&mut state, &params.agent_id, &entity_id).map_err(internal_err)?;
@@ -1454,15 +1467,22 @@ impl WeaveServer {
         let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
-        let entity_id = Self::resolve_entity_sync(
-            &self.registry,
-            &content,
-            &rel_path,
-            &params.entity_name,
-            params.entity_type.as_deref(),
-            params.parent_name.as_deref(),
-            params.ordinal,
-        )?;
+        // The entity_id from weave_claim_entity addresses the claim directly —
+        // name resolution runs against the file's *current* content, so a
+        // rename between claim and update would make the old name
+        // unresolvable even though the claim is still held.
+        let entity_id = match params.entity_id {
+            Some(ref id) => id.clone(),
+            None => Self::resolve_entity_sync(
+                &self.registry,
+                &content,
+                &rel_path,
+                &params.entity_name,
+                params.entity_type.as_deref(),
+                params.parent_name.as_deref(),
+                params.ordinal,
+            )?,
+        };
 
         // Compute content hash
         let hash = format!("{:x}", content_hash_u64(&params.content));
@@ -1947,6 +1967,162 @@ mod description_tests {
             names.len(),
             22,
             "tool count changed ({names:?}) — update SKILL.md/README/docs/llms.txt in the same commit"
+        );
+    }
+}
+
+#[cfg(test)]
+mod claim_by_id_tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    /// A fresh git repo per test (PID + counter, same isolation convention as
+    /// `resolve_entity_for_graph_tests::write_fixture`) — the handlers
+    /// discover the repo root from the absolute file path, so no env vars.
+    fn git_fixture(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "weave-mcp-claim-by-id-test-{}-{}-{}",
+            std::process::id(),
+            name,
+            n
+        ));
+        fs::create_dir_all(&root).expect("create fixture dir");
+        let ok = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .status()
+            .expect("run git init")
+            .success();
+        assert!(ok, "git init failed");
+        for (rel, content) in files {
+            fs::write(root.join(rel), content).expect("write fixture file");
+        }
+        root
+    }
+
+    fn text_of(result: &CallToolResult) -> String {
+        result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap_or_default()
+    }
+
+    const ORIGINAL: &str = "function foo(): string {\n  return \"x\";\n}\n";
+    const RENAMED: &str = "function bar(): string {\n  return \"x\";\n}\n";
+
+    /// Claim `foo`, capture the entity_id from the response, rename the
+    /// entity on disk. The claim-time id must keep addressing the claim:
+    /// update + release by entity_id succeed where the stale name cannot.
+    #[tokio::test]
+    async fn update_and_release_by_entity_id_survive_a_rename() {
+        let root = git_fixture("survives-rename", &[("a.ts", ORIGINAL)]);
+        let abs = root.join("a.ts").to_string_lossy().to_string();
+        let server = WeaveServer::new();
+
+        let claim = server
+            .weave_claim_entity(Parameters(ClaimEntityParams {
+                agent_id: "agent-1".into(),
+                file_path: abs.clone(),
+                entity_name: "foo".into(),
+                entity_type: None,
+                parent_name: None,
+                ordinal: None,
+            }))
+            .await
+            .expect("claim succeeds");
+        let claim_json: serde_json::Value =
+            serde_json::from_str(&text_of(&claim)).expect("claim response is json");
+        let entity_id = claim_json["entity_id"]
+            .as_str()
+            .expect("claim response carries entity_id")
+            .to_string();
+
+        // The rename that breaks name-based resolution.
+        fs::write(root.join("a.ts"), RENAMED).expect("rename on disk");
+
+        let update = server
+            .weave_update_entity_content(Parameters(UpdateEntityContentParams {
+                agent_id: "agent-1".into(),
+                file_path: abs.clone(),
+                entity_name: "foo".into(), // stale — the id must win
+                content: RENAMED.into(),
+                entity_id: Some(entity_id.clone()),
+                entity_type: None,
+                parent_name: None,
+                ordinal: None,
+            }))
+            .await;
+        assert!(
+            update.is_ok(),
+            "update by entity_id must survive the rename, got: {:?}",
+            update.err()
+        );
+
+        let release = server
+            .weave_release_entity(Parameters(ReleaseEntityParams {
+                agent_id: "agent-1".into(),
+                file_path: abs,
+                entity_name: "foo".into(), // stale — the id must win
+                entity_id: Some(entity_id),
+                entity_type: None,
+                parent_name: None,
+                ordinal: None,
+            }))
+            .await;
+        assert!(
+            release.is_ok(),
+            "release by entity_id must survive the rename, got: {:?}",
+            release.err()
+        );
+    }
+
+    /// Pins today's name-based behavior: without entity_id, a rename between
+    /// claim and update/release makes the old name unresolvable and the call
+    /// fails with an entity-not-found error. This is the failure the
+    /// entity_id parameter exists to remove — kept as the contract for
+    /// callers that only send entity_name.
+    #[tokio::test]
+    async fn stale_name_still_fails_after_a_rename() {
+        let root = git_fixture("stale-name", &[("a.ts", ORIGINAL)]);
+        let abs = root.join("a.ts").to_string_lossy().to_string();
+        let server = WeaveServer::new();
+
+        server
+            .weave_claim_entity(Parameters(ClaimEntityParams {
+                agent_id: "agent-1".into(),
+                file_path: abs.clone(),
+                entity_name: "foo".into(),
+                entity_type: None,
+                parent_name: None,
+                ordinal: None,
+            }))
+            .await
+            .expect("claim succeeds");
+
+        fs::write(root.join("a.ts"), RENAMED).expect("rename on disk");
+
+        let update = server
+            .weave_update_entity_content(Parameters(UpdateEntityContentParams {
+                agent_id: "agent-1".into(),
+                file_path: abs,
+                entity_name: "foo".into(),
+                content: RENAMED.into(),
+                entity_id: None,
+                entity_type: None,
+                parent_name: None,
+                ordinal: None,
+            }))
+            .await;
+        let err = update.expect_err("stale name must not resolve after a rename");
+        assert!(
+            err.message.contains("not found"),
+            "expected an entity-not-found error, got: {}",
+            err.message
         );
     }
 }
