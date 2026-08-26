@@ -60,14 +60,33 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-latest
             cross: true
+          # linux-gnu binaries bake in the build host's glibc: ubuntu-latest
+          # (24.04, glibc 2.39) emits pidfd_getpid/pidfd_spawnp references
+          # that abort loading on older distros. Pin to the oldest supported
+          # LTS runner so the artifacts keep a glibc 2.35 floor.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             cross: false
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             cross: true
             cross_package: gcc-aarch64-linux-gnu
             cross_linker: aarch64-linux-gnu-gcc
+          # Fully static musl builds: no glibc dependency at all.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+            cross: true
+            cross_package: musl-tools
+            cross_linker: musl-gcc
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-22.04
+            cross: true
+            cross_package: gcc-aarch64-linux-gnu
+            cross_linker: aarch64-linux-gnu-gcc
+            # No aarch64 musl gcc in the Ubuntu archive: link with the gnu
+            # cross gcc and let rustc supply musl's own crt/libc objects.
+            self_contained_linker: true
+            target_cc: aarch64-linux-gnu-gcc
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             cross: true
@@ -94,6 +113,15 @@ jobs:
           mkdir -p ~/.cargo
           echo "[target.${{ matrix.target }}]" >> ~/.cargo/config.toml
           echo "linker = \"${{ matrix.cross_linker }}\"" >> ~/.cargo/config.toml
+          if [ "${{ matrix.self_contained_linker }}" = "true" ]; then
+            echo 'rustflags = ["-C", "link-self-contained=yes"]' >> ~/.cargo/config.toml
+          fi
+          if [ -n "${{ matrix.target_cc }}" ]; then
+            target_env="${{ matrix.target }}"
+            cc="${{ matrix.target_cc }}"
+            echo "CC_${target_env//-/_}=${cc}" >> "$GITHUB_ENV"
+            echo "AR_${target_env//-/_}=${cc%-gcc}-ar" >> "$GITHUB_ENV"
+          fi
 
       - name: Build weave-mcp
         run: cargo build --release --target ${{ matrix.target }} --bin weave-mcp ${{ matrix.cross && '--features vendored-openssl' || '' }}
