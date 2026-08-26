@@ -7,6 +7,12 @@ Versions are shared across every crate in the workspace and the npm package,
 so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 `weave-github` and `@ataraxy-labs/weave` all move together.
 
+## 0.5.3
+
+### Fixed
+
+- Renaming an entity between claiming it and updating or releasing that claim used to break coordination: `weave_update_entity_content` and `weave_release_entity` resolved the entity by name against the file's *current* content, so a rename in between made the old name unresolvable — the call failed with "entity not found" even though the claim was still held. `weave_claim_entity`'s response now includes an `entity_id`, the claim's own stable identity. Pass it to `weave_update_entity_content` or `weave_release_entity` and they address the claim directly, independent of whatever the entity is named now. Existing callers that only send `entity_name` are unaffected — resolution falls back to exactly today's behavior when `entity_id` is omitted.
+
 ## 0.5.2
 
 sem-core bumped to 0.23.0. Entity identity and ids are unchanged for merges —
