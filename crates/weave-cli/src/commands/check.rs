@@ -94,9 +94,10 @@ fn working_tree(json: bool) -> R<()> {
     let Some(scope) = gitscan::merge_scope(dir)? else {
         // Not an error, and emphatically not silence.
         println!(
-            "weave check: no merge in progress (no MERGE_HEAD) and HEAD is not a merge \
-             commit, so there is no three-way context to verify a resolution against. \
-             NOTHING WAS CHECKED — this is not a clean bill of health."
+            "weave check: no merge, rebase, or cherry-pick in progress (no MERGE_HEAD, \
+             REBASE_HEAD, or CHERRY_PICK_HEAD) and HEAD is not a merge commit, so there is \
+             no three-way context to verify a resolution against. NOTHING WAS CHECKED — this \
+             is not a clean bill of health."
         );
         return Ok(());
     };
