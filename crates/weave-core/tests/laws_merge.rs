@@ -1031,7 +1031,6 @@ fn red_l2b_absorption_bytes_diverge() {
 ///   matcher should be a maximum-weight matching in which name-equality
 ///   strictly dominates body-shape similarity.
 #[test]
-#[ignore = "RED counterexample: TS rename inference duplicates a convergent both-side addition"]
 fn red_l8_ts_rename_steal_duplicates_convergent_add() {
     let b = "export function e0(): number {\n  return 10000;\n}\n\nexport function e1(): number {\n  return 10100;\n}\n";
     let o = "export function e0(): number {\n  return 10000;\n}\n\nexport function e1(): number {\n  return 10100;\n}\n\nexport function ox9(): number {\n  return 40900;\n}\n";
@@ -1079,7 +1078,6 @@ fn red_l8_ts_rename_steal_duplicates_convergent_add() {
 /// STRUCTURE: same root as the other rename-steal REDs — rename inference
 ///   must not outrank exact-name, exact-body cross-side agreement.
 #[test]
-#[ignore = "RED counterexample: TS rename inference fabricates a RenameRename conflict from delete+add"]
 fn red_l5_ts_delete_add_fabricates_rename_rename_conflict() {
     let ts = |ents: &[(&str, u32)]| -> String {
         ents.iter()
@@ -1105,7 +1103,6 @@ fn red_l5_ts_delete_add_fabricates_rename_rename_conflict() {
 }
 
 #[test]
-#[ignore = "RED counterexample: TS rename-steal suppresses an AddedBothDivergent conflict"]
 fn red_l5b_ts_divergent_add_conflict_suppressed() {
     let b = "export function e0(): number {\n  return 10000;\n}\n\nexport function e1(): number {\n  return 10100;\n}\n";
     let o = "export function e0(): number {\n  return 10000;\n}\n\nexport function e1(): number {\n  return 10100;\n}\n\nexport function ox9(): number {\n  return 40900;\n}\n";

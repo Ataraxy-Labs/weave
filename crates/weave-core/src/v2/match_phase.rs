@@ -345,89 +345,68 @@ pub(crate) fn match_phase(arena: Arena, claims: Claims) -> Matching {
     ));
 
     // -- 3. Renames, per side --------------------------------------------
-    for (branch_unspent, pairing) in [
-        (&ours_unspent, &mut pairing_ours),
-        (&theirs_unspent, &mut pairing_theirs),
-    ] {
-        let matched_branch: HashSet<Idx> = pairing.values().map(|(i, _)| *i).collect();
-        let base_left: Vec<Idx> = base_pool
-            .remaining()
-            .into_iter()
-            .filter(|b| !pairing.contains_key(b))
-            .collect();
-        let branch_left: Vec<Idx> = branch_unspent
-            .iter()
-            .copied()
-            .filter(|b| !matched_branch.contains(b))
-            .collect();
-        if base_left.is_empty() || branch_left.is_empty() {
-            continue;
-        }
-
-        // The corroborating evidence, computed once per side from the pairs
-        // identity already settled: a third party that called `old` in base and
-        // calls `new` in the branch is a call site the developer updated.
-        let moves = moved_call_sites(&arena, pairing);
-
-        let mut candidates = Vec::new();
-        candidates.extend(equal_body_candidates(&arena, &base_left, &branch_left));
-        let already: HashSet<Idx> = candidates.iter().map(|c| c.branch).collect();
-        let base_still: Vec<Idx> = base_left
-            .iter()
-            .copied()
-            .filter(|b| !candidates.iter().any(|c| c.base == *b))
-            .collect();
-        let branch_still: Vec<Idx> = branch_left
-            .iter()
-            .copied()
-            .filter(|b| !already.contains(b))
-            .collect();
-        if !base_still.is_empty() && !branch_still.is_empty() {
-            let mut all = base_still.clone();
-            all.extend(branch_still.iter().copied());
-            let tokens = tokens_for(&arena, &all);
-            candidates.extend(signature_candidates(
+    // Run per side from the identity pairing, so a re-run below starts from the
+    // same place this one did.
+    let identity_ours = pairing_ours;
+    let identity_theirs = pairing_theirs;
+    let infer = |reserved_ours: &HashSet<Idx>, reserved_theirs: &HashSet<Idx>| {
+        let mut ours = identity_ours.clone();
+        let mut theirs = identity_theirs.clone();
+        for (branch_unspent, reserved, pairing) in [
+            (&ours_unspent, reserved_ours, &mut ours),
+            (&theirs_unspent, reserved_theirs, &mut theirs),
+        ] {
+            infer_renames(
                 &arena,
-                &tokens,
-                &base_still,
-                &branch_still,
-            ));
-            candidates.extend(short_body_candidates(
-                &arena,
-                &tokens,
-                &base_still,
-                &branch_still,
+                &base_unspent,
+                branch_unspent,
+                reserved,
                 &base_names,
-            ));
-            candidates.extend(corroborated_candidates(
-                &arena,
-                &tokens,
-                &base_still,
-                &branch_still,
-                &moves,
-                &base_names,
-            ));
+                pairing,
+            );
         }
+        (ours, theirs)
+    };
+    let nothing_reserved: HashSet<Idx> = HashSet::new();
+    let (mut pairing_ours, mut pairing_theirs) = infer(&nothing_reserved, &nothing_reserved);
 
-        // Greedy by confidence, ties broken by identity key: deterministic and
-        // independent of file order.
-        candidates.sort_by(|a, b| {
-            b.confidence
-                .partial_cmp(&a.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| arena.get(a.base).key.cmp(&arena.get(b.base).key))
-                .then_with(|| arena.get(a.branch).key.cmp(&arena.get(b.branch).key))
-        });
-        let mut used_base: HashSet<Idx> = pairing.keys().copied().collect();
-        let mut used_branch: HashSet<Idx> = pairing.values().map(|(i, _)| *i).collect();
-        for c in candidates {
-            if used_base.contains(&c.base) || used_branch.contains(&c.branch) {
-                continue;
-            }
-            used_base.insert(c.base);
-            used_branch.insert(c.branch);
-            pairing.insert(c.base, (c.branch, c.link));
+    // -- 3b. Name equality dominates body shape ---------------------------
+    // An addition whose key also appears as an addition on the *other* side is
+    // one entity both sides created, and that agreement — or that contradiction
+    // — is the fact about it. Rename inference is entitled to consume such an
+    // addition only if the *other* side inferred the same rename: then the two
+    // sides agree that one base entity acquired that name, and the pair is a
+    // convergent rename rather than two independent creations.
+    //
+    // Otherwise the inference is a steal. TypeScript bodies share a long
+    // `export function …(): number { return` prefix, so the similarity bar is
+    // trivially cleared and a base entity deleted on one side captured that
+    // side's copy of a both-added name; the other side's copy was then emitted
+    // beside it as a lone addition. That is the same name defined twice in a
+    // merge reported clean and — when the two bodies differed — a real
+    // `AddedBothDivergent` contradiction resolved silently. Forbid those
+    // additions and infer again: name equality outranks body shape.
+    //
+    // The reservation is on the key alone, never on the key *and* body: the
+    // divergent case is exactly the one that must survive to become a conflict.
+    let mut reserved_ours: HashSet<Idx> = HashSet::new();
+    let mut reserved_theirs: HashSet<Idx> = HashSet::new();
+    for (ours_idx, theirs_idx) in convergent_additions(
+        &arena,
+        &identity_ours,
+        &identity_theirs,
+        &ours_unspent,
+        &theirs_unspent,
+    ) {
+        if renamed_from(&pairing_ours, ours_idx) != renamed_from(&pairing_theirs, theirs_idx) {
+            reserved_ours.insert(ours_idx);
+            reserved_theirs.insert(theirs_idx);
         }
+    }
+    if !reserved_ours.is_empty() {
+        let (ours, theirs) = infer(&reserved_ours, &reserved_theirs);
+        pairing_ours = ours;
+        pairing_theirs = theirs;
     }
 
     // -- 4. Build the base-anchored triples -------------------------------
@@ -538,6 +517,145 @@ impl Matching {
 fn key_index(arena: &Arena, idxs: &[Idx]) -> HashMap<Key, Idx> {
     idxs.iter()
         .map(|&i| (arena.get(i).key.clone(), i))
+        .collect()
+}
+
+/// One side's rename pairing, greedily assigned from the candidate stages.
+///
+/// `pairing` comes in carrying the identity pairs and goes out carrying those
+/// plus the renames. `reserved` names branch entities this pass may not
+/// consume — see the name-equality dominance rule in [`match_phase`].
+fn infer_renames(
+    arena: &Arena,
+    base_all: &[Idx],
+    branch_all: &[Idx],
+    reserved: &HashSet<Idx>,
+    base_names: &HashSet<&str>,
+    pairing: &mut HashMap<Idx, (Idx, Link)>,
+) {
+    let matched_branch: HashSet<Idx> = pairing.values().map(|(i, _)| *i).collect();
+    let base_left: Vec<Idx> = base_all
+        .iter()
+        .copied()
+        .filter(|b| !pairing.contains_key(b))
+        .collect();
+    let branch_left: Vec<Idx> = branch_all
+        .iter()
+        .copied()
+        .filter(|b| !matched_branch.contains(b) && !reserved.contains(b))
+        .collect();
+    if base_left.is_empty() || branch_left.is_empty() {
+        return;
+    }
+
+    // The corroborating evidence, computed once per side from the pairs
+    // identity already settled: a third party that called `old` in base and
+    // calls `new` in the branch is a call site the developer updated.
+    let moves = moved_call_sites(arena, pairing);
+
+    let mut candidates = Vec::new();
+    candidates.extend(equal_body_candidates(arena, &base_left, &branch_left));
+    let already: HashSet<Idx> = candidates.iter().map(|c| c.branch).collect();
+    let base_still: Vec<Idx> = base_left
+        .iter()
+        .copied()
+        .filter(|b| !candidates.iter().any(|c| c.base == *b))
+        .collect();
+    let branch_still: Vec<Idx> = branch_left
+        .iter()
+        .copied()
+        .filter(|b| !already.contains(b))
+        .collect();
+    if !base_still.is_empty() && !branch_still.is_empty() {
+        let mut all = base_still.clone();
+        all.extend(branch_still.iter().copied());
+        let tokens = tokens_for(arena, &all);
+        candidates.extend(signature_candidates(
+            arena,
+            &tokens,
+            &base_still,
+            &branch_still,
+        ));
+        candidates.extend(short_body_candidates(
+            arena,
+            &tokens,
+            &base_still,
+            &branch_still,
+            base_names,
+        ));
+        candidates.extend(corroborated_candidates(
+            arena,
+            &tokens,
+            &base_still,
+            &branch_still,
+            &moves,
+            base_names,
+        ));
+    }
+
+    // Greedy by confidence, ties broken by identity key: deterministic and
+    // independent of file order.
+    candidates.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| arena.get(a.base).key.cmp(&arena.get(b.base).key))
+            .then_with(|| arena.get(a.branch).key.cmp(&arena.get(b.branch).key))
+    });
+    let mut used_base: HashSet<Idx> = pairing.keys().copied().collect();
+    let mut used_branch: HashSet<Idx> = pairing.values().map(|(i, _)| *i).collect();
+    for c in candidates {
+        if used_base.contains(&c.base) || used_branch.contains(&c.branch) {
+            continue;
+        }
+        used_base.insert(c.base);
+        used_branch.insert(c.branch);
+        pairing.insert(c.base, (c.branch, c.link));
+    }
+}
+
+/// The base entity a side's pairing says `branch` came from, if any.
+///
+/// Two sides "inferred the same rename" exactly when this answers the same base
+/// entity for their two copies of one name — including answering `None` for
+/// both, which is the case where neither side inferred a rename at all.
+fn renamed_from(pairing: &HashMap<Idx, (Idx, Link)>, branch: Idx) -> Option<Idx> {
+    pairing
+        .iter()
+        .find(|(_, (idx, _))| *idx == branch)
+        .map(|(&base, _)| base)
+}
+
+/// The (ours, theirs) pairs of additions that both sides made under one key.
+///
+/// "Addition" here means exactly what the both-added step means by it: the
+/// entity did not pair with any base entity by identity. Ordered by ours-side
+/// index so the reservation set does not depend on hash iteration order.
+fn convergent_additions(
+    arena: &Arena,
+    pairing_ours: &HashMap<Idx, (Idx, Link)>,
+    pairing_theirs: &HashMap<Idx, (Idx, Link)>,
+    ours_all: &[Idx],
+    theirs_all: &[Idx],
+) -> Vec<(Idx, Idx)> {
+    let paired_ours: HashSet<Idx> = pairing_ours.values().map(|(i, _)| *i).collect();
+    let paired_theirs: HashSet<Idx> = pairing_theirs.values().map(|(i, _)| *i).collect();
+    let theirs_added: Vec<Idx> = theirs_all
+        .iter()
+        .copied()
+        .filter(|i| !paired_theirs.contains(i))
+        .collect();
+    let theirs_by_key = key_index(arena, &theirs_added);
+
+    ours_all
+        .iter()
+        .copied()
+        .filter(|i| !paired_ours.contains(i))
+        .filter_map(|ours_idx| {
+            theirs_by_key
+                .get(&arena.get(ours_idx).key)
+                .map(|&theirs_idx| (ours_idx, theirs_idx))
+        })
         .collect()
 }
 
