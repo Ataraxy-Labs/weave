@@ -282,6 +282,32 @@ fn tokens_for<'a>(arena: &'a Arena, idxs: &[Idx]) -> Tokens<'a> {
         .collect()
 }
 
+/// The same signatures with the DEFINITION line left out.
+///
+/// [`signature_lines`] already states the reason, for re-homes: a definition
+/// line names the entity, so it can never be evidence about identity, and
+/// keeping it puts a floor under every score. The floor is at its worst for a
+/// short body, which is mostly its definition line: two TypeScript one-liners
+/// share `export function …(): number {` and `}` whatever they do, so every
+/// pair of them cleared a 0.7 containment bar on boilerplate alone. That is how
+/// a base entity one side deleted was read as renamed into an unrelated entity
+/// the other side added — and, because a rename is an edit, the deletion came
+/// back as a modify/delete conflict nobody made.
+fn body_tokens_for<'a>(arena: &'a Arena, idxs: &[Idx]) -> Tokens<'a> {
+    idxs.iter()
+        .map(|&i| {
+            let tokens = arena
+                .get(i)
+                .content
+                .lines()
+                .filter(|l| !DEFINERS.iter().any(|kw| l.trim_start().starts_with(kw)))
+                .flat_map(str::split_whitespace)
+                .collect();
+            (i, tokens)
+        })
+        .collect()
+}
+
 /// A proposed base↔branch pairing, with the evidence that supports it.
 struct Candidate {
     base: Idx,
@@ -802,15 +828,21 @@ fn short_body_candidates(
     if base_short.is_empty() || branch_short.is_empty() {
         return Vec::new();
     }
+    // Candidates and containment are both scored on the body alone: the
+    // definition line is boilerplate the language wrote, not evidence anyone
+    // renamed anything. See `body_tokens_for`.
+    let mut all = base_short.clone();
+    all.extend(branch_short.iter().copied());
+    let body_of = body_tokens_for(arena, &all);
     let mut df: HashMap<&str, usize> = HashMap::new();
     for &b in &branch_short {
-        for tok in &tokens_of[&b] {
+        for tok in &body_of[&b] {
             *df.entry(*tok).or_insert(0) += 1;
         }
     }
     let mut index: HashMap<&str, Vec<Idx>> = HashMap::new();
     for &b in &branch_short {
-        for tok in &tokens_of[&b] {
+        for tok in &body_of[&b] {
             if df.get(*tok).copied().unwrap_or(0) <= RARE_DF {
                 index.entry(*tok).or_default().push(b);
             }
@@ -820,7 +852,7 @@ fn short_body_candidates(
     for &b in &base_short {
         let base_e = arena.get(b);
         let mut seen: BTreeSet<Idx> = BTreeSet::new();
-        for tok in &tokens_of[&b] {
+        for tok in &body_of[&b] {
             if let Some(cands) = index.get(*tok) {
                 seen.extend(cands.iter().copied());
             }
@@ -836,8 +868,8 @@ fn short_body_candidates(
             if base_names.contains(cand_e.name()) {
                 continue;
             }
-            let inter = tokens_of[&b].intersection(&tokens_of[&cand]).count();
-            let min = tokens_of[&b].len().min(tokens_of[&cand].len()).max(1);
+            let inter = body_of[&b].intersection(&body_of[&cand]).count();
+            let min = body_of[&b].len().min(body_of[&cand].len()).max(1);
             let containment = inter as f64 / min as f64;
             if containment < SHORT_BODY_MIN_CONTAINMENT {
                 continue;
