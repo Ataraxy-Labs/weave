@@ -909,7 +909,6 @@ fn boundary_pre_conflicted_inputs_are_refused_not_merged() {
 ///   the fix is a reordering (agreement check before the refusal guard),
 ///   which preserves the refusal for every case where the sides disagree.
 #[test]
-#[ignore = "RED counterexample: marker-guard precedes the ours==theirs agreement fast path"]
 fn red_l2_idempotence_defeated_by_marker_bearing_base() {
     let base = "<<<<<<< ours\ndef e0():\n    return 10000\n=======\ndef e0():\n    return 10001\n>>>>>>> theirs\n";
     let x = "def e0():\n    return 20000\n";
