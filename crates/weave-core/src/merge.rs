@@ -362,7 +362,12 @@ pub fn entity_merge_with_registry(
     // already has both edits in it, and it is a file a developer wrote rather
     // than one we composed. See `subsumption.rs` for what "carried" excludes.
     if !is_binary(base) && !is_binary(ours) && !is_binary(theirs) {
-        if let Some(side) = crate::subsumption::subsuming_side(base, ours, theirs) {
+        if let Some(side) = crate::subsumption::subsuming_side(
+            base,
+            ours,
+            theirs,
+            crate::v2::entity_separator(file_path),
+        ) {
             let (content, stats) = match side {
                 crate::subsumption::Superset::Ours => (
                     ours,

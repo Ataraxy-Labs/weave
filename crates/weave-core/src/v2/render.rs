@@ -217,6 +217,22 @@ fn join_gaps<'t>(texts: impl IntoIterator<Item = &'t str>) -> String {
     out
 }
 
+/// Append one entity's text, with the separator that says another follows.
+fn push_entity(out: &mut String, text: &str, separator: Option<&str>) {
+    match separator {
+        Some(sep) if !text.trim_end().ends_with(sep) => {
+            let trimmed = text.trim_end();
+            out.push_str(trimmed);
+            out.push_str(sep);
+            out.push_str(&text[trimmed.len()..]);
+        }
+        _ => out.push_str(text),
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+}
+
 /// Append one gap behind the gaps already joined, on its own line.
 fn append_gap(out: &mut String, gap: &str) {
     if !out.is_empty() && !out.ends_with('\n') {
@@ -255,6 +271,7 @@ pub(crate) fn render(
     resolved: &[Resolved],
     items: &[PlannedItem],
     interstitials: &Interstitials<'_>,
+    member_separator: Option<&str>,
 ) -> String {
     let mut out = String::new();
     // Each interstitial is spent once, the same discipline claims give
@@ -267,17 +284,24 @@ pub(crate) fn render(
         out.push_str(header);
     }
 
+    // Which items actually reach the file, settled before the fold, because the
+    // member separator behind one of them is a fact about whether ANOTHER one
+    // follows it.
+    let emitting: Vec<(&PlannedItem, &str)> = items
+        .iter()
+        .filter_map(|item| match &resolved[item.triple].disposition {
+            Disposition::Emit { text, .. } | Disposition::Conflict { text, .. }
+                if !text.is_empty() =>
+            {
+                Some((item, text.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+
     let mut first = true;
-    for item in items {
+    for (position, (item, text)) in emitting.iter().enumerate() {
         let triple = &triples[item.triple];
-        let text = match &resolved[item.triple].disposition {
-            Disposition::Emit { text, .. } => text.as_str(),
-            Disposition::Conflict { text, .. } => text.as_str(),
-            Disposition::Drop => continue,
-        };
-        if text.is_empty() {
-            continue;
-        }
         if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
@@ -302,10 +326,17 @@ pub(crate) fn render(
                 out.push('\n');
             }
         }
-        out.push_str(text);
-        if !text.ends_with('\n') {
-            out.push('\n');
-        }
+        // The separator goes back on here, and only here: it says this member
+        // is followed by another one, which is a fact about the rendered
+        // sequence and about nothing the merge decided. Never behind a marker
+        // block — a comma on the `>>>>>>>` line stops it being a marker, and a
+        // file with markers in it is not a valid document anyway.
+        let sep = match &resolved[item.triple].disposition {
+            Disposition::Conflict { .. } => None,
+            _ if position + 1 == emitting.len() => None,
+            _ => member_separator,
+        };
+        push_entity(&mut out, text, sep);
         first = false;
     }
 

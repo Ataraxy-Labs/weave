@@ -222,21 +222,6 @@ fn any_lang() -> impl Strategy<Value = Lang> {
     prop_oneof![Just(Lang::Py), Just(Lang::Ts), Just(Lang::Json)]
 }
 
-/// Code languages only. JSON is excluded from the *clean-domain* laws because
-/// its rendered entity text includes the object separator comma, so an
-/// addition after the last key rewrites the previous key's line and a
-/// semantically disjoint edit pair becomes EDIT×EDIT — the false conflict
-/// pinned by `red_l5_json_disjoint_add_forces_comma_conflict`.
-fn code_lang() -> impl Strategy<Value = Lang> {
-    prop_oneof![Just(Lang::Py), Just(Lang::Ts)]
-}
-
-/// Languages on which linearity (L8) currently holds; TS is pinned RED by
-/// `red_l8_ts_rename_steal_duplicates_convergent_add`.
-fn linear_lang() -> impl Strategy<Value = Lang> {
-    prop_oneof![Just(Lang::Py), Just(Lang::Json)]
-}
-
 /// A base module with 2..=5 uniquely named entities.
 fn base_strategy(lang: impl Strategy<Value = Lang>) -> impl Strategy<Value = Module> {
     (lang, 2usize..=5).prop_map(|(lang, n)| Module {
@@ -315,8 +300,9 @@ fn general_triple_strategy() -> impl Strategy<Value = (Module, Module, Module)> 
 /// (base, ours, theirs) where the two sides touch DISJOINT entity sets:
 /// entity 0 is untouched by both; every other base entity is owned by at most
 /// one side; additions come from disjoint name pools. Each side makes at
-/// least one change. `lang` selects the surface (clean-domain laws pass
-/// `code_lang()`; see there for why).
+/// least one change. `lang` selects the surface; every law here now passes
+/// `any_lang()` — the domain restrictions the JSON comma leak and the TS
+/// rename-steal used to force are gone with them.
 fn disjoint_triple_strategy(
     lang: impl Strategy<Value = Lang>,
 ) -> impl Strategy<Value = (Module, Module, Module)> {
@@ -553,7 +539,7 @@ proptest! {
     /// un-ignore when the gap-join and the rename-steal are fixed.
     #[test]
     fn l2b_red_absorption_strict(
-        (base, ours, theirs) in disjoint_triple_strategy(code_lang())
+        (base, ours, theirs) in disjoint_triple_strategy(any_lang())
     ) {
         let b = render(&base);
         let o = render(&ours);
@@ -600,7 +586,7 @@ proptest! {
 
     #[test]
     fn l3b_disjoint_commutativity_is_byte_identical_on_code(
-        (base, ours, theirs) in disjoint_triple_strategy(code_lang())
+        (base, ours, theirs) in disjoint_triple_strategy(any_lang())
     ) {
         let b = render(&base);
         let o = render(&ours);
@@ -664,7 +650,7 @@ proptest! {
 
     #[test]
     fn l5_disjoint_edits_merge_clean_and_complete(
-        (base, ours, theirs) in disjoint_triple_strategy(code_lang())
+        (base, ours, theirs) in disjoint_triple_strategy(any_lang())
     ) {
         let r = merge_m(&base, &ours, &theirs);
         prop_assert!(
@@ -822,7 +808,7 @@ proptest! {
 
     #[test]
     fn l8_linearity_clean_output_defines_each_name_once(
-        (base, ours, theirs) in general_triple_strategy_with(linear_lang())
+        (base, ours, theirs) in general_triple_strategy_with(any_lang())
     ) {
         let r = merge_m(&base, &ours, &theirs);
         prop_assume!(r.is_clean());
@@ -945,7 +931,6 @@ fn red_l2_idempotence_defeated_by_marker_bearing_base() {
 /// NOTE: L4 (no silent loss) still holds on this path — both bodies are in
 ///   the marker payload. The failure is a FALSE conflict, not a loss.
 #[test]
-#[ignore = "RED counterexample: JSON separator comma turns disjoint edits into EDIT×EDIT"]
 fn red_l5_json_disjoint_add_forces_comma_conflict() {
     let base = "{\n  \"e0\": 10000,\n  \"e1\": 10100\n}\n";
     let ours = "{\n  \"e0\": 10000,\n  \"e1\": 20100\n}\n"; // edits e1's value
@@ -1173,7 +1158,7 @@ fn control_generators_are_not_degenerate() {
     let mut saw_overlap = 0u32;
     let mut saw_convergent_add = 0u32;
     for _ in 0..200 {
-        let (b, o, t) = disjoint_triple_strategy(code_lang())
+        let (b, o, t) = disjoint_triple_strategy(any_lang())
             .new_tree(&mut runner)
             .unwrap()
             .current();

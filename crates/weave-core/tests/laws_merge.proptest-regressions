@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ecb8d2633e29580b22a55b3316058114b893f886df119054c6b8b76a4feff13b # shrinks to (base, ours, theirs) = (Module { lang: Py, entities: [Entity { name: "e0", sentinel: 10000 }, Entity { name: "e1", sentinel: 10100 }] }, Module { lang: Py, entities: [Entity { name: "e0", sentinel: 10000 }, Entity { name: "e1", sentinel: 10100 }, Entity { name: "ox9", sentinel: 40900 }] }, Module { lang: Py, entities: [Entity { name: "e0", sentinel: 10000 }] })
+cc 3d97fcd37a5195d78cf568f99cbce4f1f325550540cb9e7ecac30ba3235db2d4 # shrinks to (base, ours, theirs) = (Module { lang: Ts, entities: [Entity { name: "e0", sentinel: 10000 }, Entity { name: "e1", sentinel: 10100 }] }, Module { lang: Ts, entities: [Entity { name: "e0", sentinel: 10000 }] }, Module { lang: Ts, entities: [Entity { name: "e0", sentinel: 10000 }, Entity { name: "e1", sentinel: 10100 }, Entity { name: "tx9", sentinel: 50900 }] })
+cc 289f53270b3ac216c519d8067db7d3b2e111cea78165d84fc381fc881e445b41 # shrinks to (base, ours, theirs) = (Module { lang: Py, entities: [Entity { name: "e0", sentinel: 10000 }, Entity { name: "e1", sentinel: 10100 }, Entity { name: "e2", sentinel: 10200 }] }, Module { lang: Py, entities: [Entity { name: "e0", sentinel: 10000 }, Entity { name: "e2", sentinel: 10200 }] }, Module { lang: Py, entities: [Entity { name: "e0", sentinel: 10000 }, Entity { name: "e1", sentinel: 10100 }] })
+cc b260a74cf4b2890bb8074c522898c1e96021af2c898e01cbfaeaf4d348f78f8c # shrinks to (base, ours, theirs) = (Module { lang: Json, entities: [Entity { name: "e0", sentinel: 10000 }, Entity { name: "e1", sentinel: 10100 }] }, Module { lang: Json, entities: [Entity { name: "e0", sentinel: 10000 }, Entity { name: "e1", sentinel: 10100 }, Entity { name: "ox9", sentinel: 40900 }] }, Module { lang: Json, entities: [Entity { name: "e0", sentinel: 10000 }] })
