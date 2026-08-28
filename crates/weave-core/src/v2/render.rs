@@ -173,6 +173,58 @@ fn dominant_gap(regions: &[FileRegion]) -> String {
         .unwrap_or_else(|| "\n".to_string())
 }
 
+/// Combine the several gaps that lead one emitted entity.
+///
+/// A gap that carries text states something, and every one of them is kept, in
+/// order: a section comment above a declaration whose neighbour was deleted
+/// rolls forward to the next survivor and must not be dropped on the way.
+///
+/// A blank run states only how far apart two declarations sit, and that is a
+/// HEIGHT, not a quantity — two versions that each want one blank line here
+/// want one blank line, not two. Concatenating them made the merge output not a
+/// fixed point: re-merging an output added the blank run that output already
+/// carried to the one the input still stated, so the gap widened by two
+/// newlines on every pass and a "merge until stable" loop never terminated by
+/// content equality. Adjacent blank runs are therefore joined at their maximum
+/// — the lattice `(ℕ, max)` the gap arithmetic is documented to use, and
+/// idempotent by definition, which is what makes the output a normal form.
+///
+/// Adjacency is the whole condition: a blank run on either side of a comment
+/// sits at a different boundary and is its own gap.
+fn join_gaps<'t>(texts: impl IntoIterator<Item = &'t str>) -> String {
+    // Total, so the choice among equally tall runs ("\n\n" vs "\n\t\n") is a
+    // function of the text and not of iteration order.
+    fn width(t: &str) -> (usize, usize, &str) {
+        (t.matches('\n').count(), t.len(), t)
+    }
+    let mut out = String::new();
+    let mut blank: Option<&str> = None;
+    for text in texts {
+        if text.trim().is_empty() {
+            if blank.is_none() || width(text) > width(blank.unwrap()) {
+                blank = Some(text);
+            }
+            continue;
+        }
+        if let Some(b) = blank.take() {
+            append_gap(&mut out, b);
+        }
+        append_gap(&mut out, text);
+    }
+    if let Some(b) = blank {
+        append_gap(&mut out, b);
+    }
+    out
+}
+
+/// Append one gap behind the gaps already joined, on its own line.
+fn append_gap(out: &mut String, gap: &str) {
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(gap);
+}
+
 /// Every source id the plan will emit, in every version. `Interstitials` needs
 /// it before it can say which entity a gap leads.
 pub(crate) fn emitted_src_ids(
@@ -241,13 +293,13 @@ pub(crate) fn render(
                 out.push_str(&interstitials.separator);
             }
         } else {
-            for key in keys {
-                if let Some(gap) = interstitials.merged.get(key) {
-                    out.push_str(gap);
-                    if !gap.ends_with('\n') {
-                        out.push('\n');
-                    }
-                }
+            let joined = join_gaps(
+                keys.into_iter()
+                    .filter_map(|key| interstitials.merged.get(key).map(String::as_str)),
+            );
+            out.push_str(&joined);
+            if !joined.is_empty() && !joined.ends_with('\n') {
+                out.push('\n');
             }
         }
         out.push_str(text);
@@ -258,23 +310,23 @@ pub(crate) fn render(
     }
 
     // Gaps nothing surviving leads, then the footer. Both are text some version
-    // wrote; neither is this merge's to discard.
-    for key in &interstitials.trailing {
-        if !spent.insert(key.as_str()) {
-            continue;
-        }
-        if let Some(gap) = interstitials.merged.get(key.as_str()) {
-            if !out.is_empty() && !out.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str(gap);
-        }
-    }
-    if let Some(footer) = interstitials.merged.get("file_footer") {
+    // wrote; neither is this merge's to discard — and both sit at the same
+    // boundary, the end of the file, so they go through the same join: a blank
+    // run rolled forward past the last surviving declaration and a blank footer
+    // state one distance between that declaration and the end, not two.
+    let tail: Vec<&str> = interstitials
+        .trailing
+        .iter()
+        .filter(|key| spent.insert(key.as_str()))
+        .filter_map(|key| interstitials.merged.get(key.as_str()).map(String::as_str))
+        .chain(interstitials.merged.get("file_footer").map(String::as_str))
+        .collect();
+    let joined = join_gaps(tail);
+    if !joined.is_empty() {
         if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
-        out.push_str(footer);
+        out.push_str(&joined);
     }
     if let Some(only) = interstitials.merged.get("file_only") {
         if items.is_empty() {

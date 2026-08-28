@@ -552,7 +552,6 @@ proptest! {
     /// ignored so the suite stays green while the violation stays executable;
     /// un-ignore when the gap-join and the rename-steal are fixed.
     #[test]
-    #[ignore = "RED law: absorption fails at byte level (gap drift) and line level (TS duplication)"]
     fn l2b_red_absorption_strict(
         (base, ours, theirs) in disjoint_triple_strategy(code_lang())
     ) {
@@ -983,7 +982,6 @@ fn red_l5_json_disjoint_add_forces_comma_conflict() {
 ///   across the deletion seam, and a sum is not idempotent. Restoring the
 ///   join restores the fixpoint.
 #[test]
-#[ignore = "RED counterexample: blank-line gap widens on every re-merge; no fixpoint"]
 fn red_l2b_absorption_bytes_diverge() {
     let b = "def e0():\n    return 10000\n\n\ndef e1():\n    return 10100\n";
     let o = "def e0():\n    return 10000\n\n\ndef e1():\n    return 10100\n\n\ndef ox9():\n    return 40900\n";
