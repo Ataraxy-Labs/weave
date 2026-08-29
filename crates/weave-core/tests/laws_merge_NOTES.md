@@ -1,4 +1,4 @@
-# Algebraic Extraction Dossier — the entity-level 3-way merge engine
+# Design notes: the algebra of the entity-level 3-way merge
 **Subsystem:** `weave-core::merge::entity_merge_with_registry` and the `v2` pipeline it fronts
 **Checkout:** branch `docs/social-card` (HEAD `a60d62c`), 2026-08-29
 **Witness suite:** `crates/weave-core/tests/laws_merge.rs` (`cargo test -p weave-core --test laws_merge`)
@@ -8,7 +8,7 @@
 `git diff`; the only delta vs the proofs branch is the `Cargo.toml` version string,
 and the fix branch's change is confined to `crates/weave-mcp/src/server.rs`,
 commit `ad70cdc`). Every law result below therefore holds verbatim on **both**
-branches named in the mission. The one fix-branch-only behavior — *missing file =
+branches named in this audit. The one fix-branch-only behavior — *missing file =
 empty base* in `weave_update_entity_content` — lives at the MCP layer and is
 characterized in §5, not re-proven here.
 
@@ -97,14 +97,14 @@ break: the JSON comma (Body not a function of the entity alone, §4-F3), the
 TS rename inference (Key not stable, §4-F2), the gap sum (gap-merge not a
 join, §4-F4).
 
-### NOT-THAT (mis-namings this dossier forecloses)
+### What it is not (mis-namings these notes foreclose)
 
 | Candidate | Verdict | Why not |
 |---|---|---|
-| **CRDT** (Shapiro et al. 2011) | **NOT-THAT** | No join-semilattice: the operation is *partial* (conflicts), *ancestor-mediated* (3 arguments, not 2), and not associative. There is no convergence theorem to inherit. The repo's `weave-crdt` crate and the `entity-crdt-v2` branch must not lend this word to `entity_merge` — a CRDT promises conflict-freedom by construction; this engine's entire value is the opposite: *reifying* the conflict. |
-| **Operational Transformation** (Ellis & Gibbs 1989; Ressel et al. 1996) | **NOT-THAT** | No transformation functions, no TP1/TP2 obligations; edits are never rewritten against each other, only compared against base. |
-| **Darcs patch theory** (Roundy 2005; Jacobson 2009 — inverse semigroups) | **NOT-THAT** | No commutation/residuals; patches are not first-class (states are). The categorical cousin is Mimram–Di Giusto, and even there weave keeps states, not morphisms. |
-| **diff3 itself** (Khanna–Kunal–Pierce 2007) | **80%-THAT** | Same merge relation, different (coarser, semantic) chunking; and KKP's *no-stability* pathologies at line level are exactly what entity chunking removes. The line-level fallback route IS diff3, and inherits its weaker guarantees — that route is why several laws carry a “supported domain” condition. |
+| **CRDT** (Shapiro et al. 2011) | **Not this** | No join-semilattice: the operation is *partial* (conflicts), *ancestor-mediated* (3 arguments, not 2), and not associative. There is no convergence theorem to inherit. The repo's `weave-crdt` crate and the `entity-crdt-v2` branch must not lend this word to `entity_merge` — a CRDT promises conflict-freedom by construction; this engine's entire value is the opposite: *reifying* the conflict. |
+| **Operational Transformation** (Ellis & Gibbs 1989; Ressel et al. 1996) | **Not this** | No transformation functions, no TP1/TP2 obligations; edits are never rewritten against each other, only compared against base. |
+| **Darcs patch theory** (Roundy 2005; Jacobson 2009 — inverse semigroups) | **Not this** | No commutation/residuals; patches are not first-class (states are). The categorical cousin is Mimram–Di Giusto, and even there weave keeps states, not morphisms. |
+| **diff3 itself** (Khanna–Kunal–Pierce 2007) | **Mostly this** | Same merge relation, different (coarser, semantic) chunking; and KKP's *no-stability* pathologies at line level are exactly what entity chunking removes. The line-level fallback route IS diff3, and inherits its weaker guarantees — that route is why several laws carry a “supported domain” condition. |
 
 ### μ vs ν
 
@@ -215,7 +215,7 @@ This half is the audit, not the complaint list.
   With that, L8 holds by construction (linearity of claims becomes linearity
   of names) and symptoms 2–3 vanish; the richer structure is exactly the
   stable-keyed pointwise map merge that Python and JSON already realize.
-- **HANDOFF**: miller-bug-hunter — the three `#[ignore]` tests are the RED
+- **Follow-up**: the three `#[ignore]` tests are the RED
   suite; severity order 2 > 3 > 1.
 
 ### F3 — BROKEN: the JSON carrier fails to quotient the sequence encoding
@@ -228,7 +228,7 @@ This half is the audit, not the complaint list.
   of the previous last line is read as an edit of that entity.
 - **WITNESS**: RED `red_l5_json_disjoint_add_forces_comma_conflict`; GREEN L5
   is therefore domain-restricted to Py/TS.
-- **COLLAPSE**: normalize separators out of the compared entity text at parse
+- **Simplification**: normalize separators out of the compared entity text at parse
   and re-derive them at render (a carrier change, not a rule change). This also
   deletes the reason JSON sits in `skip_expansion` special cases.
 - **NOTE**: false conflict, not loss — L4 holds; still, `package.json`
@@ -247,7 +247,7 @@ This half is the audit, not the complaint list.
 - **WITNESS**: RED `red_l2b_absorption_bytes_diverge` (and the standing RED
   property `l2b_red_absorption_strict`); GREEN L2b at entity-image level
   (Python) shows the drift is confined to whitespace.
-- **COLLAPSE**: make the gap combination the actual join (idempotent);
+- **Simplification**: make the gap combination the actual join (idempotent);
   absorption then makes the merge output a **normal form** and
   `merge(b, o, ·)` idempotent on its image — which is what `subsumption.rs`
   already assumes it is.
@@ -262,7 +262,7 @@ This half is the audit, not the complaint list.
 - **WITNESS**: RED `red_l2_idempotence_defeated_by_marker_bearing_base`;
   boundary pin `boundary_pre_conflicted_inputs_are_refused_not_merged` (the
   refusal itself is correct whenever the sides disagree).
-- **COLLAPSE**: move the `o == t` check above the guard — one reorder, no
+- **Simplification**: move the `o == t` check above the guard — one reorder, no
   semantics lost on any disagreeing input.
 
 ### F1 — REALIZED (for completeness of the ladder): everything in §3.
@@ -318,15 +318,14 @@ mirrored here as `boundary_both_created_conflicts_but_loses_nothing`).
 
 ---
 
-## 7. COLLAPSE proposals (ranked; none executed — read-only extraction)
+## 7. Simplifications this licenses (ranked; none executed — read-only extraction)
 
 1. **Name-dominant matching** (F2). Target: `v2/match_phase.rs` candidate
    generation. Guarded by: un-ignoring the three TS REDs + L8/L5b properties
    extended to `any_lang()`. Honest leverage: no LoC win; the win is
    `γ↑` — the linearity invariant the module already claims becomes true, and
-   the silent-wrong-answer class on the clean path closes. Handoff:
-   miller-bug-hunter first (it is a bug), then effect-expert/refactor if the
-   weight model wants restructuring.
+   the silent-wrong-answer class on the clean path closes. Fix the bug
+   first; only restructure afterward if the weight model calls for it.
 2. **Canonical carrier for structured formats** (F3). Target: JSON entity
    text normalization at the parse/render seam. Guarded by: un-ignoring
    `red_l5_json_*`, extending L5's generator to `any_lang()`. Leverage:
@@ -356,12 +355,12 @@ mirrored here as `boundary_both_created_conflicts_but_loses_nothing`).
   Informatica 1, 1972. (Compare images, not representations — the F3 carrier
   argument.)
 - M. Shapiro, N. Preguiça, C. Baquero, M. Zawirski. *Conflict-free Replicated
-  Data Types.* SSS 2011. (The NOT-THAT: what a semilattice join would promise.)
+  Data Types.* SSS 2011. (The not-this: what a semilattice join would promise.)
 - C. A. Ellis, S. J. Gibbs. *Concurrency Control in Groupware Systems.*
-  SIGMOD 1989; M. Ressel et al., CSCW 1996. (The OT NOT-THAT; TP1/TP2.)
+  SIGMOD 1989; M. Ressel et al., CSCW 1996. (The OT not-this; TP1/TP2.)
 - D. Roundy. *Darcs: distributed version management in Haskell.* Haskell
   Workshop 2005; J. Jacobson. *A formalization of Darcs patch theory using
-  inverse semigroups.* UCLA CAM 09-83, 2009. (The patch-theory NOT-THAT.)
+  inverse semigroups.* UCLA CAM 09-83, 2009. (The patch-theory not-this.)
 - G. Birkhoff. *Lattice Theory.* AMS Colloq. XXV. (Join, absorption,
   idempotence — the F4 argument.)
 - weave repository: issue #51 (`empty_base_json_both_add_different_keys`),

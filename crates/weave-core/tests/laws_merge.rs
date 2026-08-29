@@ -59,7 +59,7 @@
 //! by the `control_*` tests at the bottom (a checker that cannot fail is not
 //! a witness).
 //!
-//! Full findings: see `laws_merge_DOSSIER.md` next to this file.
+//! Full findings: see `laws_merge_NOTES.md` next to this file.
 
 use std::collections::{BTreeMap, BTreeSet};
 
