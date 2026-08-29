@@ -22,7 +22,7 @@ test-helpers = []
 weave-crdt = { path = ".", features = ["test-helpers"] }
 
 [dependencies]
-automerge = "0.10"
+automerge = "0.11"
 sem-core = { version = "0.23", default-features = false, features = ["git", "parallel", "grammar-all", "mmap"] }
 weave-core = { path = "../weave-core", version = "0.5.2" }
 serde = { version = "1", features = ["derive"] }
