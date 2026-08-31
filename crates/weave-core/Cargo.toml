@@ -21,6 +21,9 @@ thiserror = "2"
 [dev-dependencies]
 pretty_assertions = "1"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# Law witnesses (tests/laws_merge.rs): property-based testing over arbitrary
+# synthetic modules. Dev-only; does not touch the shipped library.
+proptest = "1"
 
 [[bench]]
 name = "merge_bench"

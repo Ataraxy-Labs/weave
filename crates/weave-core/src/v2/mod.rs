@@ -97,7 +97,7 @@ pub(crate) fn read_version(
     let all = plugin.extract_entities(content, file_path);
     let top = crate::merge::filter_nested_entities(all);
     let regions = extract_regions(content, &top);
-    Some(raws(&top, &regions))
+    Some(raws(&top, &regions, entity_separator(file_path)))
 }
 
 /// Match + classify a real three-way merge, and stop there.
@@ -344,10 +344,13 @@ pub(crate) fn merge_file(
     let theirs_regions = extract_regions(theirs, &theirs_top);
 
     // -- Match, Classify -------------------------------------------------
+    // The sequence separator comes off here and goes back on at render: every
+    // stage between the two sees the entity, not its position in the object.
+    let separator = entity_separator(file_path);
     let (arena, claims) = build_arena(
-        raws(&base_top, &base_regions),
-        raws(&ours_top, &ours_regions),
-        raws(&theirs_top, &theirs_regions),
+        raws(&base_top, &base_regions, separator),
+        raws(&ours_top, &ours_regions, separator),
+        raws(&theirs_top, &theirs_regions, separator),
     );
     let matching = match_phase(arena, claims);
     let cells: Vec<Cell> = matching
@@ -427,6 +430,7 @@ pub(crate) fn merge_file(
         &resolved,
         &placement.items,
         &interstitials,
+        separator,
     );
 
     // -- The result is read off the dispositions, not off the text -------
@@ -592,6 +596,7 @@ impl Encoding {
 fn raws(
     entities: &[sem_core::model::entity::SemanticEntity],
     regions: &[FileRegion],
+    separator: Option<&str>,
 ) -> Vec<RawEntity> {
     let mut by_id: HashMap<&str, &str> = HashMap::new();
     for r in regions {
@@ -605,11 +610,30 @@ fn raws(
             name: e.name.clone(),
             entity_type: e.entity_type.clone(),
             parent: e.parent_id.clone(),
-            content: by_id
-                .get(e.id.as_str())
-                .map(|s| (*s).to_string())
-                .unwrap_or_else(|| e.content.clone()),
+            content: strip_separator(
+                by_id
+                    .get(e.id.as_str())
+                    .copied()
+                    .unwrap_or_else(|| e.content.as_str()),
+                separator,
+            ),
             src_id: e.id.clone(),
         })
         .collect()
+}
+
+/// Drop the trailing separator: it states this entity's POSITION in the
+/// sequence, and nothing about the entity. See [`entity_separator`].
+///
+/// The whitespace behind it is left exactly as it was — the separator is what
+/// the encoding contributes, the newline is the file's own layout.
+fn strip_separator(text: &str, separator: Option<&str>) -> String {
+    let Some(sep) = separator else {
+        return text.to_string();
+    };
+    let trimmed = text.trim_end();
+    match trimmed.strip_suffix(sep) {
+        Some(body) => format!("{body}{}", &text[trimmed.len()..]),
+        None => text.to_string(),
+    }
 }

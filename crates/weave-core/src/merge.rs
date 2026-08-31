@@ -275,6 +275,24 @@ pub fn entity_merge_with_registry(
     // format. Deriving it here means every consumer gets a refusal line that is
     // a comment in the language it lands in, and no consumer has to know that.
     let marker_format = &marker_format.clone().for_file(file_path);
+
+    // The agreement axiom, ahead of every guard below it: when the two sides
+    // are byte-identical there is nothing to merge, so no reason to refuse.
+    // Behind the marker guard this axiom was defeated by an ancestor that
+    // merely QUOTES marker syntax — a fixture, or documentation about merging —
+    // which conflicted a merge both sides had already resolved identically and
+    // proposed the stale ancestor's bytes as the resolution. The refusal is a
+    // domain restriction on merging; an axiom that needs no base outranks it.
+    if ours == theirs {
+        return MergeResult {
+            content: ours.to_string(),
+            conflicts: vec![],
+            warnings: vec![],
+            stats: MergeStats::default(),
+            audit: vec![],
+        };
+    }
+
     // Guard: if any input already contains conflict markers (e.g. AU/AA conflicts
     // where git bakes markers into stage blobs), report as conflict immediately.
     // We can't do a meaningful 3-way merge on pre-conflicted content.
@@ -305,17 +323,6 @@ pub fn entity_merge_with_registry(
             }],
             warnings: vec![],
             stats,
-            audit: vec![],
-        };
-    }
-
-    // Fast path: if ours == theirs, no merge needed
-    if ours == theirs {
-        return MergeResult {
-            content: ours.to_string(),
-            conflicts: vec![],
-            warnings: vec![],
-            stats: MergeStats::default(),
             audit: vec![],
         };
     }
@@ -355,7 +362,12 @@ pub fn entity_merge_with_registry(
     // already has both edits in it, and it is a file a developer wrote rather
     // than one we composed. See `subsumption.rs` for what "carried" excludes.
     if !is_binary(base) && !is_binary(ours) && !is_binary(theirs) {
-        if let Some(side) = crate::subsumption::subsuming_side(base, ours, theirs) {
+        if let Some(side) = crate::subsumption::subsuming_side(
+            base,
+            ours,
+            theirs,
+            crate::v2::entity_separator(file_path),
+        ) {
             let (content, stats) = match side {
                 crate::subsumption::Superset::Ours => (
                     ours,

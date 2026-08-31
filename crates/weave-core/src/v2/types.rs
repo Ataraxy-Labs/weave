@@ -752,6 +752,31 @@ impl EntityOrder {
     }
 }
 
+/// The text a language writes BETWEEN two entities to make them a sequence.
+///
+/// It belongs to the ENCODING, not to any entity: `"a": 1,` and `"a": 1` are
+/// one member of an object written at two positions in it. Carrying it inside
+/// the entity's text made the carrier compare representations rather than
+/// images (Hoare 1972), and the sequence then leaked into the merge: appending
+/// a key rewrites the previous member's line to add a comma, so a side that
+/// added a key was classified as having EDITED the member above it, and a value
+/// bump beside a key addition — the commonest concurrent pair a `package.json`
+/// will ever see — came back as a both-modified conflict on a member only one
+/// side had touched.
+///
+/// The separator is therefore stripped where the arena is built and re-derived
+/// where the file is rendered, so no stage in between can see it. Nothing but
+/// JSON is listed: YAML and TOML separate members by line, and a language whose
+/// separator is a line break has nothing to quotient.
+pub(crate) fn entity_separator(file_path: &str) -> Option<&'static str> {
+    let p = file_path.to_ascii_lowercase();
+    const COMMA_SEPARATED: [&str; 3] = [".json", ".jsonc", ".json5"];
+    COMMA_SEPARATED
+        .iter()
+        .any(|e| p.ends_with(e))
+        .then_some(",")
+}
+
 /// The two sides gave entities they SHARE contradictory relative order, in a
 /// file where order is semantics. No sequence satisfies both, so there is no
 /// clean answer — this is the ORDER class at the entity layer.

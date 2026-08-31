@@ -52,9 +52,22 @@ struct Edit {
 /// The comparison key for a line: trailing space removed, blank lines dropped,
 /// the line's own indentation kept — indentation is program structure, not
 /// formatting.
-fn key_lines(text: &str) -> Vec<&str> {
+///
+/// `separator` names the text a language writes BETWEEN members to make them a
+/// sequence (JSON's comma; see `v2::types::entity_separator`). It is outside the
+/// comparison for the same reason trailing space is: it states a member's
+/// POSITION, not its content. Reading it as content is how a JSON deletion was
+/// silently undone — appending a key rewrites the previous member's line to add
+/// a comma, so a side that only ADDED a key appeared to delete and rewrite the
+/// member above it, which "carried" the other side's genuine deletion of that
+/// member, and the rule handed back the file in which it was still there.
+fn key_lines<'t>(text: &'t str, separator: Option<&str>) -> Vec<&'t str> {
     text.lines()
         .map(|l| l.trim_end())
+        .map(|l| match separator {
+            Some(sep) => l.strip_suffix(sep).unwrap_or(l),
+            None => l,
+        })
         .filter(|l| !l.is_empty())
         .collect()
 }
@@ -124,7 +137,12 @@ fn carries(inner: &Edit, outer: &Edit) -> bool {
 /// `None` when neither side subsumes the other — including when the two edits
 /// are the same edit, where there is nothing to decide and the pipeline's own
 /// reading (whitespace, ordering, interstitials) is the better one.
-pub(crate) fn subsuming_side(base: &str, ours: &str, theirs: &str) -> Option<Superset> {
+pub(crate) fn subsuming_side(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    separator: Option<&str>,
+) -> Option<Superset> {
     // A line-ending conversion is a file-wide edit that the key above cannot
     // see — `trim_end` eats the `\r`. If the two sides disagree about line
     // endings, one of them made an edit this rule is blind to, and the rule
@@ -132,9 +150,9 @@ pub(crate) fn subsuming_side(base: &str, ours: &str, theirs: &str) -> Option<Sup
     if ours.contains("\r\n") != theirs.contains("\r\n") {
         return None;
     }
-    let b = key_lines(base).join("\n");
-    let o = key_lines(ours).join("\n");
-    let t = key_lines(theirs).join("\n");
+    let b = key_lines(base, separator).join("\n");
+    let o = key_lines(ours, separator).join("\n");
+    let t = key_lines(theirs, separator).join("\n");
     let (eo, et) = (edits(&b, &o), edits(&b, &t));
     if eo.is_empty() || et.is_empty() {
         return None;
@@ -154,7 +172,7 @@ mod tests {
     use super::*;
 
     fn ours_side(b: &str, o: &str, t: &str) -> Option<Superset> {
-        subsuming_side(b, o, t)
+        subsuming_side(b, o, t, None)
     }
 
     #[test]
