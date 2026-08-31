@@ -111,12 +111,24 @@ Mergiraf fails on both-add-at-end-of-file, insert-between-existing, and decorato
 
 Replayed against real merge commits from five long-lived open-source repositories. For each of the first 500 merge commits per repo, weave re-runs the merge (base/ours/theirs from the actual git history) and compares its output to both Git's line merge and the human-authored merge commit. Reproduce with `weave bench-repo <path-to-clone> --limit 500`; full per-repo breakdown, including which files disagree and why, is at [ataraxy-labs.github.io/weave/benchmarks.html](https://ataraxy-labs.github.io/weave/benchmarks.html).
 
-- **Win**: Git conflicted, weave resolved cleanly
-- **Regression**: Git resolved cleanly, weave's output differs from the human-authored merge
-- **Human match**: of weave's wins, how many are byte-identical to what the developer actually wrote
+- **Win**: the line-based 3-way merge conflicted, weave resolved cleanly
+- **Regression**: the line-based 3-way merge resolved cleanly, weave conflicted
+- **Human match**: of weave's wins, how many are byte-identical (whitespace-normalized) to what the developer actually wrote
 
-> **Note (0.5.3):** this table was regenerated on the 0.5.3 merge engine on 2026-09-01, via
-> `weave bench-repo <path-to-clone> --limit 500` against fresh full clones of all five repos below.
+> **Note (0.5.3):** regenerated on the 0.5.3 engine on 2026-09-01 (`weave bench-repo <clone>
+> --limit 500`, fresh full clones). Read against the previous table with three caveats, stated
+> rather than smoothed over. First, 0.5.3 conflicts on purpose where 0.5.2 sometimes resolved
+> silently (divergent same-name additions, tightened same-entity and gap verdicts) — most of the
+> regression increase is that tightening doing its job; on CPython, whose tested window is
+> identical between runs, all of it is. Second, the earlier run's exact commit window was not
+> recorded, and `bench-repo` walks the most recent N merges — for git, Go, and TypeScript the two
+> runs replay substantially different commit sets, so cross-run rate comparisons there are
+> indicative, not exact; this run's windows are current as of the date above. Third, audited
+> details: the "clean line merge" baseline is a diff3 implementation (`diffy`), which disagrees
+> with `git merge-file` on a small number of cases; 3 of the 86 regressions are a known guard
+> false-positive (files whose *source code contains conflict-marker string literals* — e.g.
+> TypeScript's own scanner); and in 2 regressions the line merge's "clean" result differs from
+> what the human actually committed, i.e. weave's refusal was arguably the safer verdict.
 
 | Repository | Language | File merges tested | Wins | Regressions | Human match |
 |------------|----------|--------------------:|-----:|-------------:|-------------:|
