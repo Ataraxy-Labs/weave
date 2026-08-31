@@ -1,4 +1,4 @@
-> **Part of the [Ataraxy Labs](https://ataraxy-labs.com) stack** — agent-native infrastructure for software development. See also: [sem](https://ataraxy-labs.com/sem) (semantic version control) · [inspect](https://github.com/Ataraxy-Labs/inspect) (semantic code review) · [opensessions](https://github.com/Ataraxy-Labs/opensessions) (tmux sidebar for coding agents).
+> **Part of the [Ataraxy Labs](https://ataraxy-labs.com) stack**, agent-native infrastructure for software development. See also: [sem](https://ataraxy-labs.com/sem) (semantic version control) · [inspect](https://github.com/Ataraxy-Labs/inspect) (semantic code review) · [opensessions](https://github.com/Ataraxy-Labs/opensessions) (tmux sidebar for coding agents).
 >
 > Read the manifesto: https://ataraxy-labs.com/#thesis · Essays: https://ataraxy-labs.com/blogs · LLMs: https://ataraxy-labs.com/llms.txt
 
@@ -7,8 +7,8 @@
 </p>
 
 <p align="center">
-  <strong>Entity-level semantic merge driver for Git.</strong><br>
-  Resolves merge conflicts that Git can't by understanding code structure via tree-sitter.
+  <strong>Entity-level semantic merge for Git.</strong><br>
+  Resolves merge conflicts that Git can't by parsing code into functions, classes, and keys with tree-sitter, then merging those entities instead of lines.
 </p>
 
 <p align="center">
@@ -16,6 +16,7 @@
   <a href="#quickstart">Quickstart</a> ·
   <a href="#how-weave-fixes-this">How It Works</a> ·
   <a href="#mcp-server">MCP Server</a> ·
+  <a href="#cli-commands">CLI</a> ·
   <a href="https://github.com/Ataraxy-Labs/weave/releases/latest">Releases</a>
 </p>
 
@@ -23,7 +24,7 @@
   <a href="https://github.com/Ataraxy-Labs/weave/releases/latest"><img src="https://img.shields.io/github/v/release/Ataraxy-Labs/weave?color=blue&label=release" alt="Release"></a>
   <a href="https://formulae.brew.sh/formula/weave"><img src="https://img.shields.io/badge/homebrew-weave-orange" alt="Homebrew"></a>
   <img src="https://img.shields.io/badge/rust-stable-orange" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-401_passing-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-441_passing-brightgreen" alt="Tests">
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT_OR_Apache--2.0-yellow" alt="License"></a>
   <img src="https://img.shields.io/badge/languages-38-blue" alt="Languages">
 </p>
@@ -42,11 +43,12 @@ weave explain <file>        # per-hunk detail for one conflicted file, read off 
 weave check                 # verify the working tree against the three merge stages; exits 1 on findings
 ```
 
-See [Setup](#setup) for `--global`/`--local` variants and [MCP Server](#mcp-server) for agent-framework integration.
+See [Setup](#setup) for `--global`/`--local` variants, [CLI Commands](#cli-commands) for the rest of the
+`weave` binary, and [MCP Server](#mcp-server) for agent-framework integration.
 
 ## The Problem
 
-Git merges by comparing **lines**. When two branches both add code to the same file — even to completely different functions — Git sees overlapping line ranges and declares a conflict:
+Git merges by comparing **lines**. When two branches both add code to the same file, even to completely different functions, Git sees overlapping line ranges and declares a conflict:
 
 ```
 <<<<<<< HEAD
@@ -66,16 +68,18 @@ This happens constantly when multiple AI agents work on the same codebase. Agent
 
 ## How Weave Fixes This
 
-Weave replaces Git's line-based merge with **entity-level merge**. Instead of diffing lines, it:
+Weave replaces Git's line-based merge with **entity-level merge**, a 3-way merge that compares base, ours, and theirs at the level of individual functions, classes, and keys instead of individual lines. That lets it tell where the two branches actually drifted apart, rather than just where their edits happen to land on the same line numbers. It works like this:
 
-1. Parses all three versions (base, ours, theirs) into semantic entities — functions, classes, JSON keys, etc. — using [tree-sitter](https://tree-sitter.github.io/)
-2. Matches entities across versions by identity (name + type + scope)
+1. Parses all three versions (base, ours, theirs) into semantic entities: functions, classes, JSON keys, etc., using [tree-sitter](https://tree-sitter.github.io/)
+2. Matches entities across versions by identity (name + type + scope), including renames
 3. Merges at the entity level:
    - **Different entities changed** → auto-resolved, no conflict
    - **Same entity changed by both** → attempts intra-entity merge, conflicts only if truly incompatible
    - **One side modifies, other deletes** → flags a meaningful conflict
 
-The same scenario above? Weave merges it cleanly with zero conflicts — both functions end up in the output.
+Run the same scenario above through weave, and it merges cleanly with zero conflicts: both functions end up in the output.
+
+This merge algorithm is deterministic and stateless: it reads three file revisions and writes one result, the same way `git merge-file` does. It is not a CRDT. (Weave separately ships a CRDT-backed coordination layer, `weave-crdt`, for tracking *live* multi-agent edits before they hit Git; see [Architecture](#architecture).)
 
 ## Weave vs Git Merge
 
@@ -93,7 +97,7 @@ The key difference: Git produces false conflicts on **independent changes** beca
 
 ## Weave vs Mergiraf
 
-Tested on 31 real-world merge scenarios across Python, TypeScript, Rust, Go, Java, and C:
+31 hand-crafted merge scenarios across 7 languages, comparable to [mergiraf](https://mergiraf.org/)'s own test corpus. Run `weave bench` to reproduce:
 
 | Tool | Clean Merges | Score |
 |------|-------------|-------|
@@ -101,41 +105,39 @@ Tested on 31 real-world merge scenarios across Python, TypeScript, Rust, Go, Jav
 | Mergiraf (v0.16.3) | 26/31 | 83% |
 | Git | 15/31 | 48% |
 
-Mergiraf fails on both-add-at-end-of-file, insert-between-existing, and decorator conflict scenarios. Weave resolves all of these because it operates at entity granularity (functions, classes, methods) rather than AST node level. Full breakdown at [ataraxy-labs.github.io/weave](https://ataraxy-labs.github.io/weave/).
+Mergiraf fails on both-add-at-end-of-file, insert-between-existing, and decorator conflict scenarios. Weave resolves all of these because it operates at entity granularity (functions, classes, methods) rather than AST node level. Full breakdown at [ataraxy-labs.github.io/weave](https://ataraxy-labs.github.io/weave/benchmarks.html).
 
 ## Real-World Benchmarks
 
-Tested on real merge commits from major open-source repositories. For each merge commit, we replay the merge with both Git and Weave, then compare against the human-authored result.
+Replayed against real merge commits from five long-lived open-source repositories. For each of the first 500 merge commits per repo, weave re-runs the merge (base/ours/theirs from the actual git history) and compares its output to both Git's line merge and the human-authored merge commit. Reproduce with `weave bench-repo <path-to-clone> --limit 500`; full per-repo breakdown, including which files disagree and why, is at [ataraxy-labs.github.io/weave/benchmarks.html](https://ataraxy-labs.github.io/weave/benchmarks.html).
 
-- **Wins**: Merge commits where Git conflicted but Weave resolved cleanly
-- **Regressions**: Cases where Weave introduced errors (0 across all repos)
-- **Human Match**: How often Weave's output exactly matches what the human wrote
-- **Resolution Rate**: Percentage of all merge commits Weave resolved vs total attempted
+- **Win**: Git conflicted, weave resolved cleanly
+- **Regression**: Git resolved cleanly, weave's output differs from the human-authored merge
+- **Human match**: of weave's wins, how many are byte-identical to what the developer actually wrote
 
-| Repository | Language | Merge Commits | Wins | Regressions | Human Match | Resolution |
-|------------|----------|---------------|------|-------------|-------------|------------|
-| [git/git](https://github.com/git/git) | C | 1319 | 39 | 0 | 64% | 13% |
-| [Flask](https://github.com/pallets/flask) | Python | 56 | 14 | 0 | 57% | 54% |
-| [CPython](https://github.com/python/cpython) | C/Python | 256 | 7 | 0 | 29% | 13% |
-| [Go](https://github.com/golang/go) | Go | 1247 | 19 | 0 | 58% | 28% |
-| [TypeScript](https://github.com/microsoft/TypeScript) | TypeScript | 2000 | 65 | 0 | 6% | 23% |
+| Repository | Language | File merges tested | Wins | Regressions | Human match |
+|------------|----------|--------------------:|-----:|-------------:|-------------:|
+| [git/git](https://github.com/git/git) | C | 1,319 | 39 | 0 | 64% |
+| [Flask](https://github.com/pallets/flask) | Python | 56 | 14 | 0 | 57% |
+| [CPython](https://github.com/python/cpython) | C / Python | 256 | 7 | 0 | 29% |
+| [Go](https://github.com/golang/go) | Go | 1,247 | 19 | 0 | 58% |
+| [TypeScript](https://github.com/microsoft/TypeScript) | TypeScript | 1,639 | 4 | 3 | 75% |
 
-Zero regressions across all repositories. Every "win" is a place where a developer had to manually resolve a false conflict that Weave handles automatically.
+Across all five repos: 83 wins on 4,517 file merges, zero regressions on the C, Python, and Go repos. The TypeScript
+compiler's very large, densely cross-referenced files produced 3 regressions, which are open and tracked; see the
+per-repo notes on the benchmarks page before relying on weave for large TypeScript merges.
 
 ## Testing
 
-weave's correctness is checked two ways. The open test suite in this
-repository covers the documented merge properties and runs in CI. In
-addition, every release is gated by a private conformance suite — currently
-2,800+ enumerated merge-rule cells and five corpora of real-world merges —
-maintained separately, following the held-out-benchmark practice used by
-conformance and evaluation suites elsewhere (SQLite/TH3, Khronos CTS, LLM
-eval sets). PRs receive a pass/fail status from this suite automatically.
+The open test suite in this repository, 441 unit and integration tests plus a five-scenario
+sweep per supported language in `crates/weave-core/tests/language_coverage.rs`, covers the
+documented merge properties and runs in CI (`cargo fmt --check`, `cargo clippy -D warnings`,
+`cargo test --workspace`) on Linux and Windows on every push and PR.
 
 ## Conflict Markers
 
 When a real conflict occurs, weave gives you context that Git doesn't: which
-entity, what type, and — on the line inside the box — which internal guard
+entity, what type, and, on the line inside the box, which internal guard
 declined to auto-merge and exactly which lines both sides disagree about.
 
 ```
@@ -153,31 +155,31 @@ export function process(data: any) {
 
 Run `weave explain <file>` for more detail on every conflicted entity in the
 file, and `weave check` after editing to verify your resolution against the
-three merge stages — see [Quickstart](#quickstart).
+three merge stages; see [Quickstart](#quickstart).
 
 ## Supported Languages
 
 TypeScript, TSX, JavaScript, Python, Go, Rust, Java, C, C++, Ruby, C#, PHP, Swift, Kotlin, Scala, Dart, Elixir, Bash, Fish, Fortran, Perl, OCaml, Zig, Elm, Clojure, EDN, D, Lua, Nix, SQL, HCL/Terraform, LaTeX, XML, JSON, YAML, TOML, CSV, Markdown. Falls back to standard line-level merge for everything else.
 
-`weave setup` writes a `merge=weave` line for exactly this list and nothing
-else. Each language on it passes a five-scenario merge sweep — two sides adding
-different definitions merges clean, two sides rewriting the same definition
-conflicts, and nothing is dropped — in `crates/weave-core/tests/language_coverage.rs`.
+`weave setup` derives its `.gitattributes` rules directly from the parser
+registry: every extension the tree-sitter grammars recognize gets a
+`merge=weave` line automatically, with no hand-maintained list to fall
+behind. Each language on it passes a five-scenario merge sweep (two sides
+adding different definitions merges clean, two sides rewriting the same
+definition conflicts, and nothing is dropped) in
+`crates/weave-core/tests/language_coverage.rs`, and a separate parity test
+(`crates/weave-core/tests/setup_extension_coverage.rs`) fails the build if a
+newly added grammar is ever left unclaimed and undeclined.
 
-Vue, Svelte, ERB and Haskell are parsed but deliberately **not** claimed. Their
-entity model treats a whole `<script>` block, template, or type signature as a
-single unit, so two people adding two different definitions conflict where they
-should merge cleanly, and the conflict marker can land mid-definition. Those
-files get Git's line-level merge instead, which is the better answer until the
-parser gains a real per-definition model for them.
-
-That is what the merge engine can parse. `weave setup` writes `.gitattributes`
-rules for a narrower set, so Kotlin, HCL/Terraform, Vue, Svelte, ERB, CSV, Perl,
-OCaml and Zig files still take git's line merge until you add the rule yourself:
-
-```bash
-echo '*.kt merge=weave' >> .gitattributes   # same shape for any extension above
-```
+Vue, Svelte, ERB and Haskell are parsed but deliberately **not** claimed:
+weave declines exactly these four (`weave_core::DECLINED_EXTENSIONS`), and
+nothing else. Their entity model treats a whole `<script>` block, template,
+or type signature as a single unit, so two people adding two different
+definitions conflict where they should merge cleanly, and the conflict
+marker can land mid-definition. Those files get Git's line-level merge
+instead, which is the better answer until the parser gains a real
+per-definition model for them. They're excluded from `weave setup`
+automatically; nothing to opt out of by hand.
 
 ## Install
 
@@ -186,7 +188,7 @@ brew install weave
 ```
 
 Or build from source (requires Rust). Two binaries, both required: `weave`
-(the CLI you run — `setup`/`explain`/`check`/...) and `weave-driver` (the one
+(the CLI you run: `setup`/`explain`/`check`/...) and `weave-driver` (the one
 git itself invokes on every merge; `weave setup` fails without it on `PATH`):
 
 ```bash
@@ -197,7 +199,7 @@ cargo install --path crates/weave-driver   # the `weave-driver` binary git calls
 ```
 
 Upgrading an existing source install? `cargo install` refuses to overwrite a
-binary it didn't put there itself — add `--force` to either command above.
+binary it didn't put there itself, so add `--force` to either command above.
 
 ## Setup
 
@@ -276,7 +278,30 @@ weave preview feature-branch
 ```
 
 After a real conflict, `weave explain <file>` and `weave check` are the
-next two commands — see [Quickstart](#quickstart).
+next two commands; see [Quickstart](#quickstart).
+
+## CLI Commands
+
+Beyond `setup`/`explain`/`check`/`preview` above, the `weave` binary has commands for the
+CRDT coordination layer and for typed entity patches. Run `weave --help` or `weave <command> --help`
+for the full flag list; the table below is what each one is for.
+
+| Command | What it does |
+|---|---|
+| `weave status [--file] [--agent]` | Entity and agent state from the CRDT: claims, last editor, merge state |
+| `weave claim <agent-id> <file> <entity>` | Claim an entity before editing it (advisory: weave does not enforce it) |
+| `weave release <agent-id> <file> <entity>` | Release a previously claimed entity |
+| `weave apply <file>...` | Materialize entity edits held in the CRDT back onto the working files |
+| `weave patch extract <base-file> <changed-file>` | Emit the typed ops that turn `base-file` into `changed-file` |
+| `weave patch apply <ops-file> <target-file>` | Apply those ops to a target file, three-way against the ops' base, in case the target has drifted since the ops were extracted |
+| `weave summary <file>` | Parse a file's weave conflict markers into a structured (optionally JSON) summary |
+| `weave stats` | Lifetime merge counters, if you've opted in with `WEAVE_STATS=1` (off by default) |
+| `weave bench` | Run the 31-scenario synthetic benchmark against weave, Mergiraf, and git |
+| `weave bench-repo <path> [--limit N]` | Replay real merge commits from a cloned repo; see [Real-World Benchmarks](#real-world-benchmarks) |
+
+`claim`/`release`/`status`/`apply` all operate on the same `.weave/state.automerge` CRDT
+document as the MCP tools below: the CLI and MCP server are two front ends onto one
+coordination state.
 
 ## MCP Server
 
@@ -291,24 +316,50 @@ claude mcp add --scope user weave -- weave-mcp
 ```
 
 The server discovers the repo from the first tool call's file path, the
-`WEAVE_REPO` env var, or its working directory. It exposes `weave_check` and
-`weave_findings` as the read contract for acting on a merge, entity
-inspection tools (`weave_extract_entities`, `weave_diff`,
-`weave_get_dependencies`/`_dependents`), and a claim/release layer for
-coordinating multiple agents in one repo. Each tool's own description states
-when to call it and what an empty result means.
+`WEAVE_REPO` env var, or its working directory. It exposes 22 tools in two
+independent groups (each tool's own description states when to call it and
+what an empty result means):
+
+- **Merge analysis** reads git refs or the working tree directly, no setup needed:
+  `weave_findings`, `weave_check`, `weave_preview_merge`, `weave_diff`,
+  `weave_merge_audit`, `weave_validate_merge`, `weave_merge_summary`.
+- **Entity and dependency inspection** reads a file's or the repo's structure:
+  `weave_extract_entities`, `weave_get_dependencies`, `weave_get_dependents`,
+  `weave_impact_analysis`.
+- **Live coordination** tracks edits in the shared CRDT (`.weave/state.automerge`) for
+  agents editing the same repo at the same time, starting with `weave_agent_register`:
+  `weave_agent_register`, `weave_agent_heartbeat`, `weave_claim_entity`,
+  `weave_release_entity`, `weave_status`, `weave_who_is_editing`,
+  `weave_potential_conflicts`, `weave_update_entity_content`,
+  `weave_get_entity_content`, `weave_merge_file`, `weave_resolve_conflict`.
+
+Start with `weave_findings` after (or before) a merge between two branches, or
+`weave_check` for the cross-file binding risk a per-file git merge driver can't see:
+a rename in `a.py` whose surviving caller lives in `b.py` merges both files cleanly on
+its own, and the break is only visible repo-wide.
 
 ## Architecture
 
 ```
-weave-core       # Library: entity extraction, 3-way merge algorithm, reconstruction
+weave-core       # Library: entity extraction, entity-level 3-way merge, reconstruction
 weave-driver     # Git merge driver binary (called by git via %O %A %B %L %P)
-weave-cli        # CLI: `weave setup`, `weave explain`, `weave check`, `weave preview`, ...
-weave-crdt       # Automerge-backed multi-agent coordination state
-weave-mcp        # MCP server exposing weave to agent frameworks
+weave-cli        # CLI: `weave setup`, `weave explain`, `weave check`, `weave patch`, ...
+weave-crdt       # Automerge-backed CRDT: live multi-agent coordination state only
+weave-mcp        # MCP server exposing weave to agent frameworks (22 tools)
+weave-github     # GitHub webhook service behind the hosted PR-comment integration
+                 #   (publish = false, not a binary you install; runs weave's merge
+                 #   analysis on pull_request events and posts the result as a comment)
 ```
 
 Uses [sem-core](https://github.com/Ataraxy-Labs/sem) for entity extraction via tree-sitter grammars.
+
+The merge algorithm (`weave-core`) and the coordination state (`weave-crdt`) are
+deliberately separate concerns with different data models: the merge is a pure
+function over three file revisions, run fresh on every `git merge`/`weave preview`/
+`weave check` call. The CRDT is the thing that persists; it's what lets two live
+agents see each other's claims and in-flight edits *before* either one commits,
+via `weave_claim_entity`/`weave_update_entity_content` or `weave claim`/`weave apply`.
+Nothing in the merge path depends on the CRDT ever having run.
 
 ## How It Works
 
@@ -321,11 +372,38 @@ Uses [sem-core](https://github.com/Ataraxy-Labs/sem) for entity extraction via t
 ```
 
 1. **Parse** all three versions into semantic entities via tree-sitter
-2. **Extract regions** — alternating entity and interstitial (imports, whitespace) segments
-3. **Match entities** across versions by ID (file:type:name:parent)
+2. **Extract regions**, alternating entity and interstitial (imports, whitespace) segments
+3. **Match entities** across versions by ID (file:type:name:parent), detecting renames
 4. **Resolve** each entity: one-side-only changes win, both-changed attempts intra-entity 3-way merge
 5. **Reconstruct** file from merged regions, preserving ours-side ordering
 6. **Fallback** to line-level merge for files >1MB, binary files, or unsupported types
+
+## Limitations
+
+- **Vue, Svelte, ERB, Haskell** parse, but their per-file entity model is too coarse to merge
+  well, so they take Git's line merge, always (see [Supported Languages](#supported-languages)).
+- **Files over 1MB, binary files, and file types with no parser** fall back to Git's line-level
+  merge automatically.
+- **Entity claims are advisory, not enforced.** `weave_claim_entity` and `weave claim` are
+  cooperative locks inside the CRDT coordination layer; weave does not stop a second agent
+  (or you) from editing a claimed entity anyway.
+- **Crashed agents aren't reaped.** `weave_agent_heartbeat`'s liveness timestamp is informational;
+  weave does not currently expire or release a claim automatically when an agent stops
+  heartbeating, so a crashed agent's claims stay visible until another call to
+  `weave_release_entity`/`weave release`.
+- **`weave stats` is empty until you opt in.** Lifetime merge counters are off by default; set
+  `WEAVE_STATS=1` in the environment your git/jj merges run in to start accumulating them.
+
+## Contributing
+
+Bug reports and issues are welcome. This is a small team maintaining a merge engine that
+runs inside other people's git workflows: incoming PRs get read, but are reviewed and
+adapted before merge rather than merged as-is. Open an issue first for anything beyond a
+small, obviously-correct fix, so the approach can be agreed on before you write the code.
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
 
 ## Star History
 
