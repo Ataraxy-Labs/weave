@@ -248,7 +248,10 @@ fn general_plan_strategy(n: usize, side: SideTag) -> impl Strategy<Value = Plan>
     let op = prop_oneof![3 => Just(Op::Keep), 2 => Just(Op::Modify), 1 => Just(Op::Delete)];
     let add = (0u8..3).prop_flat_map(move |kind| {
         (0usize..2).prop_map(move |slot| match kind {
-            0 => (format!("{}{}", prefix, slot), side.add_base() + 100 * slot as u32),
+            0 => (
+                format!("{}{}", prefix, slot),
+                side.add_base() + 100 * slot as u32,
+            ),
             1 => (format!("sx{}", slot), side.add_base() + 100 * slot as u32),
             _ => (format!("sx{}", slot), 60000 + 100 * slot as u32),
         })
@@ -331,12 +334,7 @@ fn disjoint_triple_strategy(
                             .map(|(w, op)| if *w == who { *op } else { Op::Keep })
                             .collect(),
                         adds: (0..count)
-                            .map(|j| {
-                                (
-                                    format!("{}{}", prefix, j),
-                                    side.add_base() + 100 * j as u32,
-                                )
-                            })
+                            .map(|j| (format!("{}{}", prefix, j), side.add_base() + 100 * j as u32))
                             .collect(),
                     };
                     if plan.is_noop() {
@@ -855,8 +853,14 @@ fn boundary_both_created_conflicts_but_loses_nothing() {
         "BothCreated gate: disjoint creations from an empty base conflict by design (issue #51)"
     );
     // the safety law survives the boundary
-    assert!(visible(&r, 40000), "ours' creation must not be silently lost");
-    assert!(visible(&r, 50000), "theirs' creation must not be silently lost");
+    assert!(
+        visible(&r, 40000),
+        "ours' creation must not be silently lost"
+    );
+    assert!(
+        visible(&r, 50000),
+        "theirs' creation must not be silently lost"
+    );
 }
 
 /// Inputs that already contain conflict markers are refused before any law
@@ -1026,7 +1030,10 @@ fn red_l8_ts_rename_steal_duplicates_convergent_add() {
     let o = "export function e0(): number {\n  return 10000;\n}\n\nexport function e1(): number {\n  return 10100;\n}\n\nexport function ox9(): number {\n  return 40900;\n}\n";
     let t = "export function e0(): number {\n  return 10000;\n}\n\nexport function ox9(): number {\n  return 40900;\n}\n";
     let r = entity_merge(b, o, t, "m.ts");
-    assert!(r.is_clean(), "this triple merges clean today; the bug is in the bytes");
+    assert!(
+        r.is_clean(),
+        "this triple merges clean today; the bug is in the bytes"
+    );
     assert_eq!(
         r.content.matches("function ox9(").count(),
         1,

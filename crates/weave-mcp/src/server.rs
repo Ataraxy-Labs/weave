@@ -1662,7 +1662,10 @@ impl WeaveServer {
                 .audit
                 .iter()
                 .filter(|a| {
-                    !matches!(a.resolution, weave_core::merge::ResolutionStrategy::Unchanged)
+                    !matches!(
+                        a.resolution,
+                        weave_core::merge::ResolutionStrategy::Unchanged
+                    )
                 })
                 .map(|a| a.name.as_str())
                 .collect();
@@ -2319,11 +2322,7 @@ mod merge_backstop_tests {
             .unwrap_or_default()
     }
 
-    fn update_params(
-        abs: &str,
-        entity_name: &str,
-        content: &str,
-    ) -> UpdateEntityContentParams {
+    fn update_params(abs: &str, entity_name: &str, content: &str) -> UpdateEntityContentParams {
         UpdateEntityContentParams {
             agent_id: "agent-1".into(),
             file_path: abs.into(),
@@ -2443,8 +2442,14 @@ mod merge_backstop_tests {
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0]["entity_name"], "foo");
         assert_eq!(conflicts[0]["kind"], "both_modified");
-        assert!(conflicts[0]["ours_content"].as_str().unwrap().contains("foo-ours"));
-        assert!(conflicts[0]["theirs_content"].as_str().unwrap().contains("foo-theirs"));
+        assert!(conflicts[0]["ours_content"]
+            .as_str()
+            .unwrap()
+            .contains("foo-ours"));
+        assert!(conflicts[0]["theirs_content"]
+            .as_str()
+            .unwrap()
+            .contains("foo-theirs"));
 
         // Untouched: the entity was never written into the CRDT.
         let read = server
