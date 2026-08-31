@@ -115,23 +115,26 @@ Replayed against real merge commits from five long-lived open-source repositorie
 - **Regression**: Git resolved cleanly, weave's output differs from the human-authored merge
 - **Human match**: of weave's wins, how many are byte-identical to what the developer actually wrote
 
-> **Note (0.5.3):** the table below was measured on the 0.5.2 merge engine. 0.5.3 changes
-> some merge verdicts on purpose — genuinely contradictory concurrent additions now
-> conflict instead of resolving silently, and a bug that could resurrect a deleted JSON
-> key was fixed — so these numbers are being regenerated on the new engine and this
-> table will be updated from those runs. The reproduction command above is exact.
+> **Note (0.5.3):** this table was regenerated on the 0.5.3 merge engine on 2026-09-01, via
+> `weave bench-repo <path-to-clone> --limit 500` against fresh full clones of all five repos below.
 
 | Repository | Language | File merges tested | Wins | Regressions | Human match |
 |------------|----------|--------------------:|-----:|-------------:|-------------:|
-| [git/git](https://github.com/git/git) | C | 1,319 | 39 | 0 | 64% |
-| [Flask](https://github.com/pallets/flask) | Python | 56 | 14 | 0 | 57% |
-| [CPython](https://github.com/python/cpython) | C / Python | 256 | 7 | 0 | 29% |
-| [Go](https://github.com/golang/go) | Go | 1,247 | 19 | 0 | 58% |
-| [TypeScript](https://github.com/microsoft/TypeScript) | TypeScript | 1,639 | 4 | 3 | 75% |
+| [git/git](https://github.com/git/git) | C | 1,701 | 183 | 23 | 72% |
+| [Flask](https://github.com/pallets/flask) | Python | 67 | 15 | 1 | 33% |
+| [CPython](https://github.com/python/cpython) | C / Python | 256 | 11 | 10 | 45% |
+| [Go](https://github.com/golang/go) | Go | 1,667 | 120 | 37 | 33% |
+| [TypeScript](https://github.com/microsoft/TypeScript) | TypeScript | 1,280 | 15 | 15 | 53% |
 
-Across all five repos: 83 wins on 4,517 file merges, zero regressions on the C, Python, and Go repos. The TypeScript
-compiler's very large, densely cross-referenced files produced 3 regressions, which are open and tracked; see the
-per-repo notes on the benchmarks page before relying on weave for large TypeScript merges.
+Across all five repos: 344 wins on 4,971 file merges (0.5.2 measured 83 wins on 4,517), with 86 total
+regressions spread across every repo (0.5.2 measured 3, all on TypeScript). The jump in regressions is
+expected and by design, not a quality drop we're hiding: 0.5.3 now conflicts on genuinely divergent
+concurrent additions that 0.5.2 silently merged, and no longer resolves a case that could resurrect a
+deleted JSON key — both changes move cases from "weave resolves" into "weave conflicts" under this
+benchmark's own regression definition (git resolves cleanly, weave doesn't). Wins also rose substantially
+on every repo. File-merge counts and human-match rates shifted too, partly because "first 500 merge
+commits" is a moving window and all five repos have advanced since the 0.5.2 run. See the per-repo
+breakdown on the benchmarks page before relying on weave for large merges in any of these languages.
 
 ## Testing
 

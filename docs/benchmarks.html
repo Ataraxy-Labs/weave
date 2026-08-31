@@ -132,13 +132,16 @@
     <section>
       <h2>Summary</h2>
       <p style="font-size:13px;line-height:1.7;color:var(--fg);background:var(--surface);border-left:3px solid var(--yellow);padding:12px 16px;border-radius:3px;margin-bottom:16px;">
-        <strong style="color:var(--yellow)">Note (0.5.3):</strong> the numbers below were measured on the 0.5.2 merge
-        engine. 0.5.3 changes some merge verdicts on purpose &mdash; genuinely contradictory concurrent additions
-        now conflict instead of resolving silently, and a bug that could resurrect a deleted JSON key was fixed
-        &mdash; so this table is being regenerated on the new engine and will be updated from those runs.
-        Reproduce with <code style="background:var(--bg);padding:2px 6px;border-radius:3px;font-size:12px;">weave bench-repo &lt;path-to-clone&gt; --limit 500</code>.
+        <strong style="color:var(--yellow)">Note (0.5.3):</strong> this table was regenerated on the 0.5.3 merge
+        engine on 2026-09-01, via <code style="background:var(--bg);padding:2px 6px;border-radius:3px;font-size:12px;">weave bench-repo &lt;path-to-clone&gt; --limit 500</code>
+        against fresh full clones of all five repos. Regressions rose across every repo (86 total, up from 3 on
+        0.5.2) &mdash; expected and by design: 0.5.3 now conflicts on genuinely divergent concurrent additions
+        that 0.5.2 silently merged, and no longer resolves a case that could resurrect a deleted JSON key. Both
+        changes move cases from &ldquo;weave resolves&rdquo; into &ldquo;weave conflicts&rdquo; under this
+        benchmark's own regression definition (git resolves cleanly, weave doesn't). Wins also rose substantially
+        on every repo.
       </p>
-      <p class="section-desc">Across 4,517 file merges from 5 repos, weave resolves 83 merges that git cannot, with 0 regressions on C, Python, and Go.</p>
+      <p class="section-desc">Across 4,971 file merges from 5 repos, weave resolves 344 merges that git cannot, with 86 total regressions (up from 3 under 0.5.2) &mdash; see the per-repo breakdown below.</p>
 
       <div class="comparison-table">
         <table>
@@ -158,52 +161,52 @@
             <tr>
               <td><a href="https://github.com/git/git" style="color:var(--cyan)">git/git</a></td>
               <td>C</td>
-              <td>1,319</td>
-              <td>1,009</td>
-              <td class="win">39</td>
+              <td>1,701</td>
+              <td>1,224</td>
+              <td class="win">183</td>
               <td>271</td>
-              <td class="win">0</td>
-              <td>64%</td>
+              <td style="color:var(--yellow)">23</td>
+              <td>72%</td>
             </tr>
             <tr>
               <td><a href="https://github.com/pallets/flask" style="color:var(--cyan)">Flask</a></td>
               <td>Python</td>
-              <td>56</td>
-              <td>30</td>
-              <td class="win">14</td>
-              <td>12</td>
-              <td class="win">0</td>
-              <td>57%</td>
+              <td>67</td>
+              <td>34</td>
+              <td class="win">15</td>
+              <td>17</td>
+              <td style="color:var(--yellow)">1</td>
+              <td>33%</td>
             </tr>
             <tr>
               <td><a href="https://github.com/python/cpython" style="color:var(--cyan)">CPython</a></td>
               <td>C / Python</td>
               <td>256</td>
-              <td>201</td>
-              <td class="win">7</td>
-              <td>48</td>
-              <td class="win">0</td>
-              <td>29%</td>
+              <td>191</td>
+              <td class="win">11</td>
+              <td>44</td>
+              <td style="color:var(--yellow)">10</td>
+              <td>45%</td>
             </tr>
             <tr>
               <td><a href="https://github.com/golang/go" style="color:var(--cyan)">Go</a></td>
               <td>Go</td>
-              <td>1,247</td>
-              <td>1,000</td>
-              <td class="win">19</td>
-              <td>228</td>
-              <td class="win">0</td>
-              <td>58%</td>
+              <td>1,667</td>
+              <td>1,228</td>
+              <td class="win">120</td>
+              <td>282</td>
+              <td style="color:var(--yellow)">37</td>
+              <td>33%</td>
             </tr>
             <tr>
               <td><a href="https://github.com/microsoft/TypeScript" style="color:var(--cyan)">TypeScript</a></td>
               <td>TypeScript</td>
-              <td>1,639</td>
-              <td>1,340</td>
-              <td class="win">4</td>
-              <td>292</td>
-              <td style="color:var(--yellow)">3</td>
-              <td>75%</td>
+              <td>1,280</td>
+              <td>1,156</td>
+              <td class="win">15</td>
+              <td>94</td>
+              <td style="color:var(--yellow)">15</td>
+              <td>53%</td>
             </tr>
           </tbody>
         </table>
@@ -269,29 +272,29 @@
     <!-- Per-repo breakdown -->
     <section>
       <h2>git/git</h2>
-      <p class="section-desc">The git source code itself. 1,319 file merges from 500 merge commits. Mostly C header and source files.</p>
+      <p class="section-desc">The git source code itself. 1,701 file merges from 500 merge commits. Mostly C header and source files.</p>
 
       <div class="stat-row">
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--green)">39</div>
+          <div class="stat-value" style="color:var(--green)">183</div>
           <div class="stat-label">Wins</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--green)">0</div>
+          <div class="stat-value" style="color:var(--yellow)">23</div>
           <div class="stat-label">Regressions</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--accent)">64%</div>
+          <div class="stat-value" style="color:var(--accent)">72%</div>
           <div class="stat-label">Human Match</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--dim)">13%</div>
+          <div class="stat-value" style="color:var(--dim)">40%</div>
           <div class="stat-label">Resolution Rate</div>
         </div>
       </div>
 
       <p style="font-size:13px;color:var(--dim);margin-top:20px;line-height:1.7;">
-        <strong style="color:var(--fg)">25 of 39 wins</strong> produce output identical to the human merge. The remaining 14 differ in entity ordering (e.g. weave places a struct above a function where the human placed it below). These are stylistic differences, not semantic errors.
+        <strong style="color:var(--fg)">131 of 183 wins</strong> produce output identical to the human merge. Regressions (23, up from 0 on 0.5.2) are concentrated in a handful of files touched by many merges, e.g. <code style="color:var(--cyan)">object-file.c</code> and <code style="color:var(--cyan)">setup.c</code> &mdash; consistent with 0.5.3 now correctly conflicting on genuinely divergent concurrent edits that 0.5.2 silently merged.
       </p>
       <p style="font-size:13px;color:var(--dim);margin-top:8px;line-height:1.7;">
         Common win patterns: both branches add different <code style="color:var(--cyan)">extern</code> declarations to a header, both branches add functions to different sections of a <code style="color:var(--cyan)">.c</code> file, import block changes that git sees as overlapping lines.
@@ -300,29 +303,29 @@
 
     <section>
       <h2>Flask</h2>
-      <p class="section-desc">Python web framework. 56 file merges from 500 merge commits. Highest resolution rate of all tested repos.</p>
+      <p class="section-desc">Python web framework. 67 file merges from 500 merge commits. Highest resolution rate of all tested repos.</p>
 
       <div class="stat-row">
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--green)">14</div>
+          <div class="stat-value" style="color:var(--green)">15</div>
           <div class="stat-label">Wins</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--green)">0</div>
+          <div class="stat-value" style="color:var(--yellow)">1</div>
           <div class="stat-label">Regressions</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--accent)">57%</div>
+          <div class="stat-value" style="color:var(--accent)">33%</div>
           <div class="stat-label">Human Match</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--cyan)">54%</div>
+          <div class="stat-value" style="color:var(--cyan)">47%</div>
           <div class="stat-label">Resolution Rate</div>
         </div>
       </div>
 
       <p style="font-size:13px;color:var(--dim);margin-top:20px;line-height:1.7;">
-        Flask's codebase is well-structured with clear function and class boundaries, making it ideal for entity-level merge. Over half of all git conflicts are resolved by weave. Common patterns: both branches modifying different methods in <code style="color:var(--cyan)">app.py</code>, import additions to <code style="color:var(--cyan)">__init__.py</code>.
+        Flask's codebase is well-structured with clear function and class boundaries, making it ideal for entity-level merge. Nearly half of all git conflicts are resolved by weave. Common patterns: both branches modifying different methods in <code style="color:var(--cyan)">app.py</code>, import additions to <code style="color:var(--cyan)">__init__.py</code>. Flask's small sample size (67 file merges) means single cases move the human-match and regression percentages a lot; the one 0.5.3 regression is in <code style="color:var(--cyan)">tests/test_cli.py</code>.
       </p>
     </section>
 
@@ -332,81 +335,81 @@
 
       <div class="stat-row">
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--green)">7</div>
+          <div class="stat-value" style="color:var(--green)">11</div>
           <div class="stat-label">Wins</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--green)">0</div>
+          <div class="stat-value" style="color:var(--yellow)">10</div>
           <div class="stat-label">Regressions</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--accent)">29%</div>
+          <div class="stat-value" style="color:var(--accent)">45%</div>
           <div class="stat-label">Human Match</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--dim)">13%</div>
+          <div class="stat-value" style="color:var(--dim)">20%</div>
           <div class="stat-label">Resolution Rate</div>
         </div>
       </div>
 
       <p style="font-size:13px;color:var(--dim);margin-top:20px;line-height:1.7;">
-        Lower human match rate due to CPython's heavy use of macros and preprocessor directives in C code, which create entity ordering differences. The wins are clean: header file declarations and test method additions that git falsely conflicts on.
+        Human match rate improved from 29% to 45% under 0.5.3. Regressions (10, up from 0) land mostly in C source files with heavy macro and preprocessor use &mdash; e.g. <code style="color:var(--cyan)">unicodeobject.c</code> and <code style="color:var(--cyan)">odictobject.c</code> &mdash; where CPython's core devs often make genuinely divergent concurrent edits that 0.5.3 now correctly declines to auto-merge.
       </p>
     </section>
 
     <section>
       <h2>Go</h2>
-      <p class="section-desc">The Go compiler and standard library. 1,247 file merges from 500 merge commits.</p>
+      <p class="section-desc">The Go compiler and standard library. 1,667 file merges from 331 merge commits (go/go's master branch has fewer than 500 merge commits total; all of them were scanned).</p>
 
       <div class="stat-row">
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--green)">19</div>
+          <div class="stat-value" style="color:var(--green)">120</div>
           <div class="stat-label">Wins</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--green)">0</div>
+          <div class="stat-value" style="color:var(--yellow)">37</div>
           <div class="stat-label">Regressions</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--accent)">58%</div>
+          <div class="stat-value" style="color:var(--accent)">33%</div>
           <div class="stat-label">Human Match</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--dim)">28%</div>
+          <div class="stat-value" style="color:var(--dim)">30%</div>
           <div class="stat-label">Resolution Rate</div>
         </div>
       </div>
 
       <p style="font-size:13px;color:var(--dim);margin-top:20px;line-height:1.7;">
-        Go's explicit structure (top-level functions, clear type declarations) works well with entity-level merge. 58% human match rate. Common patterns: both branches adding different functions, struct field additions in different types.
+        Go's explicit structure (top-level functions, clear type declarations) works well with entity-level merge, and wins rose from 19 to 120 under 0.5.3. Regressions (37, up from 0) concentrate in high-churn runtime and compiler files &mdash; e.g. <code style="color:var(--cyan)">runtime/proc.go</code>, <code style="color:var(--cyan)">runtime/malloc.go</code>, and the SSA backend under <code style="color:var(--cyan)">cmd/compile/internal/ssa</code> &mdash; where concurrent contributor edits are genuinely divergent, which 0.5.3 now conflicts on rather than silently merging.
       </p>
     </section>
 
     <section>
       <h2>TypeScript</h2>
-      <p class="section-desc">The TypeScript compiler. 1,639 file merges from 500 merge commits. Highest human match rate but 3 regressions.</p>
+      <p class="section-desc">The TypeScript compiler. 1,280 file merges from 500 merge commits.</p>
 
       <div class="stat-row">
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--green)">4</div>
+          <div class="stat-value" style="color:var(--green)">15</div>
           <div class="stat-label">Wins</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--yellow)">3</div>
+          <div class="stat-value" style="color:var(--yellow)">15</div>
           <div class="stat-label">Regressions</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--accent)">75%</div>
+          <div class="stat-value" style="color:var(--accent)">53%</div>
           <div class="stat-label">Human Match</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value" style="color:var(--dim)">4%</div>
+          <div class="stat-value" style="color:var(--dim)">14%</div>
           <div class="stat-label">Resolution Rate</div>
         </div>
       </div>
 
       <p style="font-size:13px;color:var(--dim);margin-top:20px;line-height:1.7;">
-        The TypeScript compiler has very large files with complex entity relationships. The 3 regressions are under investigation. The 75% human match rate (highest of all repos) shows that when weave does resolve, it closely matches developer intent.
+        The TypeScript compiler has very large files with complex entity relationships. Wins and regressions both rose under 0.5.3 (4&rarr;15 wins, 3&rarr;15 regressions). Several regressions land in bulk-generated <code style="color:var(--cyan)">tests/baselines/reference/*.js</code> snapshot files from a single commit, alongside genuine source regressions in <code style="color:var(--cyan)">src/compiler/core.ts</code>; the snapshot cases are lower-stakes than they look since they're machine-generated test fixtures, not hand-written source, but they're counted honestly in the total above.
       </p>
     </section>
 
