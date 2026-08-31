@@ -558,6 +558,12 @@ impl WeaveServer {
 
         let response = serde_json::json!({
             "result": serde_json::to_value(&result).unwrap_or_default(),
+            // The claim's own stable identity. Pass it back to
+            // weave_update_entity_content / weave_release_entity to address
+            // the claim directly — a rename of the entity between claim and
+            // update/release makes the *name* unresolvable against the file's
+            // current content, but never invalidates this id.
+            "entity_id": entity_id,
             "dependency_warnings": dep_warnings,
         });
 
@@ -576,15 +582,22 @@ impl WeaveServer {
         let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
-        let entity_id = Self::resolve_entity_sync(
-            &self.registry,
-            &content,
-            &rel_path,
-            &params.entity_name,
-            params.entity_type.as_deref(),
-            params.parent_name.as_deref(),
-            params.ordinal,
-        )?;
+        // The entity_id from weave_claim_entity addresses the claim directly —
+        // name resolution runs against the file's *current* content, so a
+        // rename between claim and release would make the old name
+        // unresolvable even though the claim is still held.
+        let entity_id = match params.entity_id {
+            Some(id) => id,
+            None => Self::resolve_entity_sync(
+                &self.registry,
+                &content,
+                &rel_path,
+                &params.entity_name,
+                params.entity_type.as_deref(),
+                params.parent_name.as_deref(),
+                params.ordinal,
+            )?,
+        };
 
         let mut state = ctx.state.lock().await;
         release_entity(&mut state, &params.agent_id, &entity_id).map_err(internal_err)?;
@@ -1445,24 +1458,112 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Write your edit of one entity into the CRDT coordination state — not the file on disk; this is the live multi-agent layer, separate from a git merge. Call once you've decided the entity's new content, whether or not you claimed it first. Bumps your agent's version vector so weave_merge_file and other agents' weave_status calls see the update."
+        description = "Write your edit of one entity into the CRDT coordination state — not the file on disk; this is the live multi-agent layer, separate from a git merge. Call once you've decided the entity's new content, whether or not you claimed it first. Bumps your agent's version vector so weave_merge_file and other agents' weave_status calls see the update. Send base_content + ours_content (whole file, as read / as intended) to enable the concurrent-edit backstop: if the file drifted since your read, disjoint entity changes are merged for you (response carries merged_content to write), and a true same-entity collision is refused with merge_conflicts instead of overwriting anyone."
     )]
     async fn weave_update_entity_content(
         &self,
         Parameters(params): Parameters<UpdateEntityContentParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // The snapshot is one opt-in, not two: base_content (what the caller
+        // read) and ours_content (what the caller intends) only mean anything
+        // together. Half a snapshot is a malformed call, refused up front —
+        // never a data-dependent surprise later.
+        match (&params.base_content, &params.ours_content) {
+            (Some(_), None) => {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "base_content without ours_content: send both to enable the \
+                     concurrent-edit merge backstop, or neither for a plain update",
+                    None,
+                ))
+            }
+            (None, Some(_)) => {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "ours_content without base_content: send both to enable the \
+                     concurrent-edit merge backstop, or neither for a plain update",
+                    None,
+                ))
+            }
+            _ => {}
+        }
+
         let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
-        let entity_id = Self::resolve_entity_sync(
-            &self.registry,
-            &content,
-            &rel_path,
-            &params.entity_name,
-            params.entity_type.as_deref(),
-            params.parent_name.as_deref(),
-            params.ordinal,
-        )?;
+        // The entity_id from weave_claim_entity addresses the claim directly —
+        // name resolution runs against the file's *current* content, so a
+        // rename between claim and update would make the old name
+        // unresolvable even though the claim is still held.
+        let entity_id = match params.entity_id {
+            Some(ref id) => id.clone(),
+            None => Self::resolve_entity_sync(
+                &self.registry,
+                &content,
+                &rel_path,
+                &params.entity_name,
+                params.entity_type.as_deref(),
+                params.parent_name.as_deref(),
+                params.ordinal,
+            )?,
+        };
+
+        // Concurrent-edit backstop. Drift is decided by comparing the
+        // caller's whole-file snapshot against the bytes on disk — the
+        // content the caller already holds, never a hash (std's DefaultHasher
+        // is explicitly unstable across Rust versions, so a cross-language
+        // wire protocol pinned to it would be broken by construction).
+        let mut drift_detected: Option<bool> = None;
+        let mut clean_merge: Option<weave_core::MergeResult> = None;
+        if let (Some(base), Some(ours)) = (&params.base_content, &params.ours_content) {
+            if base == &content {
+                drift_detected = Some(false);
+            } else {
+                drift_detected = Some(true);
+                // base = what the caller read, ours = what the caller wants,
+                // theirs = what the disk holds now. The same engine the merge
+                // tools already use; weave never writes the file — on a clean
+                // merge the CALLER writes merged_content, so the write still
+                // flows through the caller's own guards.
+                let merge = weave_core::entity_merge_with_registry(
+                    base,
+                    ours,
+                    &content,
+                    &rel_path,
+                    &self.registry,
+                    &weave_core::MarkerFormat::default(),
+                    &self.host,
+                );
+                if !merge.is_clean() {
+                    // A true same-entity collision: a business outcome in the
+                    // payload (the AlreadyClaimed convention), not a protocol
+                    // error — and nothing is written anywhere.
+                    let conflicts: Vec<serde_json::Value> = merge
+                        .conflicts
+                        .iter()
+                        .map(|c| {
+                            serde_json::json!({
+                                "entity_name": c.entity_name,
+                                "entity_type": c.entity_type,
+                                "kind": c.kind.wire_kind(),
+                                "kind_display": format!("{}", c.kind),
+                                "complexity": format!("{}", c.complexity),
+                                "ours_content": c.ours_content,
+                                "theirs_content": c.theirs_content,
+                                "base_content": c.base_content,
+                            })
+                        })
+                        .collect();
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "entity": params.entity_name,
+                            "drift_detected": true,
+                            "merge_conflicts": conflicts,
+                        }))
+                        .unwrap_or_default(),
+                    )]));
+                }
+                clean_merge = Some(merge);
+            }
+        }
 
         // Compute content hash
         let hash = format!("{:x}", content_hash_u64(&params.content));
@@ -1494,12 +1595,30 @@ impl WeaveServer {
 
         let status = get_entity_content(&state, &entity_id).map_err(internal_err)?;
 
-        let response = serde_json::json!({
+        let mut response = serde_json::json!({
             "entity": params.entity_name,
             "content_hash": hash,
             "version_vector": serde_json::to_value(&status.version_vector).unwrap_or_default(),
             "version": status.version_vector.total(),
         });
+        if let Some(drifted) = drift_detected {
+            response["drift_detected"] = serde_json::json!(drifted);
+        }
+        if let Some(merge) = clean_merge {
+            // The reconciled whole file, for the CALLER to write — plus the
+            // names of everything that changed underneath it and merged over.
+            let merged_over: Vec<&str> = merge
+                .audit
+                .iter()
+                .filter(|a| {
+                    !matches!(a.resolution, weave_core::merge::ResolutionStrategy::Unchanged)
+                })
+                .map(|a| a.name.as_str())
+                .collect();
+            response["merged"] = serde_json::json!(true);
+            response["merged_content"] = serde_json::json!(merge.content);
+            response["merged_over"] = serde_json::json!(merged_over);
+        }
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&response).unwrap_or_default(),
@@ -1947,6 +2066,424 @@ mod description_tests {
             names.len(),
             22,
             "tool count changed ({names:?}) — update SKILL.md/README/docs/llms.txt in the same commit"
+        );
+    }
+}
+
+#[cfg(test)]
+mod claim_by_id_tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    /// A fresh git repo per test (PID + counter, same isolation convention as
+    /// `resolve_entity_for_graph_tests::write_fixture`) — the handlers
+    /// discover the repo root from the absolute file path, so no env vars.
+    fn git_fixture(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "weave-mcp-claim-by-id-test-{}-{}-{}",
+            std::process::id(),
+            name,
+            n
+        ));
+        fs::create_dir_all(&root).expect("create fixture dir");
+        let ok = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .status()
+            .expect("run git init")
+            .success();
+        assert!(ok, "git init failed");
+        for (rel, content) in files {
+            fs::write(root.join(rel), content).expect("write fixture file");
+        }
+        root
+    }
+
+    fn text_of(result: &CallToolResult) -> String {
+        result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap_or_default()
+    }
+
+    const ORIGINAL: &str = "function foo(): string {\n  return \"x\";\n}\n";
+    const RENAMED: &str = "function bar(): string {\n  return \"x\";\n}\n";
+
+    /// Claim `foo`, capture the entity_id from the response, rename the
+    /// entity on disk. The claim-time id must keep addressing the claim:
+    /// update + release by entity_id succeed where the stale name cannot.
+    #[tokio::test]
+    async fn update_and_release_by_entity_id_survive_a_rename() {
+        let root = git_fixture("survives-rename", &[("a.ts", ORIGINAL)]);
+        let abs = root.join("a.ts").to_string_lossy().to_string();
+        let server = WeaveServer::new();
+
+        let claim = server
+            .weave_claim_entity(Parameters(ClaimEntityParams {
+                agent_id: "agent-1".into(),
+                file_path: abs.clone(),
+                entity_name: "foo".into(),
+                entity_type: None,
+                parent_name: None,
+                ordinal: None,
+            }))
+            .await
+            .expect("claim succeeds");
+        let claim_json: serde_json::Value =
+            serde_json::from_str(&text_of(&claim)).expect("claim response is json");
+        let entity_id = claim_json["entity_id"]
+            .as_str()
+            .expect("claim response carries entity_id")
+            .to_string();
+
+        // The rename that breaks name-based resolution.
+        fs::write(root.join("a.ts"), RENAMED).expect("rename on disk");
+
+        let update = server
+            .weave_update_entity_content(Parameters(UpdateEntityContentParams {
+                agent_id: "agent-1".into(),
+                file_path: abs.clone(),
+                entity_name: "foo".into(), // stale — the id must win
+                content: RENAMED.into(),
+                entity_id: Some(entity_id.clone()),
+                base_content: None,
+                ours_content: None,
+                entity_type: None,
+                parent_name: None,
+                ordinal: None,
+            }))
+            .await;
+        assert!(
+            update.is_ok(),
+            "update by entity_id must survive the rename, got: {:?}",
+            update.err()
+        );
+
+        let release = server
+            .weave_release_entity(Parameters(ReleaseEntityParams {
+                agent_id: "agent-1".into(),
+                file_path: abs,
+                entity_name: "foo".into(), // stale — the id must win
+                entity_id: Some(entity_id),
+                entity_type: None,
+                parent_name: None,
+                ordinal: None,
+            }))
+            .await;
+        assert!(
+            release.is_ok(),
+            "release by entity_id must survive the rename, got: {:?}",
+            release.err()
+        );
+    }
+
+    /// Pins today's name-based behavior: without entity_id, a rename between
+    /// claim and update/release makes the old name unresolvable and the call
+    /// fails with an entity-not-found error. This is the failure the
+    /// entity_id parameter exists to remove — kept as the contract for
+    /// callers that only send entity_name.
+    #[tokio::test]
+    async fn stale_name_still_fails_after_a_rename() {
+        let root = git_fixture("stale-name", &[("a.ts", ORIGINAL)]);
+        let abs = root.join("a.ts").to_string_lossy().to_string();
+        let server = WeaveServer::new();
+
+        server
+            .weave_claim_entity(Parameters(ClaimEntityParams {
+                agent_id: "agent-1".into(),
+                file_path: abs.clone(),
+                entity_name: "foo".into(),
+                entity_type: None,
+                parent_name: None,
+                ordinal: None,
+            }))
+            .await
+            .expect("claim succeeds");
+
+        fs::write(root.join("a.ts"), RENAMED).expect("rename on disk");
+
+        let update = server
+            .weave_update_entity_content(Parameters(UpdateEntityContentParams {
+                agent_id: "agent-1".into(),
+                file_path: abs,
+                entity_name: "foo".into(),
+                content: RENAMED.into(),
+                entity_id: None,
+                base_content: None,
+                ours_content: None,
+                entity_type: None,
+                parent_name: None,
+                ordinal: None,
+            }))
+            .await;
+        let err = update.expect_err("stale name must not resolve after a rename");
+        assert!(
+            err.message.contains("not found"),
+            "expected an entity-not-found error, got: {}",
+            err.message
+        );
+    }
+}
+
+#[cfg(test)]
+mod merge_backstop_tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    fn git_fixture(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "weave-mcp-merge-backstop-test-{}-{}-{}",
+            std::process::id(),
+            name,
+            n
+        ));
+        fs::create_dir_all(&root).expect("create fixture dir");
+        let ok = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .status()
+            .expect("run git init")
+            .success();
+        assert!(ok, "git init failed");
+        for (rel, content) in files {
+            fs::write(root.join(rel), content).expect("write fixture file");
+        }
+        root
+    }
+
+    fn text_of(result: &CallToolResult) -> String {
+        result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap_or_default()
+    }
+
+    fn update_params(
+        abs: &str,
+        entity_name: &str,
+        content: &str,
+    ) -> UpdateEntityContentParams {
+        UpdateEntityContentParams {
+            agent_id: "agent-1".into(),
+            file_path: abs.into(),
+            entity_name: entity_name.into(),
+            content: content.into(),
+            entity_id: None,
+            base_content: None,
+            ours_content: None,
+            entity_type: None,
+            parent_name: None,
+            ordinal: None,
+        }
+    }
+
+    // Two independent functions: the disjoint-edit fixture.
+    const BASE: &str = "function foo(): string {\n  return \"foo-base\";\n}\n\nfunction bar(): string {\n  return \"bar-base\";\n}\n";
+    /// Theirs: someone else changed `bar` on disk after we read BASE.
+    const THEIRS_BAR_CHANGED: &str = "function foo(): string {\n  return \"foo-base\";\n}\n\nfunction bar(): string {\n  return \"bar-theirs\";\n}\n";
+    /// Ours: BASE with our `foo` edit spliced in.
+    const OURS_FOO_CHANGED: &str = "function foo(): string {\n  return \"foo-ours\";\n}\n\nfunction bar(): string {\n  return \"bar-base\";\n}\n";
+    const NEW_FOO: &str = "function foo(): string {\n  return \"foo-ours\";\n}";
+    /// Theirs for the true-conflict case: they ALSO changed `foo`.
+    const THEIRS_FOO_CHANGED: &str = "function foo(): string {\n  return \"foo-theirs\";\n}\n\nfunction bar(): string {\n  return \"bar-base\";\n}\n";
+
+    /// A caller that sends neither snapshot field gets the exact previous
+    /// behavior and response shape — the legacy path, byte-compatible.
+    #[tokio::test]
+    async fn no_snapshot_fields_is_the_previous_behavior() {
+        let root = git_fixture("legacy", &[("a.ts", BASE)]);
+        let abs = root.join("a.ts").to_string_lossy().to_string();
+        let server = WeaveServer::new();
+
+        let res = server
+            .weave_update_entity_content(Parameters(update_params(&abs, "foo", NEW_FOO)))
+            .await
+            .expect("legacy update succeeds");
+        let json: serde_json::Value = serde_json::from_str(&text_of(&res)).unwrap();
+        assert!(json.get("drift_detected").is_none());
+        assert!(json.get("merged_content").is_none());
+        assert_eq!(json["entity"], "foo");
+    }
+
+    /// base_content matching the disk exactly: no drift, no merge run,
+    /// ordinary accept — just an explicit drift_detected: false.
+    #[tokio::test]
+    async fn matching_base_content_is_a_cheap_accept() {
+        let root = git_fixture("no-drift", &[("a.ts", BASE)]);
+        let abs = root.join("a.ts").to_string_lossy().to_string();
+        let server = WeaveServer::new();
+
+        let mut p = update_params(&abs, "foo", NEW_FOO);
+        p.base_content = Some(BASE.into());
+        p.ours_content = Some(OURS_FOO_CHANGED.into());
+        let res = server
+            .weave_update_entity_content(Parameters(p))
+            .await
+            .expect("no-drift update succeeds");
+        let json: serde_json::Value = serde_json::from_str(&text_of(&res)).unwrap();
+        assert_eq!(json["drift_detected"], false);
+        assert!(json.get("merged_content").is_none());
+    }
+
+    /// The lost-update case this backstop exists for: disk drifted in a
+    /// DIFFERENT entity. The merge is clean, both changes appear in
+    /// merged_content, and the caller is told what it merged over.
+    #[tokio::test]
+    async fn disjoint_drift_merges_clean() {
+        let root = git_fixture("disjoint", &[("a.ts", THEIRS_BAR_CHANGED)]);
+        let abs = root.join("a.ts").to_string_lossy().to_string();
+        let server = WeaveServer::new();
+
+        let mut p = update_params(&abs, "foo", NEW_FOO);
+        p.base_content = Some(BASE.into());
+        p.ours_content = Some(OURS_FOO_CHANGED.into());
+        let res = server
+            .weave_update_entity_content(Parameters(p))
+            .await
+            .expect("disjoint drift merges");
+        let json: serde_json::Value = serde_json::from_str(&text_of(&res)).unwrap();
+        assert_eq!(json["drift_detected"], true);
+        assert_eq!(json["merged"], true);
+        let merged = json["merged_content"].as_str().expect("merged_content");
+        assert!(merged.contains("foo-ours"), "our foo edit lands");
+        assert!(merged.contains("bar-theirs"), "their bar edit survives");
+        let merged_over: Vec<String> = json["merged_over"]
+            .as_array()
+            .expect("merged_over list")
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            merged_over.iter().any(|n| n.contains("bar")),
+            "merged_over names the concurrently-changed entity, got {merged_over:?}"
+        );
+    }
+
+    /// A true same-entity collision: refused with the semantic conflict in
+    /// the payload (the AlreadyClaimed convention — business outcome, not a
+    /// protocol error), and the CRDT is not touched.
+    #[tokio::test]
+    async fn same_entity_drift_is_a_semantic_conflict() {
+        let root = git_fixture("conflict", &[("a.ts", THEIRS_FOO_CHANGED)]);
+        let abs = root.join("a.ts").to_string_lossy().to_string();
+        let server = WeaveServer::new();
+
+        let mut p = update_params(&abs, "foo", NEW_FOO);
+        p.base_content = Some(BASE.into());
+        p.ours_content = Some(OURS_FOO_CHANGED.into());
+        let res = server
+            .weave_update_entity_content(Parameters(p))
+            .await
+            .expect("conflict is a payload outcome, not a protocol error");
+        let json: serde_json::Value = serde_json::from_str(&text_of(&res)).unwrap();
+        assert_eq!(json["drift_detected"], true);
+        assert!(json.get("merged_content").is_none(), "nothing merged");
+        let conflicts = json["merge_conflicts"].as_array().expect("merge_conflicts");
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0]["entity_name"], "foo");
+        assert_eq!(conflicts[0]["kind"], "both_modified");
+        assert!(conflicts[0]["ours_content"].as_str().unwrap().contains("foo-ours"));
+        assert!(conflicts[0]["theirs_content"].as_str().unwrap().contains("foo-theirs"));
+
+        // Untouched: the entity was never written into the CRDT.
+        let read = server
+            .weave_get_entity_content(Parameters(GetEntityContentParams {
+                file_path: abs,
+                entity_name: "foo".into(),
+                entity_type: None,
+                parent_name: None,
+                ordinal: None,
+            }))
+            .await
+            .expect("read succeeds");
+        let read_json: serde_json::Value = serde_json::from_str(&text_of(&read)).unwrap();
+        // An untracked entity reads back with empty content and an empty
+        // version vector — the conflicted update must have left it that way.
+        assert_eq!(
+            read_json["content"].as_str().unwrap_or_default(),
+            "",
+            "conflicted update must not have written the CRDT, got {read_json}"
+        );
+        assert!(
+            read_json["version_vector"]
+                .as_object()
+                .is_none_or(|o| o.is_empty()),
+            "conflicted update must not have bumped any version, got {read_json}"
+        );
+    }
+
+    /// base_content and ours_content are one opt-in, not two: sending only
+    /// half the snapshot is an invalid call shape, refused up front.
+    #[tokio::test]
+    async fn half_a_snapshot_is_invalid_params() {
+        let root = git_fixture("half", &[("a.ts", BASE)]);
+        let abs = root.join("a.ts").to_string_lossy().to_string();
+        let server = WeaveServer::new();
+
+        let mut p = update_params(&abs, "foo", NEW_FOO);
+        p.base_content = Some(BASE.into());
+        let err = server
+            .weave_update_entity_content(Parameters(p))
+            .await
+            .expect_err("half a snapshot is refused");
+        assert!(
+            err.message.contains("ours_content"),
+            "error names the missing field, got: {}",
+            err.message
+        );
+    }
+
+    /// Theirs renamed the entity we modified: surfaced as a real conflict,
+    /// classified rename_modify — pinned empirically, not assumed.
+    #[tokio::test]
+    async fn theirs_renamed_ours_modified_is_rename_modify() {
+        const THEIRS_RENAMED: &str = "function foo2(): string {\n  return \"foo-base\";\n}\n\nfunction bar(): string {\n  return \"bar-base\";\n}\n";
+        let root = git_fixture("rename-modify", &[("a.ts", BASE)]);
+        let abs = root.join("a.ts").to_string_lossy().to_string();
+        let server = WeaveServer::new();
+
+        // Claim before the rename so entity_id survives it.
+        let claim = server
+            .weave_claim_entity(Parameters(ClaimEntityParams {
+                agent_id: "agent-1".into(),
+                file_path: abs.clone(),
+                entity_name: "foo".into(),
+                entity_type: None,
+                parent_name: None,
+                ordinal: None,
+            }))
+            .await
+            .expect("claim succeeds");
+        let claim_json: serde_json::Value = serde_json::from_str(&text_of(&claim)).unwrap();
+        let entity_id = claim_json["entity_id"].as_str().unwrap().to_string();
+
+        // Theirs lands the rename on disk.
+        fs::write(root.join("a.ts"), THEIRS_RENAMED).expect("theirs rename");
+
+        let mut p = update_params(&abs, "foo", NEW_FOO);
+        p.entity_id = Some(entity_id);
+        p.base_content = Some(BASE.into());
+        p.ours_content = Some(OURS_FOO_CHANGED.into());
+        let res = server
+            .weave_update_entity_content(Parameters(p))
+            .await
+            .expect("rename-modify is a payload outcome");
+        let json: serde_json::Value = serde_json::from_str(&text_of(&res)).unwrap();
+        assert_eq!(json["drift_detected"], true);
+        let conflicts = json["merge_conflicts"].as_array().expect("merge_conflicts");
+        assert!(
+            conflicts.iter().any(|c| c["kind"] == "rename_modify"),
+            "expected a rename_modify conflict, got {conflicts:?}"
         );
     }
 }

@@ -108,6 +108,21 @@ call weave_agent_register first:
 - weave_merge_file: entity-level merge of one file's CRDT state
 - weave_resolve_conflict: resolve an entity weave_merge_file flagged as conflicted
 
+Concurrent-edit backstop: weave_update_entity_content accepts an optional whole-file
+snapshot pair (base_content = the file as you read it, ours_content = the file as you
+intend it). If the disk drifted since your read, disjoint entity changes merge clean —
+the response carries merged_content for YOU to write (weave never writes files) plus
+merged_over naming what changed underneath — and a true same-entity collision is
+refused with merge_conflicts instead of overwriting anyone. weave_claim_entity's
+response includes entity_id; pass it back to update/release so a rename between claim
+and update never breaks the claim.
+
+Known limitation (disclosed, deliberate): there is a window between weave's drift
+check (its fresh read of the file) and the caller's own subsequent write of
+merged_content — a third writer landing inside that window can still be overwritten.
+The claim fast-path narrows the window and a caller's post-write verification catches
+most fallout; file locking is deliberately out of scope.
+
 ## MCP Setup
 
 ```

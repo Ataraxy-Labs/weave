@@ -52,6 +52,10 @@ pub(crate) struct ReleaseEntityParams {
     #[schemars(description = "Name of the entity to release")]
     pub entity_name: String,
     #[schemars(
+        description = "Optional: the entity_id returned by weave_claim_entity. Addresses the claim directly, independent of the entity's current name — a rename between claim and release does not break it. When present, name-based resolution is skipped entirely."
+    )]
+    pub entity_id: Option<String>,
+    #[schemars(
         description = "Optional: entity kind to disambiguate same-named entities (e.g. 'function', 'class', 'method')"
     )]
     pub entity_type: Option<String>,
@@ -228,6 +232,18 @@ pub(crate) struct UpdateEntityContentParams {
     pub entity_name: String,
     #[schemars(description = "New source code content for the entity")]
     pub content: String,
+    #[schemars(
+        description = "Optional: the entity_id returned by weave_claim_entity. Addresses the claim directly, independent of the entity's current name — a rename between claim and update does not break it. When present, name-based resolution is skipped entirely."
+    )]
+    pub entity_id: Option<String>,
+    #[schemars(
+        description = "Optional, sent together with ours_content: the WHOLE FILE exactly as this agent read it before computing the edit. Enables the concurrent-edit backstop: when the file on disk has drifted from this snapshot, weave runs an entity-level 3-way merge (base = this snapshot, ours = ours_content, theirs = current disk) instead of letting the edit silently overwrite concurrent work. Omit both fields for the previous behavior."
+    )]
+    pub base_content: Option<String>,
+    #[schemars(
+        description = "Optional, sent together with base_content: the WHOLE FILE as this agent intends it — base_content with this entity's new content spliced in. Used as the 'ours' side of the drift merge. weave never writes the file; on a clean merge the response carries merged_content for the caller to write."
+    )]
+    pub ours_content: Option<String>,
     #[schemars(
         description = "Optional: entity kind to disambiguate same-named entities (e.g. 'function', 'class', 'method')"
     )]
