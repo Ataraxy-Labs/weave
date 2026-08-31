@@ -196,6 +196,27 @@ impl WeaveServer {
         })
     }
 
+    /// Read the disk side of a merge, where "not there yet" is a fact rather
+    /// than a failure: an absent file is an empty file.
+    ///
+    /// Two agents creating entities in the same new module both address a
+    /// path that does not exist when they read it. Refusing that call is what
+    /// pushes a client back onto a plain write, and the second plain write
+    /// erases the first agent's entity — the exact silent loss the
+    /// concurrent-edit backstop exists to prevent. Every other io error
+    /// (permissions, a directory, invalid UTF-8) still fails loudly.
+    fn read_file_or_empty(abs_path: &Path, display_path: &str) -> Result<String, ToolError> {
+        match std::fs::read_to_string(abs_path) {
+            Ok(content) => Ok(content),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(source) => Err(Reason::Unreadable {
+                path: display_path.to_string(),
+                source,
+            }
+            .into()),
+        }
+    }
+
     /// Resolve an entity address to its ID via weave-crdt's shared resolver.
     ///
     /// Never picks first: on ambiguity the error lists every candidate and
@@ -1458,7 +1479,7 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Write your edit of one entity into the CRDT coordination state — not the file on disk; this is the live multi-agent layer, separate from a git merge. Call once you've decided the entity's new content, whether or not you claimed it first. Bumps your agent's version vector so weave_merge_file and other agents' weave_status calls see the update. Send base_content + ours_content (whole file, as read / as intended) to enable the concurrent-edit backstop: if the file drifted since your read, disjoint entity changes are merged for you (response carries merged_content to write), and a true same-entity collision is refused with merge_conflicts instead of overwriting anyone."
+        description = "Write your edit of one entity into the CRDT coordination state — not the file on disk; this is the live multi-agent layer, separate from a git merge. Call once you've decided the entity's new content, whether or not you claimed it first. Bumps your agent's version vector so weave_merge_file and other agents' weave_status calls see the update. Send base_content + ours_content (whole file, as read / as intended) to enable the concurrent-edit backstop: if the file drifted since your read, disjoint entity changes are merged for you (response carries merged_content to write), and a true same-entity collision is refused with merge_conflicts instead of overwriting anyone. The file need not exist yet — an absent file is an empty base, so call this for entities you are creating too: a second agent creating in the same new file is refused with merge_conflicts rather than silently erasing the first."
     )]
     async fn weave_update_entity_content(
         &self,
@@ -1488,7 +1509,9 @@ impl WeaveServer {
 
         let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-        let content = Self::read_file_at(&abs_path, &rel_path)?;
+        // An absent file is an empty base, not an error: see
+        // [`Self::read_file_or_empty`].
+        let content = Self::read_file_or_empty(&abs_path, &rel_path)?;
         // The entity_id from weave_claim_entity addresses the claim directly —
         // name resolution runs against the file's *current* content, so a
         // rename between claim and update would make the old name
@@ -1503,7 +1526,27 @@ impl WeaveServer {
                 params.entity_type.as_deref(),
                 params.parent_name.as_deref(),
                 params.ordinal,
-            )?,
+            )
+            // The disk holds what other agents have landed, which is where an
+            // entity that already exists must be resolved. An entity the
+            // caller is CREATING is nowhere but the caller's own
+            // ours_content until the caller writes it — so fall back to that
+            // rather than refuse the call. Disk stays authoritative: this is
+            // only reached when the disk has no such entity at all, so no
+            // existing entity resolves differently.
+            .or_else(|absent| match params.ours_content.as_deref() {
+                Some(ours) => Self::resolve_entity_sync(
+                    &self.registry,
+                    ours,
+                    &rel_path,
+                    &params.entity_name,
+                    params.entity_type.as_deref(),
+                    params.parent_name.as_deref(),
+                    params.ordinal,
+                )
+                .map_err(|_| absent),
+                None => Err(absent),
+            })?,
         };
 
         // Concurrent-edit backstop. Drift is decided by comparing the
@@ -1570,8 +1613,16 @@ impl WeaveServer {
 
         let mut state = ctx.state.lock().await;
 
-        // Ensure entity exists in CRDT
-        let entities = self.cached_extract_entities(&content, &rel_path).await;
+        // Ensure entity exists in CRDT. Same reasoning as the resolution
+        // fallback above: a just-created entity is only in the caller's own
+        // file yet, and without the upsert the CRDT write below fails
+        // EntityNotFound.
+        let mut entities = self.cached_extract_entities(&content, &rel_path).await;
+        if !entities.iter().any(|e| e.id == entity_id) {
+            if let Some(ours) = params.ours_content.as_deref() {
+                entities = self.cached_extract_entities(ours, &rel_path).await;
+            }
+        }
         if let Some(e) = entities.iter().find(|e| e.id == entity_id) {
             let _ = upsert_entity(
                 &mut state,
@@ -2440,6 +2491,169 @@ mod merge_backstop_tests {
             err.message.contains("ours_content"),
             "error names the missing field, got: {}",
             err.message
+        );
+    }
+
+    // ---- The creation race: two agents create entities in the SAME new file.
+    //
+    // Nothing is on disk when either agent reads, so both send
+    // base_content: "" — the honest snapshot of an absent file. The backstop
+    // must treat a nonexistent file as an EMPTY BASE, never as an error:
+    // erroring here is exactly the case that pushes a client back onto a
+    // plain write, and a plain write by the second agent silently erases the
+    // first agent's entity (last-writer-wins).
+
+    /// The new module the two agents are racing to create.
+    const NEW_FILE_ALPHA: &str = "function alpha(): string {\n  return \"alpha-1\";\n}\n";
+    const NEW_FILE_BETA: &str = "function beta(): string {\n  return \"beta-1\";\n}\n";
+    const ALPHA_BODY: &str = "function alpha(): string {\n  return \"alpha-1\";\n}";
+    const BETA_BODY: &str = "function beta(): string {\n  return \"beta-1\";\n}";
+
+    /// First writer into a file that does not exist yet. An absent file is
+    /// an empty base, so its snapshot (base_content: "") matches the disk:
+    /// no drift, ordinary accept. Today this errors out on the read.
+    #[tokio::test]
+    async fn absent_file_is_an_empty_base_not_an_error() {
+        let root = git_fixture("create-first", &[]);
+        let abs = root.join("newmod.ts").to_string_lossy().to_string();
+        assert!(
+            !root.join("newmod.ts").exists(),
+            "fixture leaves the file absent"
+        );
+        let server = WeaveServer::new();
+
+        let mut p = update_params(&abs, "alpha", ALPHA_BODY);
+        p.base_content = Some(String::new());
+        p.ours_content = Some(NEW_FILE_ALPHA.into());
+        let res = server
+            .weave_update_entity_content(Parameters(p))
+            .await
+            .expect("creating an entity in a not-yet-existing file must not error");
+        let json: serde_json::Value = serde_json::from_str(&text_of(&res)).unwrap();
+        assert_eq!(
+            json["drift_detected"], false,
+            "an absent file IS the empty base the caller read, got {json}"
+        );
+        assert_eq!(json["entity"], "alpha");
+    }
+
+    /// The race proper, disjoint entities. Agent 1 lands its creation on
+    /// disk (the client is the sole writer). Agent 2 read the same absent
+    /// file, so it still carries base_content: "" — stale by a whole file.
+    ///
+    /// The guarantee under test is the backstop's whole reason to exist:
+    /// agent 2 gets a merge OUTCOME, never a protocol error and never a
+    /// green light to write a file that has only its own entity in it. Both
+    /// agents' work is in the payload.
+    ///
+    /// The refusal is whole-file rather than per-entity, and that is a
+    /// deliberate weave-core property, not a shortfall here: an empty base
+    /// with both sides writing is `v2::Unsupported::BothCreated`, because
+    /// entity reconstruction of a structured format can place content after
+    /// a closing delimiter (weave-core's `empty_base_json_both_add_different_keys`,
+    /// issue #51, pins that). Coarse and safe beats precise and lossy — so
+    /// this test pins "nothing is lost", which is the property the caller
+    /// depends on, and deliberately does NOT pin `merged`.
+    #[tokio::test]
+    async fn concurrent_creation_of_disjoint_entities_is_never_overwritten() {
+        let root = git_fixture("create-race-disjoint", &[]);
+        let abs = root.join("newmod.ts").to_string_lossy().to_string();
+        let server = WeaveServer::new();
+
+        // Agent 1's client writes its creation through write-audit.
+        fs::write(root.join("newmod.ts"), NEW_FILE_ALPHA).expect("agent 1 lands its write");
+
+        // Agent 2 read the file before it existed: its base is empty.
+        let mut p = update_params(&abs, "beta", BETA_BODY);
+        p.agent_id = "agent-2".into();
+        p.base_content = Some(String::new());
+        p.ours_content = Some(NEW_FILE_BETA.into());
+        let res = server
+            .weave_update_entity_content(Parameters(p))
+            .await
+            .expect("the second creator must get a merge outcome, not an error");
+        let json: serde_json::Value = serde_json::from_str(&text_of(&res)).unwrap();
+        assert_eq!(
+            json["drift_detected"], true,
+            "the file appeared under us: {json}"
+        );
+        assert!(
+            json.get("merged_content").is_none(),
+            "a refused merge must not hand back content to write: {json}"
+        );
+        let conflicts = json["merge_conflicts"]
+            .as_array()
+            .expect("the second creator is refused, not silently allowed to overwrite");
+        assert!(
+            !conflicts.is_empty(),
+            "an empty conflict list is a green light: {json}"
+        );
+        let theirs: String = conflicts
+            .iter()
+            .filter_map(|c| c["theirs_content"].as_str())
+            .collect();
+        let ours: String = conflicts
+            .iter()
+            .filter_map(|c| c["ours_content"].as_str())
+            .collect();
+        assert!(
+            theirs.contains("alpha-1"),
+            "agent 1's entity must come back in the conflict, not vanish: {json}"
+        );
+        assert!(
+            ours.contains("beta-1"),
+            "agent 2's entity must come back in the conflict: {json}"
+        );
+    }
+
+    /// Same race, same entity: both agents created `alpha` with different
+    /// bodies. A genuine collision — refused with merge_conflicts in the
+    /// payload carrying both bodies, never an error and never an overwrite.
+    #[tokio::test]
+    async fn concurrent_creation_of_the_same_entity_conflicts() {
+        const OURS_ALPHA: &str = "function alpha(): string {\n  return \"alpha-2\";\n}\n";
+        let root = git_fixture("create-race-same", &[]);
+        let abs = root.join("newmod.ts").to_string_lossy().to_string();
+        let server = WeaveServer::new();
+
+        fs::write(root.join("newmod.ts"), NEW_FILE_ALPHA).expect("agent 1 lands its write");
+
+        let mut p = update_params(
+            &abs,
+            "alpha",
+            "function alpha(): string {\n  return \"alpha-2\";\n}",
+        );
+        p.agent_id = "agent-2".into();
+        p.base_content = Some(String::new());
+        p.ours_content = Some(OURS_ALPHA.into());
+        let res = server
+            .weave_update_entity_content(Parameters(p))
+            .await
+            .expect("a same-entity creation collision is a payload outcome, not an error");
+        let json: serde_json::Value = serde_json::from_str(&text_of(&res)).unwrap();
+        assert_eq!(json["drift_detected"], true);
+        assert!(
+            json.get("merged_content").is_none(),
+            "nothing merged: {json}"
+        );
+        let conflicts = json["merge_conflicts"]
+            .as_array()
+            .expect("merge_conflicts names the collision");
+        assert!(
+            !conflicts.is_empty(),
+            "an empty conflict list is a green light: {json}"
+        );
+        let theirs: String = conflicts
+            .iter()
+            .filter_map(|c| c["theirs_content"].as_str())
+            .collect();
+        let ours: String = conflicts
+            .iter()
+            .filter_map(|c| c["ours_content"].as_str())
+            .collect();
+        assert!(
+            theirs.contains("alpha-1") && ours.contains("alpha-2"),
+            "both bodies must come back for the caller to resolve: {json}"
         );
     }
 
