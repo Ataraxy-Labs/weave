@@ -836,12 +836,14 @@ fn short_body_candidates(
     let body_of = body_tokens_for(arena, &all);
     let mut df: HashMap<&str, usize> = HashMap::new();
     for &b in &branch_short {
+        // b is in `body_of` by construction: `body_tokens_for` maps every idx in `all` (branch_short is part of `all`).
         for tok in &body_of[&b] {
             *df.entry(*tok).or_insert(0) += 1;
         }
     }
     let mut index: HashMap<&str, Vec<Idx>> = HashMap::new();
     for &b in &branch_short {
+        // b is in `body_of` by construction: `body_tokens_for` maps every idx in `all` (branch_short is part of `all`).
         for tok in &body_of[&b] {
             if df.get(*tok).copied().unwrap_or(0) <= RARE_DF {
                 index.entry(*tok).or_default().push(b);
@@ -852,6 +854,7 @@ fn short_body_candidates(
     for &b in &base_short {
         let base_e = arena.get(b);
         let mut seen: BTreeSet<Idx> = BTreeSet::new();
+        // b is in `body_of` by construction: `body_tokens_for` maps every idx in `all` (base_short is part of `all`).
         for tok in &body_of[&b] {
             if let Some(cands) = index.get(*tok) {
                 seen.extend(cands.iter().copied());
@@ -868,7 +871,9 @@ fn short_body_candidates(
             if base_names.contains(cand_e.name()) {
                 continue;
             }
+            // b and cand are in `body_of` by construction: `body_tokens_for` maps every idx in `all`: b from base_short, cand only ever pushed into `index` from branch_short.
             let inter = body_of[&b].intersection(&body_of[&cand]).count();
+            // Same containment invariant as the line above: both keys are members of `all`.
             let min = body_of[&b].len().min(body_of[&cand].len()).max(1);
             let containment = inter as f64 / min as f64;
             if containment < SHORT_BODY_MIN_CONTAINMENT {
