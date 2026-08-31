@@ -131,7 +131,14 @@
     <!-- Summary -->
     <section>
       <h2>Summary</h2>
-      <p class="section-desc">Across 4,917 file merges from 5 repos, weave resolves 83 merges that git cannot, with 0 regressions on C, Python, and Go.</p>
+      <p style="font-size:13px;line-height:1.7;color:var(--fg);background:var(--surface);border-left:3px solid var(--yellow);padding:12px 16px;border-radius:3px;margin-bottom:16px;">
+        <strong style="color:var(--yellow)">Note (0.5.3):</strong> the numbers below were measured on the 0.5.2 merge
+        engine. 0.5.3 changes some merge verdicts on purpose &mdash; genuinely contradictory concurrent additions
+        now conflict instead of resolving silently, and a bug that could resurrect a deleted JSON key was fixed
+        &mdash; so this table is being regenerated on the new engine and will be updated from those runs.
+        Reproduce with <code style="background:var(--bg);padding:2px 6px;border-radius:3px;font-size:12px;">weave bench-repo &lt;path-to-clone&gt; --limit 500</code>.
+      </p>
+      <p class="section-desc">Across 4,517 file merges from 5 repos, weave resolves 83 merges that git cannot, with 0 regressions on C, Python, and Go.</p>
 
       <div class="comparison-table">
         <table>
