@@ -115,6 +115,12 @@ Replayed against real merge commits from five long-lived open-source repositorie
 - **Regression**: Git resolved cleanly, weave's output differs from the human-authored merge
 - **Human match**: of weave's wins, how many are byte-identical to what the developer actually wrote
 
+> **Note (0.5.3):** the table below was measured on the 0.5.2 merge engine. 0.5.3 changes
+> some merge verdicts on purpose — genuinely contradictory concurrent additions now
+> conflict instead of resolving silently, and a bug that could resurrect a deleted JSON
+> key was fixed — so these numbers are being regenerated on the new engine and this
+> table will be updated from those runs. The reproduction command above is exact.
+
 | Repository | Language | File merges tested | Wins | Regressions | Human match |
 |------------|----------|--------------------:|-----:|-------------:|-------------:|
 | [git/git](https://github.com/git/git) | C | 1,319 | 39 | 0 | 64% |
