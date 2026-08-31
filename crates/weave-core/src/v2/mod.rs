@@ -614,7 +614,7 @@ fn raws(
                 by_id
                     .get(e.id.as_str())
                     .copied()
-                    .unwrap_or_else(|| e.content.as_str()),
+                    .unwrap_or(e.content.as_str()),
                 separator,
             ),
             src_id: e.id.clone(),

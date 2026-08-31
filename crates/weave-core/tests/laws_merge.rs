@@ -804,7 +804,15 @@ proptest! {
 // merge): pinned RED below.
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(96))]
+    // Higher reject budget: this law filters on clean-merge outcomes, and at
+    // elevated PROPTEST_CASES the default 1024-global-reject cap exhausts during
+    // generation (budget exhaustion, not a counterexample). The filter itself is
+    // the point -- only clean merges may assert linearity.
+    #![proptest_config(ProptestConfig {
+        cases: 96,
+        max_global_rejects: 65536,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn l8_linearity_clean_output_defines_each_name_once(
