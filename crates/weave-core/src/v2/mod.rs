@@ -256,6 +256,46 @@ mod tests {
             );
         }
     }
+
+    /// Reproduces #148: a side that deletes every entity in the file
+    /// collapses, in `extract_regions`, to a single `file_only` region
+    /// instead of the `file_header`/`file_footer` keys the other two sides
+    /// keep for the very same trailing text. `merge_interstitials` 3-way
+    /// merges by key, so on that side `file_footer` simply is not present
+    /// and reads back as `""`; since base and theirs still agree on
+    /// `file_footer`, the ladder's second rung (`base == theirs -> take
+    /// ours`) picks that empty string, discarding text every one of the
+    /// three inputs agreed on.
+    ///
+    /// A single-entity repro would not show this: `render` has a *separate*,
+    /// correct fallback that emits `file_only` verbatim when the whole
+    /// merge produces zero surviving items, which papers over the bug. This
+    /// case keeps `bar` alive as a genuine modify/delete conflict so `items`
+    /// is non-empty and that fallback cannot fire.
+    #[test]
+    fn shared_top_level_text_survives_when_one_side_deletes_every_entity() {
+        let base = "def foo():\n    return 1\n\n\ndef bar():\n    return 1\n\n\nshared = 5\n";
+        let ours = "shared = 5\n";
+        let theirs = "def foo():\n    return 1\n\n\ndef bar():\n    return 2\n\n\nshared = 5\n";
+
+        let result = merge_file(
+            base,
+            ours,
+            theirs,
+            "m.py",
+            &crate::merge::PARSER_REGISTRY,
+            &MarkerFormat::default(),
+            &Host::default(),
+        )
+        .expect("theirs still has entities; this must not fall back to Unsupported");
+
+        assert!(
+            result.content.contains("shared = 5"),
+            "top-level statement unanimous across base/ours/theirs must survive \
+             the merge, got: {:?}",
+            result.content,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

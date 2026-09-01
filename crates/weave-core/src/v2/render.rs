@@ -340,17 +340,35 @@ pub(crate) fn render(
         first = false;
     }
 
-    // Gaps nothing surviving leads, then the footer. Both are text some version
-    // wrote; neither is this merge's to discard — and both sit at the same
-    // boundary, the end of the file, so they go through the same join: a blank
-    // run rolled forward past the last surviving declaration and a blank footer
-    // state one distance between that declaration and the end, not two.
+    // Gaps nothing surviving leads, then the footer, then `file_only`. All
+    // three are text some version wrote; none is this merge's to discard —
+    // and all three sit at the same boundary, the end of the file, so they
+    // go through the same join: a blank run rolled forward past the last
+    // surviving declaration and a blank footer state one distance between
+    // that declaration and the end, not two.
+    //
+    // `file_only` is a side's WHOLE file, in one region, keyed distinctly
+    // from `file_header`/`file_footer` — `extract_regions` takes that path
+    // exactly when a side has zero entities (see its module docs). A side
+    // in that shape has no `file_footer` key at all, so `merge_interstitials`
+    // reads it back as `""` there; when the other two sides agree on
+    // `file_footer`, the ladder's `base == theirs -> take ours` rung then
+    // picks that absent side's `""`, discarding text every version agreed
+    // on (#148). Gating this key's own, correctly-merged text on
+    // `items.is_empty()` (previously: only surface it when the WHOLE
+    // document merged to zero entities) meant it recovered that loss in
+    // exactly the one case where nothing else in the file needed it, and
+    // dropped it in every other. It is never claimed by the entity-following
+    // mechanism above — `Interstitials::new` pre-excludes it from
+    // `lead_by_entity`/`trailing` because no entity survives on the side
+    // that produced it — so folding it into this join is always safe.
     let tail: Vec<&str> = interstitials
         .trailing
         .iter()
         .filter(|key| spent.insert(key.as_str()))
         .filter_map(|key| interstitials.merged.get(key.as_str()).map(String::as_str))
         .chain(interstitials.merged.get("file_footer").map(String::as_str))
+        .chain(interstitials.merged.get("file_only").map(String::as_str))
         .collect();
     let joined = join_gaps(tail);
     if !joined.is_empty() {
@@ -358,11 +376,6 @@ pub(crate) fn render(
             out.push('\n');
         }
         out.push_str(&joined);
-    }
-    if let Some(only) = interstitials.merged.get("file_only") {
-        if items.is_empty() {
-            out.push_str(only);
-        }
     }
     out
 }
