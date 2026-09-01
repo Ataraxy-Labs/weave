@@ -209,6 +209,18 @@ impl EntityStateDoc {
         }
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
+            // `parent` is `.weave/` — weave's own coordination state, not
+            // repository content. It must never show up in `git status`,
+            // get swept into `git add -A`, or ride along in a generated
+            // patch (see `weave_core::git::ensure_locally_excluded`).
+            // Best-effort and idempotent, on every save rather than only the
+            // first: a repo we can't find, or a git we can't run, must never
+            // block writing the state a caller asked for, and a `.weave/`
+            // directory that predates this fix gets excluded retroactively
+            // on its very next save.
+            if let Some(repo_root) = parent.parent() {
+                let _ = weave_core::git::ensure_locally_excluded(repo_root, ".weave/");
+            }
         }
         let data = self.doc.save();
         std::fs::write(&self.path, data)?;

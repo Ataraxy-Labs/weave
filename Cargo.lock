@@ -3672,6 +3672,7 @@ dependencies = [
  "sem-core",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "weave-core",
  "weave-crdt",

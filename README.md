@@ -322,7 +322,10 @@ for the full flag list; the table below is what each one is for.
 
 `claim`/`release`/`status`/`apply` all operate on the same `.weave/state.automerge` CRDT
 document as the MCP tools below: the CLI and MCP server are two front ends onto one
-coordination state.
+coordination state. That document lives in the repo's working tree but is never repo
+content: the first time weave writes it, it adds `.weave/` to the repo's local
+`.git/info/exclude` (never your own `.gitignore`), so it never shows up in `git status`
+or gets swept into `git add -A`.
 
 ## MCP Server
 

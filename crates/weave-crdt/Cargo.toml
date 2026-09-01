@@ -20,6 +20,7 @@ test-helpers = []
 # them on without shipping them to real consumers.
 [dev-dependencies]
 weave-crdt = { path = ".", features = ["test-helpers"] }
+tempfile = "3"
 
 [dependencies]
 automerge = "0.11"
