@@ -228,7 +228,7 @@
             <li><strong>Operations:</strong> an audit log of claims, releases, and modifications</li>
           </ul>
 
-          <p>This is saved as a binary file at <code>.weave/state.automerge</code> in your repo root. It's not committed to git &mdash; it's local coordination state, like <code>.git/</code> itself.</p>
+          <p>This is saved as a binary file at <code>.weave/state.automerge</code> in your repo root. It's not committed to git &mdash; it's local coordination state, like <code>.git/</code> itself. The first time weave writes it, it also adds <code>.weave/</code> to your repo's local <code>.git/info/exclude</code> (never your own <code>.gitignore</code>), so <code>git status</code> and <code>git add -A</code> ignore it automatically &mdash; nothing for you to configure.</p>
 
           <h2>Why advisory locks, not hard locks?</h2>
 
