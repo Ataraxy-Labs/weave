@@ -3818,3 +3818,40 @@ fn statement_fold_does_not_splice_an_insertion_before_the_binding_it_reads() {
     // else: a reported conflict is an acceptable, honest outcome here — the
     // bug this test guards is the SILENT misordering, not "refuses to merge".
 }
+
+// =============================================================================
+// Issue #148 independent repro: file_only text dropped when another entity
+// survives elsewhere in the file
+// =============================================================================
+
+/// Independent reproduction of #148, in TypeScript (the issue's own
+/// language) rather than the PR's Python case: a statement no grammar rule
+/// recognises as an entity (`console.log(...)`, unlike a top-level `let`,
+/// which TS *does* treat as an entity and which would sidestep the bug
+/// entirely) sits after two functions. `ours` deletes both functions,
+/// leaving a file with zero entities, so `extract_regions` keys the whole
+/// remaining text as `file_only` instead of the `file_footer` key
+/// base/theirs use for the same bytes. `bar` is modified by theirs but
+/// deleted by ours, which keeps a real conflict alive in the rendered
+/// output so this repro does not fall into `render`'s separate, correct
+/// `items.is_empty()` fallback that only fires when the whole document
+/// merges to nothing.
+///
+/// Confirmed failing against `main` at 5c31dd9 (pre-fix): the entire
+/// `console.log('shared');` line was dropped, along with `foo`, leaving
+/// only the `bar` conflict markers in the output.
+#[test]
+fn issue_148_shared_top_level_text_survives_when_a_side_has_zero_entities() {
+    let base = "function foo() {\n  return 1;\n}\n\nfunction bar() {\n  return 1;\n}\n\nconsole.log('shared');\n";
+    let ours = "console.log('shared');\n";
+    let theirs = "function foo() {\n  return 1;\n}\n\nfunction bar() {\n  return 2;\n}\n\nconsole.log('shared');\n";
+
+    let result = entity_merge(base, ours, theirs, "probe148.ts");
+
+    assert!(
+        result.content.contains("console.log('shared');"),
+        "top-level statement unanimous across base/ours/theirs must survive \
+         the merge, got: {:?}",
+        result.content,
+    );
+}

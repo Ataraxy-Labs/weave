@@ -7,6 +7,12 @@ Versions are shared across every crate in the workspace and the npm package,
 so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 `weave-github` and `@ataraxy-labs/weave` all move together.
 
+## 0.5.4
+
+### Fixed
+
+- A merged file could silently drop top-level text (statements, comments, strings) that every version agreed on, when one side deleted every entity in the file while another entity elsewhere in the same file still survived the merge. `extract_regions` keys a side with zero entities as a single `file_only` region, while the other sides key that same trailing text as `file_header`/`file_footer`/`between:...`; the interstitial 3-way merge worked per-key, so on the zero-entity side the `file_footer` key simply wasn't present and read back as `""` — and when the other two sides agreed on `file_footer`, the merge ladder's `base == theirs -> take ours` rung picked that empty string, discarding text no version had touched. `render` now folds the correctly-computed `file_only` text into the same trailing join as `file_footer` unconditionally, instead of only when the whole document merged to zero surviving entities. Fixes #148. (#162)
+
 ## 0.5.3
 
 ### Fixed

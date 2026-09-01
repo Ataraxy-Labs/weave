@@ -1,6 +1,6 @@
 [package]
 name = "weave-cli"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Entity-level semantic merge CLI. Resolves conflicts at the function/class level instead of lines."
@@ -19,8 +19,8 @@ name = "weave"
 path = "src/main.rs"
 
 [dependencies]
-weave-core = { path = "../weave-core", version = "0.5.3" }
-weave-crdt = { path = "../weave-crdt", version = "0.5.3" }
+weave-core = { path = "../weave-core", version = "0.5.4" }
+weave-crdt = { path = "../weave-crdt", version = "0.5.4" }
 sem-core = { version = "0.23", default-features = false, features = ["git", "parallel", "grammar-all", "mmap"] }
 clap = { version = "4", features = ["derive"] }
 colored = "3"

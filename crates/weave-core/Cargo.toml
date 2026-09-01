@@ -1,6 +1,6 @@
 [package]
 name = "weave-core"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Entity-level semantic merge engine. Three-way merge at the function/class/method level instead of lines."
