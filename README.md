@@ -431,4 +431,4 @@ Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your 
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Ataraxy-Labs/weave&type=Date)](https://star-history.com/#Ataraxy-Labs/weave&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=Ataraxy-Labs/weave&type=Date)](https://star-history.dera.page/#Ataraxy-Labs/weave&Date)
