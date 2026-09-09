@@ -37,6 +37,17 @@ pub(crate) fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
+/// The `char` counterpart of [`is_ident_char`]. Python 3, JavaScript and
+/// TypeScript all allow non-ASCII letters in identifiers, so an identifier
+/// boundary has to be decided per *character*. Deciding it on the first byte of
+/// a multi-byte character classifies that byte as a non-identifier (every UTF-8
+/// continuation and lead byte is `>= 0x80`), which both mis-detects boundaries
+/// and, when a scan then advances by one byte, slices inside a character and
+/// panics.
+pub(crate) fn is_ident_char_c(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
 /// Visibility / modifier keywords that can precede a definer keyword.
 const MODIFIERS: [&str; 11] = [
     "export ",
@@ -101,21 +112,32 @@ pub fn has_call_reference(content: &str, name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
+    // A rejected match is retried one *char* later, not one byte later: with a
+    // multi-byte first character `i + 1` lands inside it and the next slice
+    // panics (issue #165). `needle` may also overlap itself, so a whole-needle
+    // skip would miss matches; one char is the correct minimal advance.
+    let first_char_len = name.chars().next().map_or(1, char::len_utf8);
     content.lines().any(|line| {
         if is_definition_line(line, name) {
             return false;
         }
-        let bytes = line.as_bytes();
         let mut from = 0usize;
         while let Some(rel) = line[from..].find(name) {
             let i = from + rel;
-            let before_ok = i == 0 || (!is_ident_char(bytes[i - 1]) && bytes[i - 1] != b'.');
+            // The character before the match, Unicode-aware. A match glued to an
+            // identifier character (ASCII or not) is part of a longer identifier,
+            // and one preceded by `.` is attribute access that binds elsewhere.
+            let before_ok = i == 0
+                || line[..i]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !is_ident_char_c(c) && c != '.');
             let after = i + name.len();
             let call_ok = line[after..].trim_start().starts_with('(');
             if before_ok && call_ok {
                 return true;
             }
-            from = i + 1;
+            from = i + first_char_len;
             if from >= line.len() {
                 break;
             }
@@ -134,21 +156,30 @@ pub fn has_call_reference(content: &str, name: &str) -> bool {
 pub(crate) fn called_names(content: &str) -> HashSet<&str> {
     let mut out: HashSet<&str> = HashSet::new();
     for line in content.lines() {
-        let bytes = line.as_bytes();
-        let mut i = 0usize;
-        while i < bytes.len() {
-            let starts_ident = (bytes[i].is_ascii_alphabetic() || bytes[i] == b'_')
-                && (i == 0 || (!is_ident_char(bytes[i - 1]) && bytes[i - 1] != b'.'));
+        // Walk by character so a non-ASCII call site (a legal identifier in
+        // Python 3 / JS / TS) enters the index instead of being skipped, which
+        // is what let rename repair silently miss non-ASCII renames (issue #165).
+        let mut it = line.char_indices().peekable();
+        while let Some((start, c)) = it.next() {
+            let starts_ident = (c.is_alphabetic() || c == '_')
+                && line[..start]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|p| !is_ident_char_c(p) && p != '.');
             if !starts_ident {
-                i += 1;
                 continue;
             }
-            let start = i;
-            while i < bytes.len() && is_ident_char(bytes[i]) {
-                i += 1;
+            let mut end = start + c.len_utf8();
+            while let Some(&(j, cc)) = it.peek() {
+                if is_ident_char_c(cc) {
+                    end = j + cc.len_utf8();
+                    it.next();
+                } else {
+                    break;
+                }
             }
-            let name = &line[start..i];
-            if line[i..].trim_start().starts_with('(') && !is_definition_line(line, name) {
+            let name = &line[start..end];
+            if line[end..].trim_start().starts_with('(') && !is_definition_line(line, name) {
                 out.insert(name);
             }
         }
@@ -384,7 +415,6 @@ pub fn replace_at_word_boundaries(content: &str, needle: &str, replacement: &str
     if needle.is_empty() {
         return content.to_string();
     }
-    let bytes = content.as_bytes();
     // A rejected match is retried one *char* later, not one needle later:
     // `needle` may overlap itself, and only the boundary test decides.
     let first_char_len = needle.chars().next().map_or(1, char::len_utf8);
@@ -395,16 +425,21 @@ pub fn replace_at_word_boundaries(content: &str, needle: &str, replacement: &str
     let mut search = 0;
     while let Some(rel) = content[search..].find(needle) {
         let i = search + rel;
-        let before_ok = i == 0 || {
-            let prev_idx = content[..i]
-                .char_indices()
+        // Boundaries are tested on the adjacent *characters*, not the first
+        // byte of a character. Testing the byte classified every non-ASCII
+        // neighbour as a non-identifier and split identifiers like `获取积分`
+        // into `获取total` (issue #165).
+        let before_ok = i == 0
+            || content[..i]
+                .chars()
                 .next_back()
-                .map(|(idx, _)| idx)
-                .unwrap_or(0);
-            !is_ident_char(bytes[prev_idx])
-        };
+                .is_none_or(|c| !is_ident_char_c(c));
         let after_idx = i + needle.len();
-        let after_ok = after_idx >= content.len() || !is_ident_char(bytes[after_idx]);
+        let after_ok = after_idx >= content.len()
+            || content[after_idx..]
+                .chars()
+                .next()
+                .is_none_or(|c| !is_ident_char_c(c));
         if before_ok && after_ok {
             result.push_str(&content[copied..i]);
             result.push_str(replacement);
@@ -528,5 +563,65 @@ mod tests {
                 "index and predicate disagree about {name}"
             );
         }
+    }
+
+    /// Issue #165. A non-ASCII identifier used to slice inside a multi-byte
+    /// character and panic (exit 101), aborting the surrounding `git merge`
+    /// instead of producing a verdict. These must all return a value, not panic.
+    #[test]
+    fn non_ascii_identifiers_do_not_panic() {
+        // The exact unit form from the report.
+        assert!(!has_call_reference("class C:\n    self.积分 = 1\n", "积分"));
+        // A bare mention on a line, not a call.
+        assert!(!has_call_reference("def helper():\n    x = 积分\n    return x\n", "积分"));
+        // The definition line itself is never a call.
+        assert!(!has_call_reference("def 积分():\n    return 1\n", "积分"));
+    }
+
+    /// A non-ASCII call is detected, and a non-ASCII name that only appears as a
+    /// substring of a longer identifier is not a call to it.
+    #[test]
+    fn non_ascii_call_boundaries_are_by_character() {
+        assert!(has_call_reference("x = 积分()\n", "积分"));
+        assert!(has_call_reference("total = 获取积分(2)\n", "获取积分"));
+        // `积分` is a suffix of `获取积分`, not a call on its own.
+        assert!(!has_call_reference("total = 获取积分(2)\n", "积分"));
+    }
+
+    /// The call index sees non-ASCII call sites too, so rename repair no longer
+    /// silently skips a non-ASCII rename, and it stays consistent with the
+    /// predicate.
+    #[test]
+    fn the_call_index_covers_non_ascii() {
+        let text = "x = 积分()\ny = 获取积分(2)\n";
+        let indexed = called_names(text);
+        assert!(indexed.contains("积分"));
+        assert!(indexed.contains("获取积分"));
+        for name in ["积分", "获取积分"] {
+            assert_eq!(
+                indexed.contains(name),
+                has_call_reference(text, name),
+                "index and predicate disagree about {name}"
+            );
+        }
+    }
+
+    /// The rewrite respects character boundaries: it replaces a whole non-ASCII
+    /// identifier but never splits a longer one that merely contains it.
+    #[test]
+    fn replace_respects_non_ascii_boundaries() {
+        assert_eq!(
+            replace_at_word_boundaries("积分(2)", "积分", "total"),
+            "total(2)"
+        );
+        // The reported split: `获取积分` must stay whole, not become `获取total`.
+        assert_eq!(
+            replace_at_word_boundaries("y = 获取积分(2)", "积分", "total"),
+            "y = 获取积分(2)"
+        );
+        assert_eq!(
+            replace_at_word_boundaries("获取(积分)", "积分", "total"),
+            "获取(total)"
+        );
     }
 }
