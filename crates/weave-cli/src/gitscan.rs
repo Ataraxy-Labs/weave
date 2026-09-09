@@ -105,11 +105,14 @@ pub(crate) fn rev_exists(dir: &Path, rev: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve the merge triple, defaulting to the merge in progress.
+/// Resolve the merge triple, defaulting to the operation in progress.
 ///
-/// `ours` defaults to `HEAD`; `theirs` defaults to `MERGE_HEAD` (so a bare
-/// `weave check` mid-merge does the obvious thing); `base` defaults to the
-/// merge base of the two.
+/// `ours` defaults to `HEAD`; `theirs` defaults to the commit of whatever
+/// three-way operation is underway. A plain merge records it as `MERGE_HEAD`,
+/// but a rebase, cherry-pick or revert conflict has no `MERGE_HEAD` — git
+/// records the commit being applied as `REBASE_HEAD` / `CHERRY_PICK_HEAD` /
+/// `REVERT_HEAD` instead, so a bare `weave check` can still verify a resolution
+/// against it (issue #157). `base` defaults to the merge base of the two.
 pub(crate) fn resolve_revs(
     dir: &Path,
     base: Option<&str>,
@@ -124,10 +127,19 @@ pub(crate) fn resolve_revs(
     let ours = ours.unwrap_or("HEAD").to_string();
     let theirs = match theirs {
         Some(t) => t.to_string(),
-        None if rev_exists(dir, "MERGE_HEAD") => "MERGE_HEAD".to_string(),
-        None => {
-            return Err("no --theirs given and no merge in progress (MERGE_HEAD absent)".into())
-        }
+        None => [
+            "MERGE_HEAD",
+            "REBASE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+        ]
+        .into_iter()
+        .find(|r| rev_exists(dir, r))
+        .map(str::to_string)
+        .ok_or(
+            "no --theirs given and no merge, rebase, cherry-pick or revert in progress \
+                 (no MERGE_HEAD / REBASE_HEAD / CHERRY_PICK_HEAD / REVERT_HEAD)",
+        )?,
     };
     let base = match base {
         Some(b) => b.to_string(),
@@ -168,12 +180,17 @@ pub struct MergeScope {
 
 /// Find the merge this repository is in — or has just finished — and read it.
 ///
-/// Two shapes, in order, because they are the two moments an agent asks:
+/// Three shapes, in order, because they are the moments an agent asks:
 ///
 /// * **mid-merge**: `MERGE_HEAD` exists. Ours is `HEAD`, theirs is
 ///   `MERGE_HEAD`. This is the state right after `git merge` exits 1, and it
 ///   survives `git add` — which is exactly why the index's unmerged list alone
 ///   is not enough to find the subjects.
+/// * **mid-rebase / cherry-pick / revert**: there is no `MERGE_HEAD`, but git
+///   records the commit being applied as `REBASE_HEAD` / `CHERRY_PICK_HEAD` /
+///   `REVERT_HEAD`. Ours is `HEAD` (the side built so far), theirs is that
+///   commit. Without this, `weave check` fell through to "nothing was checked"
+///   during every rebase, while still suggesting itself (issue #157).
 /// * **just committed**: `HEAD` has two parents. Ours is `HEAD^1`, theirs is
 ///   `HEAD^2`. An agent that committed and then wants to know what it did.
 ///
@@ -185,6 +202,15 @@ pub fn merge_scope(dir: &Path) -> R<Option<MergeScope>> {
     }
     let (ours_rev, theirs_rev, moment) = if rev_exists(dir, "MERGE_HEAD") {
         ("HEAD".to_string(), "MERGE_HEAD".to_string(), "in progress")
+    } else if let Some(op_head) = ["REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
+        .into_iter()
+        .find(|r| rev_exists(dir, r))
+    {
+        // A rebase, cherry-pick or revert conflict has no MERGE_HEAD; git
+        // records the commit being applied as *_HEAD, and the unmerged index
+        // stages are the real three-way. HEAD is the side built so far, so
+        // `weave check` can verify a resolution here too (issue #157).
+        ("HEAD".to_string(), op_head.to_string(), "in progress")
     } else if rev_exists(dir, "HEAD^2") {
         ("HEAD^1".to_string(), "HEAD^2".to_string(), "just committed")
     } else {
@@ -293,8 +319,8 @@ pub fn file_stages(dir: &Path, path: &str) -> R<(String, String, String)> {
         return Ok((b, o, t));
     }
     let scope = merge_scope(dir)?.ok_or(
-        "no merge in progress and HEAD is not a merge commit — there is no three-way \
-                context to explain this file against",
+        "no merge, rebase, cherry-pick or revert in progress and HEAD is not a merge \
+                commit — there is no three-way context to explain this file against",
     )?;
     let get = |t: &Tree| t.get(path).cloned().unwrap_or_default();
     if !scope.ours.contains_key(path) && !scope.theirs.contains_key(path) {
