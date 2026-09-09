@@ -212,18 +212,14 @@ fn tokenize(src: &str) -> Option<Vec<Tok>> {
             i += 1;
         } else if b[i] == b'"' || b[i] == b'\'' || b[i] == b'`' {
             let quote = b[i];
-            match close_on_line(b, i, quote) {
-                Some(end) => {
-                    kind = Kind::Str;
-                    i = end + 1;
-                }
-                // No closer on this line: a literal this reader cannot see the
-                // end of, and guessing where it ends is how a composition lands
-                // inside a string. Refuse the statement rather than the token —
-                // reading on would mean reading text as code that is not code,
-                // the one state `statement::depths` also treats as fatal.
-                None => return None,
-            }
+            // No closer on this line: a literal this reader cannot see the end
+            // of, and guessing where it ends is how a composition lands inside a
+            // string. Refuse the statement rather than the token — reading on
+            // would mean reading text as code that is not code, the one state
+            // `statement::depths` also treats as fatal.
+            let end = close_on_line(b, i, quote)?;
+            kind = Kind::Str;
+            i = end + 1;
         } else if b[i].is_ascii_digit() {
             kind = Kind::Number;
             i += 1;
