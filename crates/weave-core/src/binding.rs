@@ -573,7 +573,10 @@ mod tests {
         // The exact unit form from the report.
         assert!(!has_call_reference("class C:\n    self.积分 = 1\n", "积分"));
         // A bare mention on a line, not a call.
-        assert!(!has_call_reference("def helper():\n    x = 积分\n    return x\n", "积分"));
+        assert!(!has_call_reference(
+            "def helper():\n    x = 积分\n    return x\n",
+            "积分"
+        ));
         // The definition line itself is never a call.
         assert!(!has_call_reference("def 积分():\n    return 1\n", "积分"));
     }

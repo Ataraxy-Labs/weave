@@ -53,7 +53,9 @@ fn weave_state_never_shows_up_in_git_status_or_a_staged_diff() {
     // `<repo_root>/.weave/state.automerge`.
     let state_path = repo.join(".weave").join("state.automerge");
     let mut state = EntityStateDoc::open(&state_path).expect("open a fresh state doc");
-    state.save().expect("save creates .weave/ and writes the doc");
+    state
+        .save()
+        .expect("save creates .weave/ and writes the doc");
 
     assert!(
         state_path.exists(),
