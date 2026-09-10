@@ -1053,16 +1053,13 @@ fn merge_imports_commutatively(base: &str, ours: &str, theirs: &str) -> (String,
         || theirs_imports.iter().any(|i| i.is_multiline);
 
     if has_multiline {
-        return (
-            merge_imports_with_multiline(
-                base,
-                ours,
-                theirs,
-                &base_imports,
-                &ours_imports,
-                &theirs_imports,
-            ),
-            false,
+        return merge_imports_with_multiline(
+            base,
+            ours,
+            theirs,
+            &base_imports,
+            &ours_imports,
+            &theirs_imports,
         );
     }
 
@@ -1397,7 +1394,7 @@ fn merge_imports_with_multiline(
     base_imports: &[ImportStatement],
     ours_imports: &[ImportStatement],
     theirs_imports: &[ImportStatement],
-) -> String {
+) -> (String, bool) {
     // Build source → specifier sets for base and theirs.
     // Use entry API to merge specifiers when multiple imports share the same source
     // (e.g. `import type { Foo } from "./foo"` AND `import { type a } from "./foo"`).
@@ -1441,6 +1438,49 @@ fn merge_imports_with_multiline(
         .filter(|l| !theirs_single.contains(l.as_str()))
         .map(|l| l.as_str())
         .collect();
+
+    // Whole-statement deletion, which the per-specifier merge below cannot
+    // represent (issue #166).
+    //
+    // That merge asks "which specifiers did each side keep", so a side that
+    // deleted the entire statement is indistinguishable from a side that
+    // removed every specifier from it. Treating them alike drops the base
+    // specifiers while any specifier the *other* side added survives, emitting
+    // a hollow import neither side wrote, exit 0, no markers, and code that
+    // fails at runtime because the surviving body still uses the dropped names.
+    //
+    // Deletion against modification is a modify/delete conflict, and there is
+    // no merged text that honours both sides, so it is reported rather than
+    // resolved. Deletion against an untouched statement is not a conflict: the
+    // per-specifier path already yields the deletion, which is what both sides
+    // asked for.
+    let sources_of = |imports: &[ImportStatement]| -> HashSet<String> {
+        imports.iter().map(|i| i.source.clone()).collect()
+    };
+    let ours_sources = sources_of(ours_imports);
+    let theirs_sources = sources_of(theirs_imports);
+    let specs_for = |imports: &[ImportStatement], source: &str| -> HashSet<String> {
+        imports
+            .iter()
+            .filter(|i| i.source == source)
+            .flat_map(|i| i.specifiers.iter().cloned())
+            .collect()
+    };
+    let modify_delete_conflict = base_imports.iter().any(|b| {
+        let source = b.source.as_str();
+        let base_set = specs_for(base_imports, source);
+        // One side dropped the statement entirely while the other side kept it
+        // and changed which names it brings in.
+        let theirs_deleted =
+            !theirs_sources.contains(source) && specs_for(ours_imports, source) != base_set;
+        let ours_deleted =
+            !ours_sources.contains(source) && specs_for(theirs_imports, source) != base_set;
+        (theirs_deleted && ours_sources.contains(source))
+            || (ours_deleted && theirs_sources.contains(source))
+    });
+    if modify_delete_conflict {
+        return (String::new(), true);
+    }
 
     // Process ours imports, merging in theirs specifiers
     let mut result_parts: Vec<String> = Vec::new();
@@ -1699,7 +1739,7 @@ fn merge_imports_with_multiline(
     for _ in result_trailing..ours_trailing {
         result.push('\n');
     }
-    result
+    (result, false)
 }
 
 /// Extract the source/module prefix from an import line for group matching.
@@ -4092,6 +4132,64 @@ export function bar() {
             !result.content.contains("import type { Foo }"),
             "old separate import should be removed"
         );
+    }
+
+    /// Issue #166. One side deletes a whole multi-line import while the other
+    /// adds a specifier to it. The per-specifier merge cannot tell "deleted the
+    /// statement" from "removed every specifier", and used to emit an import
+    /// containing only the added specifier, clean and unmarked, with the base
+    /// specifiers gone while the surviving body still used them.
+    #[test]
+    fn multiline_import_deleted_by_one_side_conflicts_instead_of_hollowing() {
+        let base =
+            "from os import (\n    path,\n    sep,\n)\n\n\ndef main():\n    print(path, sep)\n";
+        let ours =
+            "from os import (\n    path,\n    sep,\n    abspath,\n)\n\n\ndef main():\n    print(path, sep)\n";
+        let theirs = "def main():\n    print(path, sep)\n";
+
+        let result = entity_merge(base, ours, theirs, "mod.py");
+        assert!(
+            !result.is_clean(),
+            "modify vs whole-statement delete must conflict, got:\n{}",
+            result.content
+        );
+        // The specific corruption: the statement survives carrying only the
+        // added name, with the ones both base and ours kept dropped.
+        let hollow = result.content.contains("abspath")
+            && !result.content.contains("path,")
+            && !result.content.contains("sep");
+        assert!(!hollow, "hollow import emitted:\n{}", result.content);
+
+        // Mirrored, so neither side is privileged by the walk order.
+        let mirrored = entity_merge(base, theirs, ours, "mod.py");
+        assert!(
+            !mirrored.is_clean(),
+            "delete vs modify must conflict in both directions, got:\n{}",
+            mirrored.content
+        );
+    }
+
+    /// The neighbours of #166 that must stay clean: a deletion nobody contested,
+    /// and a deletion both sides agreed on. Only deletion *against a
+    /// modification* is a conflict.
+    #[test]
+    fn uncontested_multiline_import_deletion_still_merges() {
+        let base =
+            "from os import (\n    path,\n    sep,\n)\n\n\ndef main():\n    print(path, sep)\n";
+        let deleted = "def main():\n    print(path, sep)\n";
+
+        for (name, ours, theirs) in [
+            ("theirs deletes, ours untouched", base, deleted),
+            ("ours deletes, theirs untouched", deleted, base),
+            ("both delete", deleted, deleted),
+        ] {
+            let result = entity_merge(base, ours, theirs, "mod.py");
+            assert!(
+                result.is_clean(),
+                "{name} must merge cleanly, got:\n{}",
+                result.content
+            );
+        }
     }
 
     #[test]
