@@ -1090,6 +1090,11 @@ func HandleDelete(w http.ResponseWriter, r *http.Request) {
 
     let mut total_weave_clean = 0;
     let mut total_git_clean = 0;
+    // Correct = produced the outcome the scenario calls for, which for the
+    // composing-decorator cases means refusing rather than merging.
+    let mut total_weave_correct = 0;
+    let mut total_git_correct = 0;
+    let mut expected_conflicts = 0;
     let total_scenarios = scenarios.len();
 
     for scenario in &scenarios {
@@ -1122,11 +1127,31 @@ func HandleDelete(w http.ResponseWriter, r *http.Request) {
             total_git_clean += 1;
         }
 
-        let status = match (weave_clean, git_clean) {
-            (true, false) => "WEAVE WINS",
-            (true, true) => "both clean",
-            (false, true) => "git wins",
-            (false, false) => "both conflict",
+        let expect_clean = scenario.expect() == Expect::Clean;
+        if !expect_clean {
+            expected_conflicts += 1;
+        }
+        if weave_clean == expect_clean {
+            total_weave_correct += 1;
+        }
+        if git_clean == expect_clean {
+            total_git_correct += 1;
+        }
+
+        let status = if !expect_clean {
+            // Both tools conflicting is the right answer here, so neither
+            // "wins" — say what actually happened instead.
+            match (weave_clean, git_clean) {
+                (false, _) => "correctly refused",
+                (true, _) => "WRONGLY MERGED",
+            }
+        } else {
+            match (weave_clean, git_clean) {
+                (true, false) => "WEAVE WINS",
+                (true, true) => "both clean",
+                (false, true) => "git wins",
+                (false, false) => "both conflict",
+            }
         };
 
         println!(
@@ -1141,18 +1166,40 @@ func HandleDelete(w http.ResponseWriter, r *http.Request) {
     }
 
     println!("\n--- Summary ---");
+    // Two numbers, deliberately. Clean merges is the one comparable to other
+    // tools' published figures; correct outcomes is the one that actually says
+    // whether the tool did the right thing, and they differ by exactly the
+    // scenarios where refusing is right.
+    let mergeable = total_scenarios - expected_conflicts;
     println!(
-        "weave: {}/{} clean merges ({:.0}%)",
+        "weave: {}/{} clean merges ({:.0}% of the {} mergeable scenarios)",
         total_weave_clean,
-        total_scenarios,
-        total_weave_clean as f64 / total_scenarios as f64 * 100.0,
+        mergeable,
+        total_weave_clean as f64 / mergeable as f64 * 100.0,
+        mergeable,
     );
     println!(
         "git:   {}/{} clean merges ({:.0}%)",
         total_git_clean,
-        total_scenarios,
-        total_git_clean as f64 / total_scenarios as f64 * 100.0,
+        mergeable,
+        total_git_clean as f64 / mergeable as f64 * 100.0,
     );
+    if expected_conflicts > 0 {
+        println!(
+            "\n{} scenario(s) must NOT merge (composing decorators, where stack order is a \
+             semantic choice neither side made).",
+            expected_conflicts,
+        );
+        println!(
+            "weave: {}/{} correct outcomes ({:.0}%) | git: {}/{} ({:.0}%)",
+            total_weave_correct,
+            total_scenarios,
+            total_weave_correct as f64 / total_scenarios as f64 * 100.0,
+            total_git_correct,
+            total_scenarios,
+            total_git_correct as f64 / total_scenarios as f64 * 100.0,
+        );
+    }
 
     let improvement = total_weave_clean - total_git_clean;
     if improvement > 0 {
@@ -1160,10 +1207,12 @@ func HandleDelete(w http.ResponseWriter, r *http.Request) {
             "\nweave resolved {} additional merge(s) that git could not.",
             improvement,
         );
+        // Denominator is git's FALSE conflicts only. The expected-conflict
+        // scenarios are excluded: git conflicts there too, and it is right to.
         println!(
             "False conflict reduction: {:.0}%",
-            if total_scenarios > total_git_clean {
-                improvement as f64 / (total_scenarios - total_git_clean) as f64 * 100.0
+            if mergeable > total_git_clean {
+                improvement as f64 / (mergeable - total_git_clean) as f64 * 100.0
             } else {
                 0.0
             },
@@ -1171,6 +1220,26 @@ func HandleDelete(w http.ResponseWriter, r *http.Request) {
     }
 
     Ok(())
+}
+
+/// What the *right* answer is for a scenario.
+///
+/// Scoring on "did it merge cleanly" alone treats a principled refusal as a
+/// failure, which is backwards: for a handful of these the correct behaviour is
+/// to conflict, because merging would mean inventing a semantic decision
+/// neither side made. Naming the expected outcome per scenario is what lets the
+/// summary count those as passes without quietly inflating the clean-merge
+/// number, which stays reported on its own.
+#[derive(PartialEq)]
+enum Expect {
+    /// The two edits are independent, so a clean merge is the right answer.
+    Clean,
+    /// A conflict is the right answer. Composing decorators (Python, TS/JS) is
+    /// the case here: application is function composition, so the stack order
+    /// of two one-sided additions changes behaviour (`@cache` outside `@auth`
+    /// serves cached responses without an auth check). weave refuses to
+    /// fabricate an order — see `try_decorator_aware_merge`.
+    Conflict,
 }
 
 struct Scenario {
@@ -1189,4 +1258,20 @@ struct Scenario {
     base: &'static str,
     ours: &'static str,
     theirs: &'static str,
+}
+
+impl Scenario {
+    /// Defaults to [`Expect::Clean`]; the scenarios where a refusal is correct
+    /// name themselves here, so the list stays a plain `vec![]` of literals.
+    fn expect(&self) -> Expect {
+        const EXPECT_CONFLICT: &[&str] = &[
+            "Python: both add different decorators",
+            "TS: class method decorators",
+        ];
+        if EXPECT_CONFLICT.contains(&self.name) {
+            Expect::Conflict
+        } else {
+            Expect::Clean
+        }
+    }
 }

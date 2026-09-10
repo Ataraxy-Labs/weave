@@ -99,13 +99,15 @@ The key difference: Git produces false conflicts on **independent changes** beca
 
 31 hand-crafted merge scenarios across 7 languages, comparable to [mergiraf](https://mergiraf.org/)'s own test corpus. Run `weave bench` to reproduce:
 
-| Tool | Clean Merges | Score |
-|------|-------------|-------|
-| **Weave** | **31/31** | 100% |
-| Mergiraf (v0.16.3) | 26/31 | 83% |
-| Git | 15/31 | 48% |
+Two of the 31 **must not** merge. When both sides add different decorators to the same Python or TypeScript function, decorator application is function composition, so the stack order is a semantic decision neither side made — `@cache` outside `@auth` serves cached responses without ever running the auth check. Weave refuses rather than fabricate an order, and a tool that merges those cleanly is wrong, not better. Annotations in Java, C# and Kotlin are unordered metadata, so weave still set-unions those.
 
-Mergiraf fails on both-add-at-end-of-file, insert-between-existing, and decorator conflict scenarios. Weave resolves all of these because it operates at entity granularity (functions, classes, methods) rather than AST node level. Full breakdown at [ataraxy-labs.github.io/weave](https://ataraxy-labs.github.io/weave/benchmarks.html).
+| Tool | Clean merges (of 29 mergeable) | Correct outcomes (of 31) |
+|------|-------------------------------|--------------------------|
+| **Weave** | **29/29** (100%) | **31/31** (100%) |
+| Mergiraf (v0.16.3) | 26/29 (90%) | 28/31 (90%) |
+| Git | 15/29 (52%) | 17/31 (55%) |
+
+All three tools correctly refuse the two decorator scenarios. Mergiraf fails on both-add-at-end-of-file and insert-between-existing; weave resolves those because it operates at entity granularity (functions, classes, methods) rather than AST node level. Full breakdown at [ataraxy-labs.github.io/weave](https://ataraxy-labs.github.io/weave/benchmarks.html).
 
 ## Real-World Benchmarks
 
