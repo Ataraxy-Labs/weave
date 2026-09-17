@@ -80,8 +80,10 @@ impl<'a> Interstitials<'a> {
                 match region {
                     FileRegion::Interstitial(i) => {
                         let key = i.position_key.as_str();
-                        // A gap the merge resolved to nothing states nothing.
-                        if merged.get(key).is_some_and(|t| !t.is_empty()) && assigned.insert(key) {
+                        // Empty is a known zero-width boundary, including a
+                        // blank line deliberately deleted by a side. Keep its
+                        // key so render does not synthesise a separator (#169).
+                        if merged.contains_key(key) && assigned.insert(key) {
                             pending.push(key);
                         }
                     }

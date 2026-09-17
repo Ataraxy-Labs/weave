@@ -59,6 +59,8 @@ pub struct InterstitialRegion {
 ///
 /// Entities must be from the same file. The function splits the file into
 /// alternating interstitial and entity regions based on line ranges.
+/// Empty interstitials between adjacent entities preserve the distinction
+/// between a known zero-width gap and a boundary absent from this version.
 pub fn extract_regions(content: &str, entities: &[SemanticEntity]) -> Vec<FileRegion> {
     if entities.is_empty() {
         // Entire file is one interstitial region
@@ -88,8 +90,11 @@ pub fn extract_regions(content: &str, entities: &[SemanticEntity]) -> Vec<FileRe
         // of the entity region, not the interstitial gap.
         let bundled_start = find_leading_comment_start(&lines, entity_start, current_line);
 
-        // Interstitial before this entity (excluding bundled comments)
-        if current_line < bundled_start {
+        // Interstitial before this entity (excluding bundled comments).
+        // Adjacent entities still have a boundary: its content is empty, not
+        // unknown. Omitting it lets rendering invent the file's dominant gap
+        // between declarations that every input kept together (#169).
+        if current_line < bundled_start || (i > 0 && current_line == bundled_start) {
             let interstitial_content = join_lines(&lines[current_line..bundled_start]);
             let position_key = if i == 0 {
                 "file_header".to_string()
@@ -238,6 +243,40 @@ fn join_lines(lines: &[&str]) -> String {
 mod tests {
     use super::*;
     use sem_core::parser::plugins::create_default_registry;
+
+    #[test]
+    fn adjacent_entities_retain_empty_gap_regions() {
+        let registry = create_default_registry();
+        let plugin = registry.get_plugin("test.ts").unwrap();
+        for content in [
+            "const first = 1;\nconst second = 2;\ntype Result = number;\n",
+            "const first = 1;\n/** Second value. */\nconst second = 2;\n",
+        ] {
+            let entities =
+                crate::merge::filter_nested_entities(plugin.extract_entities(content, "test.ts"));
+            assert!(entities.len() >= 2);
+            let regions = extract_regions(content, &entities);
+            let gaps: Vec<_> = regions
+                .iter()
+                .filter_map(|r| match r {
+                    FileRegion::Interstitial(gap) => Some(gap),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(gaps.len(), entities.len() - 1);
+            assert!(gaps.iter().all(|gap| gap.content.is_empty()));
+            for (gap, pair) in gaps.iter().zip(entities.windows(2)) {
+                assert_eq!(
+                    gap.position_key,
+                    format!("between:{}:{}", pair[0].id, pair[1].id)
+                );
+            }
+            assert_eq!(
+                regions.iter().map(FileRegion::content).collect::<String>(),
+                content
+            );
+        }
+    }
 
     #[test]
     fn test_extract_regions_typescript() {
