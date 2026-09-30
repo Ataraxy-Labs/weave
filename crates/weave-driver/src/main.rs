@@ -527,10 +527,7 @@ fn teach(content: &str, file_path: &str, comment_prefix: &str, marker_length: us
         }
         if line.starts_with(&close) {
             // Insert before the original line ending, preserving CRLF and EOF.
-            closes.push((
-                offset,
-                offset + line.trim_end_matches(['\r', '\n']).len(),
-            ));
+            closes.push((offset, offset + line.trim_end_matches(['\r', '\n']).len()));
         }
         offset += line.len();
     }
@@ -745,16 +742,13 @@ mod tests {
                 let open = "<".repeat(width);
                 let close = ">".repeat(width);
                 let sep = "=".repeat(width);
-                let tail = format!(
-                    "{});{newline}}}{newline}",
-                    "    // unchanged\n".repeat(200)
-                );
+                let tail = format!("{});{newline}}}{newline}", "    // unchanged\n".repeat(200));
                 let source = format!("function View() {{{newline}{open} ours — scope `return (`{newline}ours{newline}{sep}{newline}theirs{newline}{close} theirs — scope `return (`{newline}{tail}");
                 let output = teach(&source, "view.tsx", "//", width);
                 let hint = weave_core::conflict::teach_line("//", "view.tsx");
-                assert!(
-                    output.contains(&format!("{close} theirs — scope `return (` — {hint}{newline}"))
-                );
+                assert!(output.contains(&format!(
+                    "{close} theirs — scope `return (` — {hint}{newline}"
+                )));
                 assert!(output.ends_with(&tail));
                 assert_eq!(output.matches(&hint).count(), 1);
                 // The sole change is in the closing marker's label, neither side
@@ -764,8 +758,7 @@ mod tests {
                     let start = output.find(&format!("{open} ours")).unwrap();
                     let end = output.find(&format!("{close} theirs")).unwrap();
                     let end = end + output[end..].find('\n').unwrap() + 1;
-                    let resolved =
-                        format!("{}{side}{newline}{}", &output[..start], &output[end..]);
+                    let resolved = format!("{}{side}{newline}{}", &output[..start], &output[end..]);
                     assert!(!resolved.contains("weave: run"));
                 }
             }
