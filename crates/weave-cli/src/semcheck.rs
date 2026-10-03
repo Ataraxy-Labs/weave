@@ -48,7 +48,10 @@ pub fn resolve(flag: Option<&str>, checkers: Option<&str>, repo: &Path) -> R<Opt
             Some("sem") => true,
             None | Some("none") | Some("") => false,
             Some(other) => {
-                return Err(format!(".weave/config: land.check wants `sem` or `none`, not `{other}`").into())
+                return Err(format!(
+                    ".weave/config: land.check wants `sem` or `none`, not `{other}`"
+                )
+                .into())
             }
         },
     };
@@ -111,20 +114,29 @@ pub enum Outcome {
 /// Run `sem check --base <tip> --json` in `dir`, whose HEAD has tree `tree`
 /// (the tree to be published). A pass counts only if sem checked exactly that
 /// tree: untracked files in `dir` would make its verdict one about another tree.
-pub fn run(dir: &Path, tip: &str, tree: &str, check: &Check, limit: Duration, env: &[(&str, &str)]) -> R<Outcome> {
+pub fn run(
+    dir: &Path,
+    tip: &str,
+    tree: &str,
+    check: &Check,
+    limit: Duration,
+    env: &[(&str, &str)],
+) -> R<Outcome> {
     let Some(sem) = sem_binary() else {
         return Ok(Outcome::Refused {
             reason: "sem not installed",
-            report: "land: --check sem was asked for (or .weave/config sets land.check = sem), but \
+            report:
+                "land: --check sem was asked for (or .weave/config sets land.check = sem), but \
                      `sem` is not installed: it is not on PATH and WEAVE_SEM does not name it. \
                      The merged tree was not verified, so nothing was published. Install sem, \
                      or pass --check none to land without it."
-                .to_string(),
+                    .to_string(),
             doc: None,
         });
     };
     let mut cmd = Command::new(&sem);
-    cmd.args(["check", "--base", tip, "--json"]).current_dir(dir);
+    cmd.args(["check", "--base", tip, "--json"])
+        .current_dir(dir);
     if let Some(c) = &check.checkers {
         cmd.args(["--checkers", c]);
     }
@@ -165,7 +177,8 @@ pub fn run(dir: &Path, tip: &str, tree: &str, check: &Check, limit: Duration, en
     };
     match code {
         Some(0) if doc["verdict"] == "pass" && doc["head"]["tree"].as_str() != Some(tree) => {
-            let untracked = gitscan::git(dir, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+            let untracked = gitscan::git(dir, &["ls-files", "--others", "--exclude-standard"])
+                .unwrap_or_default();
             Ok(Outcome::Refused {
                 reason: "sem check checked another tree",
                 report: format!(
@@ -174,7 +187,11 @@ pub fn run(dir: &Path, tip: &str, tree: &str, check: &Check, limit: Duration, en
                      part of what the tools saw:\n{}\nRemove them, ignore them (.gitignore), or \
                      commit them, then run land again.",
                     doc["head"]["tree"].as_str().unwrap_or("?"),
-                    untracked.lines().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n")
+                    untracked
+                        .lines()
+                        .map(|l| format!("  {l}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 ),
                 doc: Some(doc),
             })

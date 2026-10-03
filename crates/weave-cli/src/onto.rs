@@ -435,7 +435,8 @@ fn record_check(gd: &Path, tree: &str, cert: &serde_json::Value) {
 /// The sem check document recorded for `tree` in `dir`'s git dir, if any.
 pub fn recorded_check(dir: &Path, tree: &str) -> Option<serde_json::Value> {
     let gd = PathBuf::from(git(dir, &["rev-parse", "--absolute-git-dir"]).ok()?);
-    let t = std::fs::read_to_string(gd.join("weave-land-checks").join(format!("{tree}.json"))).ok()?;
+    let t =
+        std::fs::read_to_string(gd.join("weave-land-checks").join(format!("{tree}.json"))).ok()?;
     serde_json::from_str(&t).ok()
 }
 

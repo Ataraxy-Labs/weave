@@ -26,7 +26,11 @@ fn git(dir: &Path, args: &[&str]) -> Output {
 
 fn git_ok(dir: &Path, args: &[&str]) -> String {
     let out = git(dir, args);
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
@@ -97,7 +101,11 @@ impl World {
     }
 
     fn calls(&self) -> Vec<String> {
-        std::fs::read_to_string(self.log()).unwrap_or_default().lines().map(String::from).collect()
+        std::fs::read_to_string(self.log())
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
     }
 
     fn land(&self, args: &[&str], sem: Option<&Path>) -> (i32, String) {
@@ -117,7 +125,11 @@ impl World {
             None => c.env("WEAVE_SEM", self.root.join("no-such-sem")),
         };
         let out = c.output().expect("run weave land");
-        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         (out.status.code().unwrap_or(-1), text)
     }
 
@@ -131,7 +143,9 @@ impl World {
             .filter(|p| p.to_string_lossy().ends_with("-check.json"))
             .collect();
         v.sort();
-        v.iter().map(|p| serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()).collect()
+        v.iter()
+            .map(|p| serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap())
+            .collect()
     }
 }
 
@@ -142,24 +156,43 @@ fn onto_lands_when_sem_check_passes_and_records_its_certificate() {
     let sem = w.fake_sem(PASS, 0);
     let certs = w.root.join("certs");
     let (code, out) = w.land(
-        &["--onto", "origin/main", "--check", "sem", "--certificate-dir", certs.to_str().unwrap()],
+        &[
+            "--onto",
+            "origin/main",
+            "--check",
+            "sem",
+            "--certificate-dir",
+            certs.to_str().unwrap(),
+        ],
         Some(&sem),
     );
     assert_eq!(code, 0, "{out}");
-    assert!(out.contains("sem check PASS: ts pass incremental (1 rechecked)"), "{out}");
+    assert!(
+        out.contains("sem check PASS: ts pass incremental (1 rechecked)"),
+        "{out}"
+    );
     assert_ne!(w.main(), tip, "published");
     // sem check ran once, in the repository, against the exact tip merged onto
     let calls = w.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
-    assert!(calls[0].contains(&format!("check --base {tip} --json")), "{calls:?}");
+    assert!(
+        calls[0].contains(&format!("check --base {tip} --json")),
+        "{calls:?}"
+    );
     // and the landed tree is the one it checked
     let c = w.certificates();
     assert_eq!(c.len(), 1);
     assert_eq!(c[0]["kind"], "sem-check");
     assert_eq!(c[0]["verdict"], "pass");
     assert_eq!(c[0]["onto"], tip.as_str());
-    assert_eq!(c[0]["tree"], git_ok(&w.root.join("origin.git"), &["rev-parse", "main^{tree}"]).as_str());
-    assert_eq!(c[0]["sem"]["certificate"]["digest"], "0123456789abcdef0123456789abcdef01234567");
+    assert_eq!(
+        c[0]["tree"],
+        git_ok(&w.root.join("origin.git"), &["rev-parse", "main^{tree}"]).as_str()
+    );
+    assert_eq!(
+        c[0]["sem"]["certificate"]["digest"],
+        "0123456789abcdef0123456789abcdef01234567"
+    );
     assert_eq!(c[0]["sem"]["checkers"][0]["mode"], "incremental");
 }
 
@@ -169,11 +202,23 @@ fn onto_refuses_on_a_failing_check_and_returns_the_diagnostics() {
     let before = w.main();
     let sem = w.fake_sem(FAIL, 1);
     let certs = w.root.join("certs");
-    let (code, out) =
-        w.land(&["--onto", "origin/main", "--check", "sem", "--certificate-dir", certs.to_str().unwrap()], Some(&sem));
+    let (code, out) = w.land(
+        &[
+            "--onto",
+            "origin/main",
+            "--check",
+            "sem",
+            "--certificate-dir",
+            certs.to_str().unwrap(),
+        ],
+        Some(&sem),
+    );
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("sem check FAILED on the merged tree"), "{out}");
-    assert!(out.contains("b.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'."), "{out}");
+    assert!(
+        out.contains("b.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'."),
+        "{out}"
+    );
     assert!(out.contains("REFUSED"), "{out}");
     assert_eq!(w.main(), before, "nothing published");
     let c = w.certificates();
@@ -189,7 +234,10 @@ fn onto_refuses_when_sem_check_cannot_decide() {
     let (code, out) = w.land(&["--onto", "origin/main", "--check", "sem"], Some(&sem));
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("sem check COULD NOT DECIDE"), "{out}");
-    assert!(out.contains("typescript is not installed in this project"), "{out}");
+    assert!(
+        out.contains("typescript is not installed in this project"),
+        "{out}"
+    );
     assert_eq!(w.main(), before);
     // unreadable output also refuses
     let sem = w.fake_sem("not json", 0);
@@ -207,7 +255,10 @@ fn onto_refuses_a_pass_on_a_tree_with_untracked_files() {
     std::fs::write(w.root.join("feat/stray.ts"), "export const x = 1;\n").unwrap();
     let (code, out) = w.land(&["--onto", "origin/main", "--check", "sem"], Some(&sem));
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("not the one to be published") && out.contains("stray.ts"), "{out}");
+    assert!(
+        out.contains("not the one to be published") && out.contains("stray.ts"),
+        "{out}"
+    );
     assert_eq!(w.main(), before);
 }
 
@@ -226,17 +277,35 @@ fn weave_config_default_turns_it_on_and_check_none_off() {
     let w = World::new("config");
     let feat = w.root.join("feat");
     std::fs::create_dir_all(feat.join(".weave")).unwrap();
-    std::fs::write(feat.join(".weave/config"), "[land]\n\tcheck = sem\n\tcheckers = ts,lint\n").unwrap();
+    std::fs::write(
+        feat.join(".weave/config"),
+        "[land]\n\tcheck = sem\n\tcheckers = ts,lint\n",
+    )
+    .unwrap();
     git_ok(&feat, &["add", ".weave/config"]);
     git_ok(&feat, &["commit", "-qm", "weave config"]);
     let sem = w.fake_sem(FAIL, 1);
     let before = w.main();
     let (code, out) = w.land(&["--onto", "origin/main"], Some(&sem));
     assert_eq!(code, 1, "{out}");
-    assert!(w.calls()[0].contains("--checkers ts,lint"), "{:?}", w.calls());
+    assert!(
+        w.calls()[0].contains("--checkers ts,lint"),
+        "{:?}",
+        w.calls()
+    );
     assert_eq!(w.main(), before);
     // --check none: land without it (the verify command still runs)
-    let (code, out) = w.land(&["--onto", "origin/main", "--check", "none", "--verify-cmd", "test -f a.txt"], Some(&sem));
+    let (code, out) = w.land(
+        &[
+            "--onto",
+            "origin/main",
+            "--check",
+            "none",
+            "--verify-cmd",
+            "test -f a.txt",
+        ],
+        Some(&sem),
+    );
     assert_eq!(code, 0, "{out}");
     assert_eq!(w.calls().len(), 1, "sem check not run again");
 }
@@ -246,18 +315,42 @@ fn verify_cmd_runs_before_sem_check() {
     let w = World::new("verify-first");
     let sem = w.fake_sem(PASS, 0);
     let before = w.main();
-    let (code, out) = w.land(&["--onto", "origin/main", "--check", "sem", "--verify-cmd", "exit 3"], Some(&sem));
+    let (code, out) = w.land(
+        &[
+            "--onto",
+            "origin/main",
+            "--check",
+            "sem",
+            "--verify-cmd",
+            "exit 3",
+        ],
+        Some(&sem),
+    );
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("verify command"), "{out}");
-    assert!(w.calls().is_empty(), "sem check never ran: the verify command refused first");
+    assert!(
+        w.calls().is_empty(),
+        "sem check never ran: the verify command refused first"
+    );
     assert_eq!(w.main(), before);
 }
 
 fn done_results(w: &World) -> Vec<serde_json::Value> {
     let o = w.root.join("origin.git");
-    let shas = git_ok(&o, &["rev-list", "--first-parent", "--reverse", "refs/weave/main/done"]);
+    let shas = git_ok(
+        &o,
+        &[
+            "rev-list",
+            "--first-parent",
+            "--reverse",
+            "refs/weave/main/done",
+        ],
+    );
     shas.lines()
-        .filter_map(|s| serde_json::from_str::<serde_json::Value>(&git_ok(&o, &["log", "-1", "--format=%B", s])).ok())
+        .filter_map(|s| {
+            serde_json::from_str::<serde_json::Value>(&git_ok(&o, &["log", "-1", "--format=%B", s]))
+                .ok()
+        })
         .filter(|v| v["kind"] == "result")
         .collect()
 }
@@ -267,17 +360,26 @@ fn queue_runs_sem_check_in_the_lander_and_records_it_in_the_result() {
     let w = World::new("queue-pass");
     let tip = w.main();
     let sem = w.fake_sem(PASS, 0);
-    let (code, out) = w.land(&["--queue", "--check", "sem", "--lease-ttl", "5"], Some(&sem));
+    let (code, out) = w.land(
+        &["--queue", "--check", "sem", "--lease-ttl", "5"],
+        Some(&sem),
+    );
     assert_eq!(code, 0, "{out}");
     assert_ne!(w.main(), tip);
     let calls = w.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
-    assert!(calls[0].contains("weave-queue"), "ran in the lander's worktree: {calls:?}");
+    assert!(
+        calls[0].contains("weave-queue"),
+        "ran in the lander's worktree: {calls:?}"
+    );
     assert!(calls[0].contains(&format!("--base {tip}")), "{calls:?}");
     let r = done_results(&w);
     assert_eq!(r.len(), 1);
     assert_eq!(r[0]["check"]["verdict"], "pass");
-    assert_eq!(r[0]["check"]["certificate"]["digest"], "0123456789abcdef0123456789abcdef01234567");
+    assert_eq!(
+        r[0]["check"]["certificate"]["digest"],
+        "0123456789abcdef0123456789abcdef01234567"
+    );
 }
 
 #[test]
@@ -285,7 +387,10 @@ fn queue_refuses_a_failing_check_and_the_submitter_sees_why() {
     let w = World::new("queue-fail");
     let before = w.main();
     let sem = w.fake_sem(FAIL, 1);
-    let (code, out) = w.land(&["--queue", "--check", "sem", "--lease-ttl", "5"], Some(&sem));
+    let (code, out) = w.land(
+        &["--queue", "--check", "sem", "--lease-ttl", "5"],
+        Some(&sem),
+    );
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("REFUSED (sem check failed)"), "{out}");
     assert!(out.contains("b.ts(3,7): error TS2322"), "{out}");
