@@ -22,6 +22,20 @@ pub(crate) fn is_supported(path: &str) -> bool {
     REGISTRY.get_explicit_plugin(path).is_some()
 }
 
+/// Is this path a programming language, where names are bound and referenced?
+///
+/// Weave also parses prose and data formats (Markdown, JSON, YAML, TOML, CSV,
+/// LaTeX) into entities for merging, but a word followed by `(` in prose is
+/// not a call. Reference checks ask this, not [`is_supported`].
+pub(crate) fn is_code(path: &str) -> bool {
+    REGISTRY.get_explicit_plugin(path).is_some_and(|p| {
+        !matches!(
+            p.id(),
+            "markdown" | "json" | "yaml" | "toml" | "csv" | "latex"
+        )
+    })
+}
+
 /// Top-level entities of `content`, as parsed for `path`. Empty when the file
 /// has no supported grammar.
 ///

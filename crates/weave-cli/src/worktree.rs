@@ -16,8 +16,9 @@
 //! 3. **duplicates** — did the merge state something more times than either
 //!    side did? Same ruler as [`weave_core::frame`], applied to the whole file
 //!    instead of the frame.
-//! 4. **dangling** — is anything still called that nothing defines any more?
-//!    Binding evidence, repo-wide, the same functions the per-file pass uses.
+//! 4. **dangling** — is anything still called that nothing defines any more,
+//!    or used under a name this file no longer imports? Binding evidence,
+//!    repo-wide, the same functions the per-file pass uses.
 //!
 //! Every verdict is stated as a **sentence**, never as an empty array. A
 //! reader who gets back a bare `[]` reasonably takes it for approval; a
@@ -66,9 +67,11 @@ use sem_core::model::change::ChangeType;
 use sem_core::model::entity::SemanticEntity;
 use sem_core::model::identity::match_entities;
 
-use crate::parsers::{entities_of, is_supported};
+use crate::parsers::{entities_of, is_code, is_supported};
 use crate::repo_scope::Tree;
-use weave_core::binding::{has_call_reference, has_definition};
+use weave_core::binding::{
+    has_binding, has_call_reference, has_declaration, has_value_reference, import_bindings,
+};
 
 /// A line is only evidence if it says something. Bare punctuation (`}`, `);`,
 /// `else:`) repeats legitimately all over a real file, so counting it would
@@ -612,9 +615,11 @@ pub fn check(
     // [`crate::gitscan::merge_scope`]); an untouched file's stage equals its
     // working-tree copy, so it contributes only names that are in `defined_now`
     // and can never be `gone`.
+    // Code files only: a Markdown heading or a YAML key is an entity weave
+    // merges, not a name a program calls.
     let mut gone: BTreeSet<String> = BTreeSet::new();
     for stage in [base, ours, theirs] {
-        for (p, c) in stage.iter().filter(|(p, _)| is_supported(p)) {
+        for (p, c) in stage.iter().filter(|(p, _)| is_code(p)) {
             for e in entities_of(p, c) {
                 if !defined_now.contains(&e.name) {
                     gone.insert(e.name);
@@ -623,35 +628,27 @@ pub fn check(
         }
     }
 
+    let renames = renames(base, ours, theirs, subjects);
+
     let mut verdicts = Vec::new();
     for file in subjects {
         let Some(w) = work.get(file) else {
-            verdicts.push(Verdict {
-                file: file.clone(),
-                findings: vec![Finding {
-                    class: "MARKERS",
-                    detail: "the file is not in the working tree (deleted during the merge)"
-                        .to_string(),
-                    suggestion: None,
-                }],
-                advisories: Vec::new(),
-            });
+            if let Some(finding) = missing_file_finding(file, base, ours, theirs, work, &renames) {
+                verdicts.push(Verdict {
+                    file: file.clone(),
+                    findings: vec![finding],
+                    advisories: Vec::new(),
+                });
+            }
             continue;
         };
-        let mut findings = verify_file(
-            file,
-            base.get(file).map(String::as_str),
-            ours.get(file).map(String::as_str),
-            theirs.get(file).map(String::as_str),
-            w,
-        );
-        findings.extend(dangling(w, base, work, &gone));
-        let advisories = advisories_for(
-            file,
-            base.get(file).map(String::as_str),
-            ours.get(file).map(String::as_str),
-            theirs.get(file).map(String::as_str),
-        );
+        let (b, o, t) = stages(file, base, ours, theirs, &renames);
+        let mut findings = verify_file(file, b, o, t, w);
+        if is_code(file) {
+            findings.extend(dangling(w, base, work, &gone));
+            findings.extend(dangling_imports(w, [b, o, t]));
+        }
+        let advisories = advisories_for(file, b, o, t);
         verdicts.push(Verdict {
             file: file.clone(),
             findings,
@@ -659,6 +656,186 @@ pub fn check(
         });
     }
     verdicts
+}
+
+/// Renames in the merge: `new path -> (old path, the side that renamed)`.
+///
+/// A subject that base does not have, that exactly one side has, is a rename
+/// when base has a path that side no longer has and whose content that side's
+/// new file mostly still states. Git's merge carries the other side's edits to
+/// the new path, so the three stages of the new path are base's and the other
+/// side's copies at the OLD path, and the renaming side's copy at the new one.
+/// Read without the rename, the new path has no base and no other side, and
+/// every line the other side added looks like a duplicate.
+fn renames(
+    base: &Tree,
+    ours: &Tree,
+    theirs: &Tree,
+    subjects: &[String],
+) -> BTreeMap<String, (String, Side)> {
+    let mut out = BTreeMap::new();
+    for file in subjects {
+        if base.contains_key(file) {
+            continue;
+        }
+        let side = match (ours.get(file), theirs.get(file)) {
+            (Some(_), None) => Side::Ours,
+            (None, Some(_)) => Side::Theirs,
+            _ => continue,
+        };
+        let renamer = side.of(ours, theirs);
+        let new_text = &renamer[file];
+        let best = base
+            .iter()
+            .filter(|(p, _)| *p != file && !renamer.contains_key(*p))
+            .map(|(p, old)| (similarity(old, new_text), p))
+            .filter(|(score, _)| *score >= 0.5)
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, old_path)) = best {
+            out.insert(file.clone(), (old_path.clone(), side));
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Ours,
+    Theirs,
+}
+
+impl Side {
+    fn of<'a>(self, ours: &'a Tree, theirs: &'a Tree) -> &'a Tree {
+        match self {
+            Side::Ours => ours,
+            Side::Theirs => theirs,
+        }
+    }
+}
+
+/// Share of `a`'s significant lines that `b` still states.
+fn similarity(a: &str, b: &str) -> f64 {
+    let lines_b: BTreeSet<&str> = b
+        .lines()
+        .map(str::trim)
+        .filter(|l| significant(l))
+        .collect();
+    let lines_a: Vec<&str> = a
+        .lines()
+        .map(str::trim)
+        .filter(|l| significant(l))
+        .collect();
+    if lines_a.is_empty() {
+        return 0.0;
+    }
+    let kept = lines_a.iter().filter(|l| lines_b.contains(*l)).count();
+    kept as f64 / lines_a.len().max(lines_b.len()) as f64
+}
+
+/// The three merge stages of one subject, following a rename.
+fn stages<'a>(
+    file: &str,
+    base: &'a Tree,
+    ours: &'a Tree,
+    theirs: &'a Tree,
+    renames: &BTreeMap<String, (String, Side)>,
+) -> (Option<&'a str>, Option<&'a str>, Option<&'a str>) {
+    let at = |tree: &'a Tree, path: &str| tree.get(path).map(String::as_str);
+    match renames.get(file) {
+        Some((old, Side::Theirs)) => (at(base, old), at(ours, old), at(theirs, file)),
+        Some((old, Side::Ours)) => (at(base, old), at(ours, file), at(theirs, old)),
+        None => (at(base, file), at(ours, file), at(theirs, file)),
+    }
+}
+
+/// What to say about a subject the working tree no longer has, if anything.
+///
+/// A deletion one side made and the other side did not touch is what the
+/// merge was asked to do, and so is a path the merge renamed away. Only a
+/// deletion that throws away someone's edit, or a file that both sides kept,
+/// is a finding.
+fn missing_file_finding(
+    file: &str,
+    base: &Tree,
+    ours: &Tree,
+    theirs: &Tree,
+    work: &Tree,
+    renames: &BTreeMap<String, (String, Side)>,
+) -> Option<Finding> {
+    let renamed_away = renames
+        .iter()
+        .any(|(new, (old, _))| old == file && work.contains_key(new));
+    if renamed_away {
+        return None;
+    }
+    let (b, o, t) = (base.get(file), ours.get(file), theirs.get(file));
+    let detail = match (b, o, t) {
+        (Some(_), None, None) => return None,
+        (Some(b), None, Some(t)) | (Some(b), Some(t), None) if b == t => return None,
+        (Some(_), None, Some(_)) => {
+            "the file is not in the working tree: ours deleted it but theirs modified it \
+             (modify/delete)"
+        }
+        (Some(_), Some(_), None) => {
+            "the file is not in the working tree: theirs deleted it but ours modified it \
+             (modify/delete)"
+        }
+        (_, Some(_), Some(_)) => {
+            "the file is not in the working tree, but both sides kept it (deleted during the \
+             merge)"
+        }
+        (None, _, _) => "the file is not in the working tree, but a side added it",
+    };
+    Some(Finding {
+        class: "MARKERS",
+        detail: detail.to_string(),
+        suggestion: None,
+    })
+}
+
+/// Names a stage of THIS file imported, that the working tree still uses and
+/// no longer binds.
+///
+/// The repo-wide pass above cannot see these: the definition the name points
+/// at still exists in its own file, and the break is that this file stopped
+/// importing it. A merge produces it when each side deletes a different import
+/// and one side's surviving code uses the name the other side's deletion
+/// unbound.
+fn dangling_imports(w: &str, stages: [Option<&str>; 3]) -> Vec<Finding> {
+    let mut hits: BTreeMap<String, String> = BTreeMap::new();
+    for stage in stages.into_iter().flatten() {
+        for line in stage.lines() {
+            for name in import_bindings(line) {
+                if hits.contains_key(&name)
+                    || has_binding(w, &name)
+                    || !has_value_reference(w, &name)
+                {
+                    continue;
+                }
+                hits.insert(name, line.trim().to_string());
+            }
+        }
+    }
+    if hits.is_empty() {
+        return Vec::new();
+    }
+    let listed = hits
+        .keys()
+        .take(4)
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (first, line) = hits.iter().next().expect("non-empty");
+    vec![Finding {
+        class: "DANGLING",
+        detail: format!(
+            "{} name(s) are still used here but no longer imported: {listed}",
+            hits.len()
+        ),
+        suggestion: Some(format!(
+            "restore the import a merge stage had for `{first}`: `{line}`"
+        )),
+    }]
 }
 
 /// The co-occupancy advisories weave's own merge of the three stages would
@@ -717,7 +894,7 @@ fn advisories_for(
 fn dangling(w: &str, base: &Tree, work: &Tree, gone: &BTreeSet<String>) -> Vec<Finding> {
     let mut hits: Vec<(String, Option<(String, String)>)> = Vec::new();
     for name in gone {
-        if name.len() < 3 || has_definition(w, name) || !has_call_reference(w, name) {
+        if name.len() < 3 || has_declaration(w, name) || !has_call_reference(w, name) {
             continue;
         }
         hits.push((name.clone(), successor_of(name, base, work)));
@@ -936,6 +1113,200 @@ mod tests {
             "{}",
             report.render()
         );
+    }
+
+    fn findings_of<'a>(v: &'a [Verdict], file: &str) -> Vec<&'a Finding> {
+        v.iter()
+            .filter(|v| v.file == file)
+            .flat_map(|v| v.findings.iter())
+            .collect()
+    }
+
+    const FLOW_BASE: &str = "\
+import * as Alpha from \"./widget\"
+import * as Beta from \"./gadget\"
+import * as Widget from \"./widget\"
+
+export function* flow() {
+  yield* Alpha.first()
+  const spacer = 1
+  yield* Widget.second()
+}
+";
+
+    /// Each side deleted a different import; the resolution on disk kept
+    /// neither, and still uses one of the two names.
+    #[test]
+    fn a_namespace_whose_import_the_merge_dropped_is_dangling() {
+        let ours = FLOW_BASE
+            .replace("import * as Widget from \"./widget\"\n", "")
+            .replace("Widget.second()", "Beta.second()");
+        let theirs = FLOW_BASE
+            .replace("import * as Alpha from \"./widget\"\n", "")
+            .replace("Alpha.first()", "Widget.first()");
+        let work = FLOW_BASE
+            .replace("import * as Alpha from \"./widget\"\n", "")
+            .replace("import * as Widget from \"./widget\"\n", "")
+            .replace("Alpha.first()", "Widget.first()")
+            .replace("Widget.second()", "Beta.second()");
+        let v = check(
+            &tree(&[("flow.ts", FLOW_BASE)]),
+            &tree(&[("flow.ts", &ours)]),
+            &tree(&[("flow.ts", &theirs)]),
+            &tree(&[("flow.ts", &work)]),
+            &["flow.ts".to_string()],
+        );
+        let dangling: Vec<_> = findings_of(&v, "flow.ts")
+            .into_iter()
+            .filter(|f| f.class == "DANGLING")
+            .collect();
+        assert_eq!(dangling.len(), 1, "{v:#?}");
+        assert!(dangling[0].detail.contains("`Widget`"), "{v:#?}");
+        assert!(!dangling[0].detail.contains("`Alpha`"), "{v:#?}");
+        assert!(
+            dangling[0]
+                .suggestion
+                .as_deref()
+                .is_some_and(|s| s.contains("import * as Widget from \"./widget\"")),
+            "{v:#?}"
+        );
+        // A faithful resolution that keeps the import is clean.
+        let fixed = format!("import * as Widget from \"./widget\"\n{work}");
+        let v = check(
+            &tree(&[("flow.ts", FLOW_BASE)]),
+            &tree(&[("flow.ts", &ours)]),
+            &tree(&[("flow.ts", &theirs)]),
+            &tree(&[("flow.ts", &fixed)]),
+            &["flow.ts".to_string()],
+        );
+        assert!(v[0].ok(), "{v:#?}");
+    }
+
+    #[test]
+    fn a_file_one_side_deleted_and_the_other_left_alone_is_not_a_finding() {
+        let gone = "export function unused() {\n  return 1\n}\n";
+        let v = check(
+            &tree(&[("gone.ts", gone)]),
+            &tree(&[("gone.ts", gone)]),
+            &tree(&[]),
+            &tree(&[]),
+            &["gone.ts".to_string()],
+        );
+        assert!(findings_of(&v, "gone.ts").is_empty(), "{v:#?}");
+        // …but a deletion against a modification still is.
+        let edited = gone.replace("return 1", "return 2");
+        let v = check(
+            &tree(&[("gone.ts", gone)]),
+            &tree(&[("gone.ts", &edited)]),
+            &tree(&[]),
+            &tree(&[]),
+            &["gone.ts".to_string()],
+        );
+        let f = findings_of(&v, "gone.ts");
+        assert_eq!(f.len(), 1, "{v:#?}");
+        assert!(f[0].detail.contains("modified"), "{v:#?}");
+    }
+
+    #[test]
+    fn a_local_const_arrow_resolves_the_name() {
+        let base = tree(&[
+            ("a.ts", "export function openThing() {\n  return 1\n}\n"),
+            (
+                "b.ts",
+                "export function outer() {\n  const openThing = (n: number): number => {\n    return n\n  }\n  return openThing(1)\n}\n",
+            ),
+        ]);
+        let ours = tree(&[
+            ("a.ts", "export function other() {\n  return 2\n}\n"),
+            (
+                "b.ts",
+                "export function outer() {\n  const openThing = (n: number): number => {\n    return n\n  }\n  return openThing(1)\n}\n",
+            ),
+        ]);
+        let theirs = tree(&[
+            ("a.ts", "export function openThing() {\n  return 1\n}\n"),
+            (
+                "b.ts",
+                "export function outer() {\n  const openThing = (n: number): number => {\n    return n + 1\n  }\n  return openThing(1)\n}\n",
+            ),
+        ]);
+        let work = tree(&[
+            ("a.ts", "export function other() {\n  return 2\n}\n"),
+            (
+                "b.ts",
+                "export function outer() {\n  const openThing = (n: number): number => {\n    return n + 1\n  }\n  return openThing(1)\n}\n",
+            ),
+        ]);
+        let v = check(
+            &base,
+            &ours,
+            &theirs,
+            &work,
+            &["a.ts".to_string(), "b.ts".to_string()],
+        );
+        assert!(findings_of(&v, "b.ts").is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn prose_is_not_checked_for_references() {
+        let base = tree(&[
+            (
+                "util.ts",
+                "export function clamp(n: number) {\n  return n\n}\n",
+            ),
+            ("notes.md", "# Notes\n\nWe clamp (roughly) the total.\n"),
+        ]);
+        let ours = tree(&[
+            (
+                "util.ts",
+                "export function floor(n: number) {\n  return n\n}\n",
+            ),
+            ("notes.md", "# Notes\n\nWe clamp (roughly) the total.\n"),
+        ]);
+        let theirs = tree(&[
+            (
+                "util.ts",
+                "export function clamp(n: number) {\n  return n\n}\n",
+            ),
+            (
+                "notes.md",
+                "# Notes\n\nWe clamp (roughly) the total, always.\n",
+            ),
+        ]);
+        let work = tree(&[
+            (
+                "util.ts",
+                "export function floor(n: number) {\n  return n\n}\n",
+            ),
+            (
+                "notes.md",
+                "# Notes\n\nWe clamp (roughly) the total, always.\n",
+            ),
+        ]);
+        let v = check(
+            &base,
+            &ours,
+            &theirs,
+            &work,
+            &["notes.md".to_string(), "util.ts".to_string()],
+        );
+        assert!(findings_of(&v, "notes.md").is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn line_counts_follow_a_rename() {
+        let base_text =
+            "export function* widgetFlow() {\n  yield* widget.open(gadget.name)\n  return 0\n}\n";
+        let ours_text = "export function* widgetFlow() {\n  yield* widget.open(gadget.name)\n  yield* widget.open(gadget.name)\n  yield* widget.open(gadget.name)\n  return 0\n}\n";
+        let v = check(
+            &tree(&[("old.ts", base_text)]),
+            &tree(&[("old.ts", ours_text)]),
+            &tree(&[("new.ts", base_text)]),
+            &tree(&[("new.ts", ours_text)]),
+            &["new.ts".to_string(), "old.ts".to_string()],
+        );
+        assert!(findings_of(&v, "new.ts").is_empty(), "{v:#?}");
+        assert!(findings_of(&v, "old.ts").is_empty(), "{v:#?}");
     }
 
     #[test]

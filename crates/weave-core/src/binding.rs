@@ -11,9 +11,10 @@
 //! repaired, because the two passes did not mean the same thing by "call".
 //!
 //! One owner, so the passes cannot disagree about what a "call" is. The public surface
-//! is deliberately four functions: the two predicates, the whole-content
-//! definition query, and the boundary-respecting rewrite. Nothing here knows
-//! about merges, wire formats or files.
+//! is the two predicates, the whole-content definition query, the
+//! boundary-respecting rewrite, and the import-binding group: what an import
+//! binds, what binds a name, what uses it as a value, and which deleted imports
+//! a merge must keep. Nothing here knows about wire formats or files.
 //!
 //! Deliberately narrow, in both directions:
 //!
@@ -453,9 +454,281 @@ pub fn replace_at_word_boundaries(content: &str, needle: &str, replacement: &str
     result
 }
 
+// ---------------------------------------------------------------------------
+// Import bindings
+// ---------------------------------------------------------------------------
+
+/// Is `s` one identifier and nothing else?
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+/// The local name one import specifier binds: `a` → `a`, `a as b` → `b`,
+/// `type a` → `a`, `* as N` → `N`.
+fn specifier_binding(spec: &str) -> Option<String> {
+    let spec = spec.trim().trim_end_matches(';').trim();
+    let spec = spec.strip_prefix("type ").unwrap_or(spec).trim();
+    let local = match spec.rsplit_once(" as ") {
+        Some((_, local)) => local.trim(),
+        None => spec,
+    };
+    is_identifier(local).then(|| local.to_string())
+}
+
+/// The names one single-line import statement binds in its file, for the
+/// import forms whose binding can be read off the line: ES modules
+/// (`import * as N`, `import D`, `import { a, b as c }`, `import type …`) and
+/// Python (`import a.b`, `import a as b`, `from m import a, b as c`).
+///
+/// Empty for anything else, including multi-line statements and side-effect
+/// imports (`import "./x"`). Callers treat empty as "binds nothing I know
+/// of", which can only make them report less.
+pub fn import_bindings(line: &str) -> Vec<String> {
+    let t = line.trim().trim_end_matches(';').trim();
+    if let Some(rest) = t.strip_prefix("import ") {
+        let rest = rest.trim();
+        // ES module: everything before ` from ` is the clause.
+        if let Some((clause, _)) = rest.rsplit_once(" from ") {
+            let clause = clause.trim();
+            let clause = clause.strip_prefix("type ").unwrap_or(clause).trim();
+            let mut out = Vec::new();
+            let (head, braces) = match (clause.find('{'), clause.rfind('}')) {
+                (Some(o), Some(c)) if o < c => (&clause[..o], Some(&clause[o + 1..c])),
+                (Some(_), None) => return Vec::new(), // multi-line clause
+                _ => (clause, None),
+            };
+            for part in head.split(',') {
+                if let Some(n) = specifier_binding(part) {
+                    out.push(n);
+                }
+            }
+            if let Some(inner) = braces {
+                for part in inner.split(',') {
+                    if let Some(n) = specifier_binding(part) {
+                        out.push(n);
+                    }
+                }
+            }
+            return out;
+        }
+        // Python `import a.b, c as d`. A quote means an ES side-effect import.
+        if rest.contains(['"', '\'', '{', '(']) {
+            return Vec::new();
+        }
+        return rest
+            .split(',')
+            .filter_map(|part| {
+                let part = part.trim();
+                match part.rsplit_once(" as ") {
+                    Some((_, local)) => specifier_binding(local),
+                    None => specifier_binding(part.split('.').next().unwrap_or("")),
+                }
+            })
+            .collect();
+    }
+    if let Some(rest) = t.strip_prefix("from ") {
+        if let Some((_, names)) = rest.split_once(" import ") {
+            let names = names.trim();
+            if names.starts_with('(') && !names.ends_with(')') {
+                return Vec::new(); // multi-line
+            }
+            let names = names.trim_start_matches('(').trim_end_matches(')');
+            return names.split(',').filter_map(specifier_binding).collect();
+        }
+    }
+    Vec::new()
+}
+
+/// Does any import statement in `content` bind `name`?
+pub fn has_import_binding(content: &str, name: &str) -> bool {
+    content
+        .lines()
+        .any(|l| import_bindings(l).iter().any(|b| b == name))
+}
+
+/// Does `content` DECLARE `name` in the file itself — a definer keyword, or a
+/// `const` / `let` / `var` / `val` declaration anywhere, nested ones included?
+///
+/// This is [`has_definition`] widened by the variable declarations, which bind
+/// a name exactly as much as `function` does: a `const f = () => …` inside a
+/// function body is a definition of `f`. Imports are not declarations: an
+/// import binds a name that some OTHER file must still define.
+pub fn has_declaration(content: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    has_definition(content, name)
+        || content.lines().any(|line| {
+            let mut t = line.trim_start();
+            while let Some(rest) = MODIFIERS.iter().find_map(|kw| t.strip_prefix(kw)) {
+                t = rest.trim_start();
+            }
+            let Some(rest) = ["const ", "let ", "var ", "val "]
+                .iter()
+                .find_map(|kw| t.strip_prefix(kw))
+            else {
+                return false;
+            };
+            let rest = rest.trim_start();
+            let rest = rest.strip_prefix("mut ").unwrap_or(rest);
+            // `const { a, b: c } = …` / `const [a, b] = …` destructure several.
+            if rest.starts_with(['{', '[']) {
+                let head = rest.split('=').next().unwrap_or(rest);
+                return head
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+                    .any(|w| w == name);
+            }
+            rest.starts_with(name)
+                && rest[name.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !is_ident_char_c(c) && c != '$')
+        })
+}
+
+/// Is `name` bound in `content` at all: declared there, or imported?
+pub fn has_binding(content: &str, name: &str) -> bool {
+    has_declaration(content, name) || has_import_binding(content, name)
+}
+
+/// Does `content` USE `name` as a value — a call `name(`, a member access
+/// `name.x` or a generic `name<` — at a word boundary, not itself preceded by
+/// `.`, outside import statements, comments and string-looking text?
+///
+/// Wider than [`has_call_reference`] by exactly the member access, which is
+/// how a namespace import (`import * as N`) is used and the shape the call
+/// rule cannot see.
+pub fn has_value_reference(content: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let first_char_len = name.chars().next().map_or(1, char::len_utf8);
+    content.lines().any(|line| {
+        if is_trivia_line(line) || !import_bindings(line).is_empty() {
+            return false;
+        }
+        let t = line.trim_start();
+        if t.starts_with("import ") || t.starts_with("from ") {
+            return false;
+        }
+        let mut from = 0usize;
+        while let Some(rel) = line[from..].find(name) {
+            let i = from + rel;
+            let before = line[..i].chars().next_back();
+            let before_ok = before.is_none_or(|c| !is_ident_char_c(c) && c != '.' && c != '$');
+            // Outside a string: an even number of quotes before the match.
+            let quotes = line[..i]
+                .chars()
+                .filter(|c| matches!(c, '"' | '\'' | '`'))
+                .count();
+            let after = &line[i + name.len()..];
+            let after_ok = after.starts_with('.') && !after.starts_with("..")
+                || after.trim_start().starts_with('(')
+                || after.starts_with('<');
+            if before_ok && after_ok && quotes % 2 == 0 && !is_definition_line(line, name) {
+                return true;
+            }
+            from = i + first_char_len;
+            if from >= line.len() {
+                break;
+            }
+        }
+        false
+    })
+}
+
+/// Import lines one side deleted that the merge must keep because the OTHER
+/// side's new code depends on them.
+///
+/// The shape: base imports `N`. Side X deletes that import (its own code no
+/// longer uses `N`, and nothing else in X binds `N`). Side Y keeps the import
+/// line verbatim and ADDS a line that uses `N`. A deletion is a claim that
+/// nothing needs the import any more, and Y's addition falsifies it, so taking
+/// the deletion silently breaks Y's addition — the name is used and no longer
+/// bound, a compile error the merge introduced with no marker to point at it.
+/// Keeping the line honours both sides: X's code does not use `N`, so the kept
+/// import changes nothing X wrote.
+///
+/// Symmetric in the two sides, and empty whenever one side equals base
+/// (a side that changed nothing added no dependency), so `merge(b, x, b) = x`
+/// and idempotence are untouched.
+pub fn imports_kept_for_new_uses(base: &str, ours: &str, theirs: &str) -> Vec<String> {
+    let base_lines: HashSet<&str> = base.lines().map(str::trim).collect();
+    let mut keep: Vec<String> = Vec::new();
+    for (deleter, keeper) in [(ours, theirs), (theirs, ours)] {
+        let deleter_lines: HashSet<&str> = deleter.lines().map(str::trim).collect();
+        let keeper_lines: HashSet<&str> = keeper.lines().map(str::trim).collect();
+        // The lines the keeper ADDED: its new code.
+        let added: String = keeper
+            .lines()
+            .filter(|l| !base_lines.contains(l.trim()))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        if added.is_empty() {
+            continue;
+        }
+        for line in base.lines() {
+            let t = line.trim();
+            if deleter_lines.contains(t) || !keeper_lines.contains(t) {
+                continue;
+            }
+            let names = import_bindings(t);
+            let needed = names
+                .iter()
+                .any(|n| has_value_reference(&added, n) && !has_binding(deleter, n));
+            if needed && !keep.iter().any(|k| k == t) {
+                keep.push(t.to_string());
+            }
+        }
+    }
+    keep
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_bindings_read_the_local_names() {
+        let b = |l: &str| import_bindings(l);
+        assert_eq!(b("import * as Widget from \"./w\""), vec!["Widget"]);
+        assert_eq!(
+            b("import Foo, { bar, baz as qux } from 'x';"),
+            vec!["Foo", "bar", "qux"]
+        );
+        assert_eq!(b("import type { Gadget } from \"./g\""), vec!["Gadget"]);
+        assert_eq!(b("import { type Gizmo } from \"./g\""), vec!["Gizmo"]);
+        assert_eq!(b("from pkg.mod import a, b as c"), vec!["a", "c"]);
+        assert_eq!(b("import os.path, numpy as np"), vec!["os", "np"]);
+        assert!(b("import \"./side-effect\"").is_empty());
+        assert!(b("import {").is_empty());
+        assert!(b("const widget = 1").is_empty());
+    }
+
+    #[test]
+    fn a_local_const_is_a_binding() {
+        let body = "function outer() {\n  const openThing = (x: number): void => {\n    x\n  }\n  openThing(1)\n}\n";
+        assert!(has_binding(body, "openThing"));
+        assert!(has_binding("  let { a, b: c } = obj\n", "c"));
+        assert!(!has_binding("  openThing(1)\n", "openThing"));
+    }
+
+    #[test]
+    fn a_member_access_is_a_value_reference() {
+        assert!(has_value_reference("  yield* Widget.first()\n", "Widget"));
+        assert!(has_value_reference("  gadget(1)\n", "gadget"));
+        assert!(!has_value_reference("  obj.Widget.first()\n", "Widget"));
+        assert!(!has_value_reference("  log(\"Widget.first\")\n", "Widget"));
+        assert!(!has_value_reference(
+            "import * as Widget from \"./w\"\n",
+            "Widget"
+        ));
+        assert!(!has_value_reference("  // Widget.first()\n", "Widget"));
+    }
 
     #[test]
     fn a_definition_line_is_not_a_call_site() {

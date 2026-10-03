@@ -182,3 +182,131 @@ fn rebasing_several_commits_does_not_add_blank_lines_issue169() {
     );
     assert!(git(dir, &["status", "--porcelain"]).stdout.is_empty());
 }
+
+/// Strip every conflict box from `text`, keeping only the frame: the lines
+/// that survive whichever way a reader resolves the conflict.
+fn frame_lines(text: &str) -> Vec<&str> {
+    let mut inside = false;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if line.starts_with("<<<<<<<") {
+            inside = true;
+        } else if line.starts_with(">>>>>>>") {
+            inside = false;
+        } else if !inside {
+            out.push(line);
+        }
+    }
+    out
+}
+
+/// A resolution that takes one side of every box, markers removed.
+fn take_side(text: &str, ours: bool) -> String {
+    #[derive(PartialEq)]
+    enum Z {
+        Frame,
+        Ours,
+        Base,
+        Theirs,
+    }
+    let mut z = Z::Frame;
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.starts_with("<<<<<<<") {
+            z = Z::Ours;
+            continue;
+        }
+        if line.starts_with("|||||||") && z != Z::Frame {
+            z = Z::Base;
+            continue;
+        }
+        if line.starts_with("=======") && z != Z::Frame {
+            z = Z::Theirs;
+            continue;
+        }
+        if line.starts_with(">>>>>>>") {
+            z = Z::Frame;
+            continue;
+        }
+        // The enhanced box's `refused_by:` line opens the ours side and is
+        // part of the box's furniture; weave's own two-button resolution drops
+        // it, so this one does too.
+        if z == Z::Ours && line.contains("refused_by: ") {
+            continue;
+        }
+        let keep = match z {
+            Z::Frame => true,
+            Z::Ours => ours,
+            Z::Theirs => !ours,
+            Z::Base => false,
+        };
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The driver's `weave explain` hint must never land OUTSIDE a conflict
+/// region. It used to be a trailing comment line after the last box, so
+/// resolving the markers left it behind and it was committed as source.
+#[test]
+fn the_explain_hint_never_lands_outside_the_conflict_markers() {
+    let base = "function alpha() {\n  return 0\n}\n\nfunction beta() {\n  return 10\n}\n";
+    let ours = "function alpha() {\n  return 1\n}\n\nfunction beta() {\n  return 11\n}\n";
+    let theirs = "function alpha() {\n  return 2\n}\n\nfunction beta() {\n  return 12\n}\n";
+    let driver_bin = env!("CARGO_BIN_EXE_weave-driver");
+
+    for standard in [false, true] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        fs::write(dir.join("base.ts"), base).unwrap();
+        fs::write(dir.join("ours.ts"), ours).unwrap();
+        fs::write(dir.join("theirs.ts"), theirs).unwrap();
+        let mut cmd = Command::new(driver_bin);
+        cmd.current_dir(dir)
+            .env("WEAVE_STATS", "0")
+            .args(["base.ts", "ours.ts", "theirs.ts"]);
+        if standard {
+            cmd.args(["-l", "7", "-p", "src/widget.ts"]);
+        } else {
+            cmd.args(["7", "src/widget.ts"]);
+        }
+        let out = cmd.output().expect("driver runs");
+        assert_eq!(out.status.code(), Some(1), "this merge must conflict");
+        let merged = fs::read_to_string(dir.join("ours.ts")).unwrap();
+        assert!(merged.contains("<<<<<<<"), "{merged}");
+
+        // Every frame line is a line one of the inputs wrote.
+        for line in frame_lines(&merged) {
+            assert!(
+                !line.contains("weave explain") && !line.contains("weave: run"),
+                "hint text outside the markers (standard={standard}):\n{merged}"
+            );
+            assert!(
+                base.lines()
+                    .chain(ours.lines())
+                    .chain(theirs.lines())
+                    .any(|l| l == line),
+                "frame line `{line}` is in no input (standard={standard}):\n{merged}"
+            );
+        }
+        // Either one-sided resolution is exactly that side: nothing weave wrote
+        // survives the markers.
+        assert_eq!(take_side(&merged, true), ours, "standard={standard}");
+        assert_eq!(take_side(&merged, false), theirs, "standard={standard}");
+        // The hint is still delivered: on a marker line, and on stderr.
+        assert!(
+            merged
+                .lines()
+                .any(|l| l.starts_with(">>>>>>>") && l.contains("weave explain src/widget.ts")),
+            "{merged}"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("weave explain src/widget.ts"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

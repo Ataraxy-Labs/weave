@@ -619,6 +619,7 @@ pub(crate) fn merge_interstitials(
     ours_regions: &[FileRegion],
     theirs_regions: &[FileRegion],
     marker_format: &MarkerFormat,
+    kept_imports: &[String],
 ) -> (HashMap<String, String>, Vec<EntityConflict>) {
     let base_map: HashMap<&str, &str> = base_regions
         .iter()
@@ -787,7 +788,61 @@ pub(crate) fn merge_interstitials(
         }
     }
 
+    // An import one side deleted and the other side's NEW code uses is kept
+    // (see [`crate::binding::imports_kept_for_new_uses`]). This runs after
+    // every rung, including the one-side-changed fast paths: the side that
+    // added the use usually did not touch the import block at all, so the
+    // block is "changed by one side only" and the deletion would otherwise be
+    // taken outright.
+    if !kept_imports.is_empty() {
+        for (key, text) in merged.iter_mut() {
+            if interstitial_conflicts.iter().any(|c| &c.entity_name == key) {
+                continue;
+            }
+            let base_content = base_map.get(key.as_str()).copied().unwrap_or("");
+            *text = restore_kept_imports(base_content, text, kept_imports);
+        }
+    }
+
     (merged, interstitial_conflicts)
+}
+
+/// Put back every `kept` import line that `base` has and `merged` lost, at the
+/// place base had it: after the nearest earlier base line `merged` still has,
+/// else before the nearest later one, else at the top.
+fn restore_kept_imports(base: &str, merged: &str, kept: &[String]) -> String {
+    let base_lines: Vec<&str> = base.lines().collect();
+    let mut out: Vec<String> = merged.lines().map(str::to_string).collect();
+    let mut changed = false;
+    for (bi, bline) in base_lines.iter().enumerate() {
+        let t = bline.trim();
+        if t.is_empty() || !kept.iter().any(|k| k == t) || out.iter().any(|l| l.trim() == t) {
+            continue;
+        }
+        let find = |needle: &str, out: &[String]| out.iter().position(|l| l.trim() == needle);
+        let after_prev = base_lines[..bi]
+            .iter()
+            .rev()
+            .filter(|l| !l.trim().is_empty())
+            .find_map(|l| find(l.trim(), &out).map(|p| p + 1));
+        let before_next = || {
+            base_lines[bi + 1..]
+                .iter()
+                .filter(|l| !l.trim().is_empty())
+                .find_map(|l| find(l.trim(), &out))
+        };
+        let at = after_prev.or_else(before_next).unwrap_or(0);
+        out.insert(at, bline.to_string());
+        changed = true;
+    }
+    if !changed {
+        return merged.to_string();
+    }
+    let mut text = out.join("\n");
+    if merged.ends_with('\n') || merged.is_empty() {
+        text.push('\n');
+    }
+    text
 }
 
 /// Check if a region is predominantly import/use statements.
@@ -2204,6 +2259,39 @@ pub(crate) fn scoped_conflict_marker(
     let open = "<".repeat(fmt.marker_length);
     let sep = "=".repeat(fmt.marker_length);
     let close = ">".repeat(fmt.marker_length);
+
+    // A large both-modified scope is first offered to the line-level
+    // refinement, which boxes only the hunks that overlap and applies the rest.
+    if let (Some(b), Some(o), Some(t), false, false) =
+        (base, ours, theirs, ours_deleted, theirs_deleted)
+    {
+        let (header, footer) = if fmt.enhanced {
+            let complexity = crate::conflict::classify_conflict(base, ours, theirs);
+            (
+                format!(
+                    "{} ours \u{2014} scope `{}`{} ({}, confidence: {})\n{}",
+                    open,
+                    name,
+                    scope.context(),
+                    complexity,
+                    complexity.confidence(),
+                    crate::conflict::refusal_line(
+                        &fmt.comment_prefix,
+                        scope.guard,
+                        base,
+                        ours,
+                        theirs
+                    )
+                ),
+                format!("{} theirs \u{2014} scope `{}`\n", close, name),
+            )
+        } else {
+            (format!("{open} ours\n"), format!("{close} theirs\n"))
+        };
+        if let Some(refined) = crate::conflict::refine_box(b, o, t, fmt, &header, &footer) {
+            return refined;
+        }
+    }
 
     // ONE cut, the same one `EntityConflict::to_conflict_markers` takes. This
     // function used to carry its own copy of the narrowing, and a copy of a rule

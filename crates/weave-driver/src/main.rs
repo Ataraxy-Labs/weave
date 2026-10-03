@@ -43,9 +43,8 @@
 //!
 //! ## The pull channel
 //!
-//! A conflicted file gets one instruction. For a single conflict it is attached
-//! to the closing marker label, so resolving that marker removes the instruction.
-//! Multiple conflicts retain one footer in the file's own comment syntax:
+//! A conflicted file gets ONE extra line, at the end, in the file's own comment
+//! syntax:
 //!
 //! ```text
 //! # weave: run 'weave explain <path>' for per-hunk detail, 'weave check' to verify your resolution
@@ -337,19 +336,15 @@ fn run(started: std::time::Instant) -> Result<Verdict, Refusal> {
     let result = entity_merge_fmt(&base, &ours, &theirs, &file_path, &fmt, &host);
     let ms_merge = elapsed_ms(merged_at);
 
-    // The pull channel's one line. A conflicted artifact is the only place an
+    // The pull channel's hint. A conflicted artifact is the only place an
     // agent is guaranteed to look, so it is the only place worth teaching from;
     // a clean merge is not told anything, which is why `is_clean()` gates this
-    // and why the byte-for-byte contract on clean output is untouched.
+    // and why the byte-for-byte contract on clean output is untouched. The hint
+    // rides ON a marker line, so resolving the conflict removes it.
     let content = if result.is_clean() {
         result.content.clone()
     } else {
-        teach(
-            &result.content,
-            &file_path,
-            &fmt.comment_prefix,
-            fmt.marker_length,
-        )
+        weave_core::conflict::teach_on_marker(&result.content, &file_path, fmt.marker_length)
     };
     let content = &content;
     // Write result: to -o path if specified (jj), else to ours path (git convention: %A)
@@ -500,6 +495,10 @@ fn run(started: std::time::Instant) -> Result<Verdict, Refusal> {
             result.conflicts.len(),
             file_path
         );
+        eprintln!(
+            "weave: run 'weave explain {file_path}' for per-hunk detail, \
+'weave check' to verify your resolution"
+        );
         for conflict in &result.conflicts {
             eprintln!(
                 "  - {} `{}`: {}",
@@ -508,46 +507,6 @@ fn run(started: std::time::Instant) -> Result<Verdict, Refusal> {
         }
         Ok(Verdict::Conflicted)
     }
-}
-
-/// Keep a single conflict's instruction on its closing marker, not in source.
-/// A footer can be hundreds of lines outside the resolver's read/edit window
-/// (#174). Merely moving a comment next to JSX can also leave invalid source
-/// after resolution. Marker labels are disposable metadata for either choice.
-/// Multiple or unexpected marker layouts retain the existing one-file footer.
-fn teach(content: &str, file_path: &str, comment_prefix: &str, marker_length: usize) -> String {
-    let open = format!("{} ", "<".repeat(marker_length));
-    let close = format!("{} ", ">".repeat(marker_length));
-    let mut opens = Vec::new();
-    let mut closes = Vec::new();
-    let mut offset = 0;
-    for line in content.split_inclusive('\n') {
-        if line.starts_with(&open) {
-            opens.push(offset);
-        }
-        if line.starts_with(&close) {
-            // Insert before the original line ending, preserving CRLF and EOF.
-            closes.push((offset, offset + line.trim_end_matches(['\r', '\n']).len()));
-        }
-        offset += line.len();
-    }
-    if opens.len() == 1 && closes.len() == 1 && opens[0] < closes[0].0 {
-        let end = closes[0].1;
-        return format!(
-            "{} — {}{}",
-            &content[..end],
-            weave_core::conflict::teach_line(comment_prefix, file_path),
-            &content[end..]
-        );
-    }
-    let mut out = String::with_capacity(content.len() + 128);
-    out.push_str(content);
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(&weave_core::conflict::teach_line(comment_prefix, file_path));
-    out.push('\n');
-    out
 }
 
 /// Read a UTF-8 file to completion, or say which of the three it was.
@@ -735,6 +694,8 @@ fn audit_base_path(file_path: &str, write_path: &str) -> String {
 mod tests {
     use super::*;
 
+    // The instruction rides on a closing marker label (#174, #175): resolving
+    // the conflict either way removes it, and nothing lands in the source.
     #[test]
     fn single_conflict_instruction_leaves_with_either_marker_resolution() {
         for width in [3, 7, 11] {
@@ -744,16 +705,15 @@ mod tests {
                 let sep = "=".repeat(width);
                 let tail = format!("{});{newline}}}{newline}", "    // unchanged\n".repeat(200));
                 let source = format!("function View() {{{newline}{open} ours — scope `return (`{newline}ours{newline}{sep}{newline}theirs{newline}{close} theirs — scope `return (`{newline}{tail}");
-                let output = teach(&source, "view.tsx", "//", width);
-                let hint = weave_core::conflict::teach_line("//", "view.tsx");
-                assert!(output.contains(&format!(
-                    "{close} theirs — scope `return (` — {hint}{newline}"
-                )));
+                let output = weave_core::conflict::teach_on_marker(&source, "view.tsx", width);
+                let marked = output
+                    .lines()
+                    .filter(|l| l.contains("weave explain"))
+                    .collect::<Vec<_>>();
+                assert_eq!(marked.len(), 1, "one instruction");
+                assert!(marked[0].starts_with(&format!("{close} theirs — scope `return (`")));
                 assert!(output.ends_with(&tail));
-                assert_eq!(output.matches(&hint).count(), 1);
-                // The sole change is in the closing marker's label, neither side
-                // nor the common frame gains an instruction to clean up.
-                assert_eq!(output.replace(&format!(" — {hint}"), ""), source);
+                assert_eq!(output.lines().count(), source.lines().count());
                 for side in ["ours", "theirs"] {
                     let start = output.find(&format!("{open} ours")).unwrap();
                     let end = output.find(&format!("{close} theirs")).unwrap();
@@ -768,24 +728,19 @@ mod tests {
     #[test]
     fn single_diff3_conflict_without_final_newline_keeps_instruction_on_marker() {
         let source = "<<<<<<< ours\na\n||||||| base\nb\n=======\nc\n>>>>>>> theirs";
-        let output = teach(source, "example.py", "#", 7);
+        let output = weave_core::conflict::teach_on_marker(source, "example.py", 7);
         assert!(output.starts_with(source));
         assert!(!output.ends_with('\n'));
         assert_eq!(output.lines().count(), source.lines().count());
     }
 
     #[test]
-    fn multiple_conflict_blocks_keep_one_footer() {
+    fn multiple_conflict_blocks_add_no_footer() {
         let block = "<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n";
         let source = format!("{block}unchanged\n{block}");
-        let output = teach(&source, "example.py", "#", 7);
-        assert_eq!(
-            output,
-            format!(
-                "{source}{}\n",
-                weave_core::conflict::teach_line("#", "example.py")
-            )
-        );
+        let output = weave_core::conflict::teach_on_marker(&source, "example.py", 7);
+        assert_eq!(output.lines().count(), source.lines().count());
+        assert_eq!(output.matches("weave explain").count(), 1);
     }
 
     #[test]

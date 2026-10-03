@@ -105,6 +105,20 @@ pub(crate) fn rev_exists(dir: &Path, rev: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Git's canonical empty-tree object id — the tree with no entries.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// Parent of a replayed commit (`REBASE_HEAD` / `CHERRY_PICK_HEAD`), or the
+/// empty tree when the replayed commit is a root commit.
+fn replay_base(dir: &Path, theirs_rev: &str) -> R<String> {
+    let parent = format!("{theirs_rev}^");
+    if rev_exists(dir, &parent) {
+        Ok(git(dir, &["rev-parse", &parent])?.trim().to_string())
+    } else {
+        Ok(EMPTY_TREE.to_string())
+    }
+}
+
 /// Resolve the merge triple, defaulting to the operation in progress.
 ///
 /// `ours` defaults to `HEAD`; `theirs` defaults to the commit of whatever
@@ -112,7 +126,10 @@ pub(crate) fn rev_exists(dir: &Path, rev: &str) -> bool {
 /// but a rebase, cherry-pick or revert conflict has no `MERGE_HEAD` — git
 /// records the commit being applied as `REBASE_HEAD` / `CHERRY_PICK_HEAD` /
 /// `REVERT_HEAD` instead, so a bare `weave check` can still verify a resolution
-/// against it (issue #157). `base` defaults to the merge base of the two.
+/// against it (issue #157). `base` defaults to the merge base of the two for a
+/// merge or revert, and to the replayed commit's parent for a rebase or
+/// cherry-pick: a replay applies one commit as a patch, and the merge base
+/// would smear the whole branch divergence into the context.
 pub(crate) fn resolve_revs(
     dir: &Path,
     base: Option<&str>,
@@ -143,6 +160,9 @@ pub(crate) fn resolve_revs(
     };
     let base = match base {
         Some(b) => b.to_string(),
+        None if theirs == "REBASE_HEAD" || theirs == "CHERRY_PICK_HEAD" => {
+            replay_base(dir, &theirs)?
+        }
         None => git(dir, &["merge-base", &ours, &theirs])?
             .trim()
             .to_string(),
@@ -178,7 +198,8 @@ pub struct MergeScope {
     pub scope: String,
 }
 
-/// Find the merge this repository is in — or has just finished — and read it.
+/// Find the merge/rebase this repository is in — or has just finished — and
+/// read it.
 ///
 /// Three shapes, in order, because they are the moments an agent asks:
 ///
@@ -190,18 +211,26 @@ pub struct MergeScope {
 ///   records the commit being applied as `REBASE_HEAD` / `CHERRY_PICK_HEAD` /
 ///   `REVERT_HEAD`. Ours is `HEAD` (the side built so far), theirs is that
 ///   commit. Without this, `weave check` fell through to "nothing was checked"
-///   during every rebase, while still suggesting itself (issue #157).
+///   during every rebase, while still suggesting itself (issue #157). For a
+///   rebase or cherry-pick the base is that commit's parent (`REBASE_HEAD^`),
+///   not `merge-base(ours, theirs)`: a replay applies one commit as a patch,
+///   and the merge base would smear the whole branch's divergence into it.
 /// * **just committed**: `HEAD` has two parents. Ours is `HEAD^1`, theirs is
 ///   `HEAD^2`. An agent that committed and then wants to know what it did.
 ///
-/// Neither shape present is not an error and must not be reported as one — it
-/// is the sentence "there is no merge here", which the caller prints.
+/// No shape present is not an error and must not be reported as one — it is
+/// the sentence "there is no merge here", which the caller prints.
 pub fn merge_scope(dir: &Path) -> R<Option<MergeScope>> {
     if !rev_exists(dir, "HEAD") {
         return Ok(None);
     }
-    let (ours_rev, theirs_rev, moment) = if rev_exists(dir, "MERGE_HEAD") {
-        ("HEAD".to_string(), "MERGE_HEAD".to_string(), "in progress")
+    let (ours_rev, theirs_rev, moment, use_replay_base) = if rev_exists(dir, "MERGE_HEAD") {
+        (
+            "HEAD".to_string(),
+            "MERGE_HEAD".to_string(),
+            "merge in progress",
+            false,
+        )
     } else if let Some(op_head) = ["REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
         .into_iter()
         .find(|r| rev_exists(dir, r))
@@ -209,16 +238,37 @@ pub fn merge_scope(dir: &Path) -> R<Option<MergeScope>> {
         // A rebase, cherry-pick or revert conflict has no MERGE_HEAD; git
         // records the commit being applied as *_HEAD, and the unmerged index
         // stages are the real three-way. HEAD is the side built so far, so
-        // `weave check` can verify a resolution here too (issue #157).
-        ("HEAD".to_string(), op_head.to_string(), "in progress")
+        // `weave check` can verify a resolution here too (issue #157). A
+        // replayed commit's base is its own parent; a revert keeps the merge
+        // base, as before.
+        let moment = match op_head {
+            "REBASE_HEAD" => "rebase in progress",
+            "CHERRY_PICK_HEAD" => "cherry-pick in progress",
+            _ => "revert in progress",
+        };
+        (
+            "HEAD".to_string(),
+            op_head.to_string(),
+            moment,
+            op_head != "REVERT_HEAD",
+        )
     } else if rev_exists(dir, "HEAD^2") {
-        ("HEAD^1".to_string(), "HEAD^2".to_string(), "just committed")
+        (
+            "HEAD^1".to_string(),
+            "HEAD^2".to_string(),
+            "merge just committed",
+            false,
+        )
     } else {
         return Ok(None);
     };
-    let base_rev = git(dir, &["merge-base", &ours_rev, &theirs_rev])?
-        .trim()
-        .to_string();
+    let base_rev = if use_replay_base {
+        replay_base(dir, &theirs_rev)?
+    } else {
+        git(dir, &["merge-base", &ours_rev, &theirs_rev])?
+            .trim()
+            .to_string()
+    };
 
     // The subjects are every file this merge PRODUCED: whatever either side
     // moved. Restricting it to files both sides moved was the obvious-looking
@@ -267,7 +317,7 @@ pub fn merge_scope(dir: &Path) -> R<Option<MergeScope>> {
     let work = read_worktree(dir)?;
     let scope = format!(
         "working tree vs the three merge stages of {ours_rev} × {theirs_rev} \
-         (base {}, merge {moment}) — {} file(s) either side changed",
+         (base {}, {moment}) — {} file(s) either side changed",
         &base_rev[..base_rev.len().min(8)],
         subjects.len()
     );
@@ -351,4 +401,120 @@ pub(crate) fn read_rev_tree(dir: &Path, rev: &str) -> R<Tree> {
         }
     }
     Ok(tree)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static FIXTURE_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn git_ok(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    fn git_fails(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("run git");
+        assert!(!status.success(), "git {} unexpectedly succeeded", args.join(" "));
+    }
+
+    fn git_fixture(name: &str) -> PathBuf {
+        let n = FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "weave-gitscan-test-{}-{}-{}",
+            std::process::id(),
+            name,
+            n
+        ));
+        fs::create_dir_all(&root).expect("create fixture dir");
+        git_ok(&root, &["init", "-q"]);
+        git_ok(&root, &["checkout", "-b", "main"]);
+        root
+    }
+
+    /// Rebasing a diverged branch onto main leaves REBASE_HEAD at the replayed
+    /// commit; merge_scope must recognize that shape so `weave check` works.
+    #[test]
+    fn merge_scope_during_rebase_conflict() {
+        let root = git_fixture("rebase-conflict");
+        let base_content = "def a():\n    return 1\n\ndef keep():\n    return 'stable'\n";
+
+        fs::write(root.join("m.py"), base_content).expect("write base");
+        git_ok(&root, &["add", "m.py"]);
+        git_ok(&root, &["commit", "-m", "initial"]);
+
+        git_ok(&root, &["checkout", "-b", "feature"]);
+        let feature_content = base_content.replace("return 1", "return 2");
+        fs::write(root.join("m.py"), &feature_content).expect("write feature");
+        git_ok(&root, &["add", "m.py"]);
+        git_ok(&root, &["commit", "-m", "feature"]);
+        let replayed_commit = git_ok(&root, &["rev-parse", "HEAD"]).trim().to_string();
+
+        git_ok(&root, &["checkout", "main"]);
+        let main_content = base_content.replace("return 1", "return 3");
+        fs::write(root.join("m.py"), &main_content).expect("write main");
+        git_ok(&root, &["add", "m.py"]);
+        git_ok(&root, &["commit", "-m", "main"]);
+
+        git_ok(&root, &["checkout", "feature"]);
+        git_fails(&root, &["rebase", "main"]);
+
+        let scope = merge_scope(&root)
+            .expect("merge_scope should not error")
+            .expect("merge_scope should recognize mid-rebase state");
+
+        assert!(
+            scope.scope.contains("rebase in progress"),
+            "scope should name the rebase moment: {}",
+            scope.scope
+        );
+
+        let rebase_head = git_ok(&root, &["rev-parse", "REBASE_HEAD"]).trim().to_string();
+        assert_eq!(
+            rebase_head,
+            replayed_commit,
+            "REBASE_HEAD should be the commit being replayed"
+        );
+
+        let theirs_rev = git_ok(&root, &["rev-parse", "REBASE_HEAD"]).trim().to_string();
+        assert_eq!(
+            scope.theirs.get("m.py").map(String::as_str),
+            Some(feature_content.as_str()),
+            "theirs stage should come from REBASE_HEAD"
+        );
+        assert!(
+            scope.subjects.iter().any(|p| p == "m.py"),
+            "subjects should include the conflicted file: {:?}",
+            scope.subjects
+        );
+
+        // Sanity: ours is HEAD (main's tip), not the replayed commit.
+        let head_rev = git_ok(&root, &["rev-parse", "HEAD"]).trim().to_string();
+        assert_ne!(head_rev, replayed_commit);
+        assert_eq!(
+            scope.ours.get("m.py").map(String::as_str),
+            Some(main_content.as_str()),
+            "ours stage should come from HEAD"
+        );
+        assert_eq!(theirs_rev, replayed_commit);
+    }
 }

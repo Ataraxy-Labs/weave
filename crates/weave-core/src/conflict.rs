@@ -75,8 +75,11 @@ pub(crate) fn refusal_body(line: &str) -> Option<&str> {
     rest.trim_start().strip_prefix("refused_by: ")
 }
 
-/// The stable body of the driver's teach line — the pull channel's one
-/// sentence, appended once to a CONFLICTED artifact.
+/// The stable body of the driver's teach hint — the pull channel's one
+/// sentence. The driver now writes it on a marker line ([`teach_on_marker`]);
+/// older versions appended it as a separate comment line, which is the form
+/// [`teach_line`] spells and [`is_teach_line`] still recognises in files
+/// resolved before the change.
 ///
 /// It lives here, next to the refusal line, because it is the same KIND of
 /// thing: text weave wrote, that no version of the file wrote, that belongs to
@@ -97,6 +100,44 @@ pub fn teach_line(comment_prefix: &str, file_path: &str) -> String {
         "{comment_prefix} {TEACH_MARK}{file_path}' for per-hunk detail, \
 'weave check' to verify your resolution"
     )
+}
+
+/// Put the pull channel's hint ON a conflict marker line, never beside one.
+///
+/// The hint used to be a comment line appended after the last box. Resolving
+/// the boxes does not remove a line that sits outside them, so the hint was
+/// committed along with the resolution, and a file merged more than once
+/// collected several copies. A marker line is removed whenever its box is
+/// resolved, so text written on it cannot outlive the conflict. Git and jj
+/// read marker lines by their prefix, so trailing text is safe.
+///
+/// The hint goes on the closing marker of the first box. That is the first
+/// marker line a reader reaches that no parser reads a label from. With no
+/// closing marker of this width in `content`, the text is returned unchanged
+/// and the caller has only stderr left.
+pub fn teach_on_marker(content: &str, file_path: &str, marker_length: usize) -> String {
+    let close = ">".repeat(marker_length);
+    let mut out = String::with_capacity(content.len() + 128);
+    let mut done = false;
+    for piece in content.split_inclusive('\n') {
+        let line = piece.strip_suffix('\n').unwrap_or(piece);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let is_close = line.starts_with(&close)
+            && !line[close.len()..].starts_with('>')
+            && !line.contains(TEACH_MARK);
+        if !done && is_close {
+            out.push_str(line);
+            out.push_str(&format!(
+                " \u{00b7} {TEACH_MARK}{file_path}' for per-hunk detail, \
+'weave check' to verify your resolution"
+            ));
+            out.push_str(&piece[line.len()..]);
+            done = true;
+        } else {
+            out.push_str(piece);
+        }
+    }
+    out
 }
 
 /// Is this line the teach line? A comment prefix, then the stable mark.
@@ -605,6 +646,9 @@ pub struct EntityConflict {
 ///
 /// so a reader who keeps the frame and one side's hole gets that side's text
 /// back byte for byte, and no line can be both in the frame and in a hole.
+/// When [`refine_box`] splits a large scope into several boxes, the identity
+/// holds for each box against its own diff3 hunk, not against the whole scope:
+/// the frame between boxes carries the three-way merge of the rest.
 ///
 /// **There used to be two slicers.** `EntityConflict::to_conflict_markers` and
 /// `merge::scoped_conflict_marker` each carried their own copy of this cut, and
@@ -714,7 +758,173 @@ pub(crate) fn push_lines(out: &mut String, lines: &[&str]) {
     }
 }
 
+/// A narrower rendering of one both-modified box: the scope's three texts
+/// merged line by line (diff3), with only the overlapping hunks left in boxes.
+///
+/// An entity-level refusal is about the scope as a whole. When the scope is
+/// one large statement (a component's JSX, a long pipeline, an object
+/// literal), one real overlap used to put the ENTIRE span between the first
+/// and last edit into a single box. That swallowed every non-overlapping edit
+/// either side made in between, and the reader had to take one side and
+/// re-apply the other side's hunks by hand. A line-level three-way merge of
+/// the same texts applies those hunks and boxes only the overlaps, which is
+/// what git does with the same three inputs.
+///
+/// The conflict stays a conflict. Refinement happens only when the line merge
+/// conflicts too (a clean line merge of a scope a guard refused is not taken:
+/// the guard refused on evidence lines cannot show), and only when it strictly
+/// shrinks the boxed text. Every line either side wrote is still in the
+/// output: in the frame, where the three-way rule applied it, or in a box.
+/// What changes is the two-button reading: taking one side in every box now
+/// gives that side PLUS the other side's non-overlapping hunks, not that side
+/// alone.
+///
+/// `header` is everything from the opening marker line through the refusal
+/// line, `footer` the closing marker line; both end in a newline. Every box
+/// gets the same pair, so each one still names its scope and why it exists.
+pub(crate) fn refine_box(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    fmt: &MarkerFormat,
+    header: &str,
+    footer: &str,
+) -> Option<String> {
+    fn shown(enhanced: bool, b: &str) -> Option<&str> {
+        (!enhanced).then_some(b)
+    }
+    let boxed = |hole: &ConflictBox<'_>| {
+        [BoxSide::Ours, BoxSide::Base, BoxSide::Theirs]
+            .into_iter()
+            .map(|s| hole.side(s).map_or(0, <[_]>::len))
+            .sum::<usize>()
+    };
+    let whole_boxed = boxed(&ConflictBox::cut(
+        Some(ours),
+        shown(fmt.enhanced, base),
+        Some(theirs),
+    ));
+    // A small box is already about as narrow as a line merge can make it.
+    if whole_boxed < 8 {
+        return None;
+    }
+    let mark_like = |t: &str| {
+        t.lines().any(|l| {
+            ['<', '|', '=', '>']
+                .iter()
+                .any(|c| l.starts_with(&c.to_string().repeat(REFINE_MARK)))
+        })
+    };
+    if mark_like(base) || mark_like(ours) || mark_like(theirs) {
+        return None;
+    }
+    let nl = |t: &str| -> String {
+        if t.is_empty() || t.ends_with('\n') {
+            t.to_string()
+        } else {
+            format!("{t}\n")
+        }
+    };
+    let merged = match diffy::MergeOptions::new()
+        .set_conflict_marker_length(REFINE_MARK)
+        .set_conflict_style(diffy::ConflictStyle::Diff3)
+        .merge(&nl(base), &nl(ours), &nl(theirs))
+    {
+        Ok(_) => return None,
+        Err(text) => text,
+    };
+    let pieces = refine_pieces(&merged)?;
+    // Each box is cut again, so edges both claimants agree on leave it.
+    let joined: Vec<Option<[String; 3]>> = pieces
+        .iter()
+        .map(|p| match p {
+            RefinedPiece::Box { ours, base, theirs } => {
+                Some([ours.join("\n"), base.join("\n"), theirs.join("\n")])
+            }
+            RefinedPiece::Frame(_) => None,
+        })
+        .collect();
+    let holes: Vec<Option<ConflictBox<'_>>> = joined
+        .iter()
+        .map(|j| {
+            j.as_ref().map(|[o, b, t]| {
+                ConflictBox::cut(
+                    Some(o.as_str()),
+                    shown(fmt.enhanced, b.as_str()),
+                    Some(t.as_str()),
+                )
+            })
+        })
+        .collect();
+    let refined_boxed: usize = holes.iter().flatten().map(boxed).sum();
+    if refined_boxed >= whole_boxed {
+        return None;
+    }
+
+    let sep = "=".repeat(fmt.marker_length);
+    let mut out = String::new();
+    for (piece, hole) in pieces.iter().zip(holes.iter()) {
+        match (piece, hole) {
+            (RefinedPiece::Frame(lines), _) => push_lines(&mut out, lines),
+            (RefinedPiece::Box { .. }, Some(hole)) => {
+                push_lines(&mut out, hole.frame_prefix());
+                out.push_str(header);
+                push_lines(&mut out, hole.side(BoxSide::Ours).unwrap_or(&[]));
+                if !fmt.enhanced {
+                    out.push_str(&format!("{} base\n", "|".repeat(fmt.marker_length)));
+                    push_lines(&mut out, hole.side(BoxSide::Base).unwrap_or(&[]));
+                }
+                out.push_str(&format!("{sep}\n"));
+                push_lines(&mut out, hole.side(BoxSide::Theirs).unwrap_or(&[]));
+                out.push_str(footer);
+                push_lines(&mut out, hole.frame_suffix());
+            }
+            (RefinedPiece::Box { .. }, None) => return None,
+        }
+    }
+    Some(out)
+}
+
 impl EntityConflict {
+    /// [`refine_box`] for a whole-entity box.
+    fn refined_markers(&self, fmt: &MarkerFormat, guard: &str) -> Option<String> {
+        if !matches!(self.kind, ConflictKind::BothModified) {
+            return None;
+        }
+        let (base, ours, theirs) = (
+            self.base_content.as_deref()?,
+            self.ours_content.as_deref()?,
+            self.theirs_content.as_deref()?,
+        );
+        let open = "<".repeat(fmt.marker_length);
+        let close = ">".repeat(fmt.marker_length);
+        let (header, footer) = if fmt.enhanced {
+            let label = format!(
+                "{} `{}` ({}, confidence: {})",
+                self.entity_type,
+                self.entity_name,
+                self.complexity,
+                self.complexity.confidence()
+            );
+            (
+                format!(
+                    "{open} ours \u{2014} {label}\n{}",
+                    refusal_line(
+                        &fmt.comment_prefix,
+                        guard,
+                        Some(base),
+                        Some(ours),
+                        Some(theirs)
+                    )
+                ),
+                format!("{close} theirs \u{2014} {label}\n"),
+            )
+        } else {
+            (format!("{open} ours\n"), format!("{close} theirs\n"))
+        };
+        refine_box(base, ours, theirs, fmt, &header, &footer)
+    }
+
     /// Render this conflict as conflict markers.
     ///
     /// When `fmt.enhanced` is true, includes entity metadata and the
@@ -726,6 +936,9 @@ impl EntityConflict {
     /// is its own bytes between those two offsets. Base is handed to the cut
     /// only in standard mode, because that is the only mode that renders it.
     pub(crate) fn to_conflict_markers(&self, fmt: &MarkerFormat, guard: &str) -> String {
+        if let Some(refined) = self.refined_markers(fmt, guard) {
+            return refined;
+        }
         let open = "<".repeat(fmt.marker_length);
         let sep = "=".repeat(fmt.marker_length);
         let close = ">".repeat(fmt.marker_length);
@@ -781,6 +994,75 @@ impl EntityConflict {
         push_lines(&mut out, hole.frame_suffix());
         out
     }
+}
+
+// ---------------------------------------------------------------------------
+// Refinement: a big box that is mostly agreement
+// ---------------------------------------------------------------------------
+
+/// Marker length for the private line-level merge that refinement parses.
+/// Long enough that no source line is mistaken for one (checked anyway).
+const REFINE_MARK: usize = 31;
+
+/// One piece of a refined conflict: text outside every box, or one box.
+enum RefinedPiece<'a> {
+    Frame(Vec<&'a str>),
+    Box {
+        ours: Vec<&'a str>,
+        base: Vec<&'a str>,
+        theirs: Vec<&'a str>,
+    },
+}
+
+/// Parse the private diff3 output of one conflicted scope into pieces.
+///
+/// `None` when the text does not parse, or when it has no box at all.
+fn refine_pieces(merged: &str) -> Option<Vec<RefinedPiece<'_>>> {
+    let open = format!("{} ours", "<".repeat(REFINE_MARK));
+    let orig = format!("{} original", "|".repeat(REFINE_MARK));
+    let sep = "=".repeat(REFINE_MARK);
+    let close = format!("{} theirs", ">".repeat(REFINE_MARK));
+    enum Zone {
+        Frame,
+        Ours,
+        Base,
+        Theirs,
+    }
+    let mut zone = Zone::Frame;
+    let mut pieces: Vec<RefinedPiece<'_>> = Vec::new();
+    let mut frame: Vec<&str> = Vec::new();
+    let (mut o, mut b, mut t): (Vec<&str>, Vec<&str>, Vec<&str>) =
+        (Vec::new(), Vec::new(), Vec::new());
+    for line in merged.lines() {
+        match zone {
+            Zone::Frame if line == open => {
+                pieces.push(RefinedPiece::Frame(std::mem::take(&mut frame)));
+                zone = Zone::Ours;
+            }
+            Zone::Frame => frame.push(line),
+            Zone::Ours if line == orig => zone = Zone::Base,
+            Zone::Ours => o.push(line),
+            Zone::Base if line == sep => zone = Zone::Theirs,
+            Zone::Base => b.push(line),
+            Zone::Theirs if line == close => {
+                pieces.push(RefinedPiece::Box {
+                    ours: std::mem::take(&mut o),
+                    base: std::mem::take(&mut b),
+                    theirs: std::mem::take(&mut t),
+                });
+                zone = Zone::Frame;
+            }
+            Zone::Theirs => t.push(line),
+        }
+    }
+    if !matches!(zone, Zone::Frame) {
+        return None;
+    }
+    pieces.push(RefinedPiece::Frame(frame));
+    pieces
+        .iter()
+        .any(|p| matches!(p, RefinedPiece::Box { .. }))
+        .then_some(pieces)
 }
 
 // ---------------------------------------------------------------------------

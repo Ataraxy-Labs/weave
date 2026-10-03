@@ -51,9 +51,10 @@ def process(data):
    guard, the confidence, and the hunks *both* sides actually touched —
    narrower and more precise than diffing the whole file by eye.
 3. **Edit.** Pick a side, merge by hand, or rewrite — same as any conflict.
-   Remove the marker lines and the trailing comment weave appended
-   (`// weave: run 'weave explain <file>' ...`); leaving it in is harmless (it
-   isn't valid code) but `weave check` will flag it if you miss one.
+   Remove the marker lines. The `weave explain` hint is written on the first
+   box's closing marker, so it goes when the markers go. Older weave versions
+   appended it as a separate trailing comment; `weave check` flags a leftover
+   copy.
 4. **Run `weave check`.** With no arguments it verifies the working tree —
    the file as you just edited it — against the three merge stages: markers
    left behind, lines both sides kept that went missing, anything stated more

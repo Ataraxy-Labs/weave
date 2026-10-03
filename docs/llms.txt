@@ -46,7 +46,7 @@ Full benchmark suite: 11ms. Individual merges: 65-374us.
 5. Inner entity merge: when both modify the same class, decompose into methods and merge by name
 6. Reconstruct file preserving ours-side ordering
 7. A real conflict leaves a marker box with one `refused_by: <guard> · collision: <line>` line
-   naming why, plus a trailing comment naming `weave explain` and `weave check`
+   naming why; the first box's closing marker line also names `weave explain` and `weave check`
 
 ## Resolving a conflict
 

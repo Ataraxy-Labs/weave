@@ -441,11 +441,13 @@ pub(crate) fn merge_file(
     stats.references_rewritten = bind_report.references_rewritten;
 
     // -- Plan, Render ----------------------------------------------------
+    let kept_imports = crate::binding::imports_kept_for_new_uses(base, ours, theirs);
     let (merged_interstitials, interstitial_conflicts) = crate::merge::merge_interstitials(
         &base_regions,
         &ours_regions,
         &theirs_regions,
         marker_format,
+        &kept_imports,
     );
     let placement = plan::plan(
         &matching.arena,
