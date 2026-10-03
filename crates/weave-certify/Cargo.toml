@@ -1,0 +1,14 @@
+[package]
+name = "weave-certify"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Independent merge certificate: checks a three-way merge result against the per-region selection (pushout) rule. Shares only entity extraction (sem-core) with weave; no weave merge code."
+publish = false
+
+# Deliberately NO dependency on weave-core / weave-driver: the certificate must
+# not share a code path with the merge it checks. sem-core is the same entity
+# extractor weave uses, pinned by the workspace lockfile.
+[dependencies]
+sem-core = { version = "0.25", default-features = false, features = ["git", "parallel", "grammar-all", "mmap"] }
+serde_json = "1"

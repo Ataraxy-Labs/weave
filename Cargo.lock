@@ -3636,6 +3636,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "weave-certify"
+version = "0.1.0"
+dependencies = [
+ "sem-core",
+ "serde_json",
+]
+
+[[package]]
 name = "weave-cli"
 version = "0.5.4"
 dependencies = [

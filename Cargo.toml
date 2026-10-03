@@ -6,6 +6,7 @@ members = [
     "crates/weave-cli",
     "crates/weave-mcp",
     "crates/weave-github",
+    "crates/weave-certify",
 ]
 resolver = "2"
 
