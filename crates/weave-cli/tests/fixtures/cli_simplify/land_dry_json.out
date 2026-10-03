@@ -1,0 +1,42 @@
+exit Some(1)
+--- stdout
+{
+  "files": [
+    {
+      "attempts": 0,
+      "findings": [],
+      "kind": "content",
+      "path": "app.py",
+      "reason": "no resolver was given (--resolver)",
+      "reasons": [],
+      "rule": "no-resolver",
+      "sha256": null,
+      "status": "REFUSED",
+      "weave": "conflicted"
+    }
+  ],
+  "merge": {
+    "base": "0c4abcb219f4ae8ff7a95fb92b349abd3f53917a",
+    "mode": "dry-run",
+    "ours": "7cae89e7c11e016cd3c0c746062f358b9d20b251",
+    "theirs": "fed3a5f50e6d4fefd5ee990276ddcfcaf6364580"
+  },
+  "not_examined": [],
+  "proof_allowances": [
+    "imp_used",
+    "subsume_ins",
+    "nest"
+  ],
+  "schema": "weave-land/1",
+  "summary": {
+    "not_examined": 0,
+    "proven": 0,
+    "refused": 1,
+    "verified": 0
+  },
+  "union_allowances": [
+    "elem_union",
+    "nest_eu"
+  ]
+}
+--- stderr

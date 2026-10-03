@@ -1,0 +1,47 @@
+exit Some(0)
+--- stdout
+weave merge benchmark
+=====================
+
+  Different functions modified                      weave: <T>us (clean     very_high) | git: <T>us (clean) | both clean
+  Different class methods modified                  weave: <T>us (clean     high) | git: <T>us (clean) | both clean
+  Both add different imports                        weave: <T>us (clean     very_high) | git: <T>us (CONFLICT) | WEAVE WINS
+  Class: getUser + createUser (4 methods)           weave: <T>us (clean     high) | git: <T>us (clean) | both clean
+  One adds function, other modifies existing        weave: <T>us (clean     very_high) | git: <T>us (clean) | both clean
+  Adjacent function changes (stress test)           weave: <T>us (clean     very_high) | git: <T>us (clean) | both clean
+  Python: different methods in same class           weave: <T>us (clean     high) | git: <T>us (clean) | both clean
+  Python: adjacent methods (harder)                 weave: <T>us (clean     high) | git: <T>us (clean) | both clean
+  TS: both add exports at end                       weave: <T>us (clean     very_high) | git: <T>us (CONFLICT) | WEAVE WINS
+  Reformat vs modify (whitespace-aware)             weave: <T>us (clean     very_high) | git: <T>us (CONFLICT) | WEAVE WINS
+  Both add new functions at end of file             weave: <T>us (clean     very_high) | git: <T>us (CONFLICT) | WEAVE WINS
+  Both add methods to class at end                  weave: <T>us (clean     medium) | git: <T>us (CONFLICT) | WEAVE WINS
+  Rust: both add different use statements           weave: <T>us (clean     very_high) | git: <T>us (CONFLICT) | WEAVE WINS
+  Python: both add different imports                weave: <T>us (clean     very_high) | git: <T>us (CONFLICT) | WEAVE WINS
+  Class: modify method + add new method             weave: <T>us (clean     high) | git: <T>us (clean) | both clean
+  Both add functions between existing ones          weave: <T>us (clean     very_high) | git: <T>us (CONFLICT) | WEAVE WINS
+  Python: both add different decorators             weave: <T>us (CONFLICT  conflict) | git: <T>us (CONFLICT) | correctly refused
+  Decorator + body change                           weave: <T>us (clean     high) | git: <T>us (clean) | both clean
+  TS: class method decorators                       weave: <T>us (CONFLICT  conflict) | git: <T>us (CONFLICT) | correctly refused
+  TS: interface field additions                     weave: <T>us (clean     medium) | git: <T>us (CONFLICT) | WEAVE WINS
+  Rust: enum variant additions                      weave: <T>us (clean     medium) | git: <T>us (CONFLICT) | WEAVE WINS
+  Java: different methods in same class             weave: <T>us (clean     high) | git: <T>us (clean) | both clean
+  Java: both add annotations                        weave: <T>us (clean     medium) | git: <T>us (CONFLICT) | WEAVE WINS
+  C: different functions modified                   weave: <T>us (clean     very_high) | git: <T>us (clean) | both clean
+  TS: method reorder + modification                 weave: <T>us (clean     high) | git: <T>us (clean) | both clean
+  Python: both add class methods                    weave: <T>us (clean     medium) | git: <T>us (CONFLICT) | WEAVE WINS
+  Rust: both add impl methods                       weave: <T>us (clean     medium) | git: <T>us (CONFLICT) | WEAVE WINS
+  TS: enum modify variant + add variant             weave: <T>us (clean     high) | git: <T>us (clean) | both clean
+  TS: add JSDoc + modify function body              weave: <T>us (clean     high) | git: <T>us (clean) | both clean
+  Rust: both add doc comments to different fns      weave: <T>us (clean     very_high) | git: <T>us (clean) | both clean
+  Go: both add different functions                  weave: <T>us (clean     very_high) | git: <T>us (CONFLICT) | WEAVE WINS
+
+--- Summary ---
+weave: 29/29 clean merges (100% of the 29 mergeable scenarios)
+git:   15/29 clean merges (52%)
+
+2 scenario(s) must NOT merge (composing decorators, where stack order is a semantic choice neither side made).
+weave: 31/31 correct outcomes (100%) | git: 17/31 (55%)
+
+weave resolved 14 additional merge(s) that git could not.
+False conflict reduction: 100%
+--- stderr

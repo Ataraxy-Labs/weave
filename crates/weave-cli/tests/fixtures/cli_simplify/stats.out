@@ -1,0 +1,6 @@
+exit Some(0)
+--- stdout
+No weave merges recorded yet.
+Recording is off by default — set WEAVE_STATS=1 in the environment
+git or jj runs weave in, and counters will accumulate from the next merge.
+--- stderr

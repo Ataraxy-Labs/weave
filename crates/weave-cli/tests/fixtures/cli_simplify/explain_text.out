@@ -1,0 +1,13 @@
+exit Some(0)
+--- stdout
+app.py: 1 conflicted entity
+
+function `a` — both_modified (F), refused_by: statement_fold
+  1 contested hunk(s) (hunks BOTH sides wrote in; one-sided hunks are not conflicts and are not listed)
+  [1] base lines 2-2 — ours modified (-1/+1), theirs modified (-1/+1)
+      both rewrote:     return 1
+      ours   +    return 10
+      theirs +    return 11
+
+run `weave check` after you edit to verify the resolution against these three stages.
+--- stderr

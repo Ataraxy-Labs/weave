@@ -1,0 +1,42 @@
+exit Some(0)
+--- stdout
+{
+  "file": "app.py",
+  "clean": false,
+  "conflicts": [
+    {
+      "entity": "a",
+      "entity_type": "function",
+      "kind": "both_modified",
+      "refused_by": "statement_fold",
+      "complexity": "F",
+      "contested_hunks": 1,
+      "hunks": [
+        {
+          "base_start": 2,
+          "base_end": 2,
+          "ours": {
+            "action": "modified",
+            "removed_lines": 1,
+            "added_lines": 1,
+            "added": [
+              "    return 10"
+            ]
+          },
+          "theirs": {
+            "action": "modified",
+            "removed_lines": 1,
+            "added_lines": 1,
+            "added": [
+              "    return 11"
+            ]
+          },
+          "collision": [
+            "    return 1"
+          ]
+        }
+      ]
+    }
+  ]
+}
+--- stderr

@@ -1,0 +1,8 @@
+exit Some(0)
+--- stdout
+{
+  "conflict_count": 0,
+  "conflicts": [],
+  "file": "app.py"
+}
+--- stderr
