@@ -217,7 +217,9 @@ pub fn gate(u: &Unit, cand: &Candidate) -> GateVerdict {
 /// Whether a `weave check` finding is the line-multiplicity rule (a line
 /// stated more often than any version states it).
 fn is_line_duplication(f: &worktree::Finding) -> bool {
-    f.class == "DUP" && f.detail.contains("line(s) appear more often than any version")
+    f.class == "DUP"
+        && f.detail
+            .contains("line(s) appear more often than any version")
 }
 
 /// [`gate`]; with `merge_result`, the answer is a merge as committed — it may
@@ -301,8 +303,14 @@ fn gate_with(u: &Unit, cand: &Candidate, merge_result: bool) -> GateVerdict {
         }
         if let (Some(o), Some(t)) = (u.ours.as_deref(), u.theirs.as_deref()) {
             let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                dropped(u.base.as_deref().unwrap_or(""), o, t, c, u.unverified_git_merge)
-                    .map_err(|e| e.to_string())
+                dropped(
+                    u.base.as_deref().unwrap_or(""),
+                    o,
+                    t,
+                    c,
+                    u.unverified_git_merge,
+                )
+                .map_err(|e| e.to_string())
             }))
             .unwrap_or_else(|_| Err("the check crashed on this file".into()));
             match run {
@@ -1144,7 +1152,9 @@ fn certify(u: &Unit, merged: &str) -> Result<(Vec<&'static str>, bool), String> 
         // text after an inserted entity a region neither side wrote; the
         // whole file read as one statement list may still be a union.
         match (a.as_ref(), b.as_ref()) {
-            (Some(a), Some(b)) if weave_certify::elem_union_file(&u.path, o.as_ref(), a, b, &m).is_ok() => {
+            (Some(a), Some(b))
+                if weave_certify::elem_union_file(&u.path, o.as_ref(), a, b, &m).is_ok() =>
+            {
                 Ok((vec!["elem_union (whole file)"], true))
             }
             _ => Err(why),
@@ -1328,8 +1338,8 @@ pub fn plan(
                 if clean {
                     // A path the index holds unmerged was refused by the
                     // merge driver: never waved through on git's line merge.
-                    let holds = !unmerged.contains(&path)
-                        && line_clean_holds(&path, base_t, o, t, &merged);
+                    let holds =
+                        !unmerged.contains(&path) && line_clean_holds(&path, base_t, o, t, &merged);
                     let answer = match &present_answer {
                         Some(Candidate::File(p)) => Some(p.as_str()),
                         Some(Candidate::Delete) => None,
@@ -1404,7 +1414,9 @@ fn present_answers(
                 }
             }
         }
-        Some(Present::WorkingTree { unmerged: take_unmerged }) => {
+        Some(Present::WorkingTree {
+            unmerged: take_unmerged,
+        }) => {
             let unmerged: BTreeSet<String> =
                 gitscan::git(dir, &["diff", "--name-only", "--diff-filter=U", "-z"])?
                     .split('\0')
@@ -1845,17 +1857,34 @@ mod tests {
         assert_eq!(certify(&u, &union), Ok((vec!["elem_union"], true)));
         // and weave's own merge is that union, or the other order
         let host = Host::default();
-        let merged = entity_merge_fmt(base, &ours, &theirs, "gen.py", &MarkerFormat::default(), &host);
+        let merged = entity_merge_fmt(
+            base,
+            &ours,
+            &theirs,
+            "gen.py",
+            &MarkerFormat::default(),
+            &host,
+        );
         assert!(merged.is_clean());
         assert_eq!(certify(&u, &merged.content), Ok((vec!["elem_union"], true)));
         let abs = "        exp.Abs: rename_func(\"ABS\"),\n";
         for (what, bad) in [
             ("ours dropped", union.replace(fin, "")),
             ("theirs dropped", union.replace(unix, "")),
-            ("base order changed", union.replace(&format!("{abs}{at}"), &format!("{at}{abs}"))),
-            ("an entry rewritten", union.replace("UNIX_SECONDS", "UNIX_MILLIS")),
+            (
+                "base order changed",
+                union.replace(&format!("{abs}{at}"), &format!("{at}{abs}")),
+            ),
+            (
+                "an entry rewritten",
+                union.replace("UNIX_SECONDS", "UNIX_MILLIS"),
+            ),
         ] {
-            assert!(certify(&u, &bad).is_err(), "{what}: {:?}", certify(&u, &bad));
+            assert!(
+                certify(&u, &bad).is_err(),
+                "{what}: {:?}",
+                certify(&u, &bad)
+            );
         }
     }
 
@@ -1869,7 +1898,9 @@ mod tests {
     fn a_line_clean_duplicate_case_fails_the_merge_check_and_the_gate() {
         let (clean, merged) = line_merge(SW_BASE, SW_OURS, SW_THEIRS).unwrap();
         assert!(clean, "git merges it line-cleanly");
-        assert!(!line_clean_holds("p.go", SW_BASE, SW_OURS, SW_THEIRS, &merged));
+        assert!(!line_clean_holds(
+            "p.go", SW_BASE, SW_OURS, SW_THEIRS, &merged
+        ));
         let u = Unit {
             present: Some(Candidate::File(merged.clone())),
             unverified_git_merge: true,
@@ -1877,7 +1908,9 @@ mod tests {
         };
         let v = gate(&u, &Candidate::File(merged));
         assert!(
-            v.findings.iter().any(|f| f.class == "DUP" && f.detail.contains("case `3`")),
+            v.findings
+                .iter()
+                .any(|f| f.class == "DUP" && f.detail.contains("case `3`")),
             "{v:?}"
         );
         let r = land_unit(&u, &Host::default(), None).unwrap();
@@ -1890,8 +1923,12 @@ mod tests {
         // A resolution must state `case 3` once, so it differs from git's
         // merge; keeping both sides' cases (one renumbered) passes, dropping
         // one side's case does not.
-        let renumbered = SW_OURS.replace("case 3:\n\t\treturn 31", "case 4:\n\t\treturn 31")
-            .replace("\t}\n\treturn 0", "\tcase 3:\n\t\treturn 32\n\t}\n\treturn 0");
+        let renumbered = SW_OURS
+            .replace("case 3:\n\t\treturn 31", "case 4:\n\t\treturn 31")
+            .replace(
+                "\t}\n\treturn 0",
+                "\tcase 3:\n\t\treturn 32\n\t}\n\treturn 0",
+            );
         assert!(gate(&u, &Candidate::File(renumbered)).pass());
         let v = gate(&u, &Candidate::File(SW_OURS.into()));
         assert_eq!(v.reasons, vec!["DROPPED"], "{v:?}");

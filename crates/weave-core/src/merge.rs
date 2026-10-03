@@ -306,7 +306,15 @@ pub fn entity_merge_with_registry(
     } else {
         settle(composed, base, ours, theirs, file_path, registry, host)
     };
-    keys_hold(result, base, ours, theirs, file_path, registry, marker_format)
+    keys_hold(
+        result,
+        base,
+        ours,
+        theirs,
+        file_path,
+        registry,
+        marker_format,
+    )
 }
 
 /// The last check on every clean answer, whatever rung wrote it: no switch,
@@ -370,8 +378,24 @@ fn keys_hold(
 fn keyed_code(file_path: &str) -> bool {
     matches!(
         file_path.rsplit('.').next().unwrap_or(""),
-        "go" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "py" | "pyi"
-            | "java" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "rs"
+        "go" | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "ts"
+            | "tsx"
+            | "mts"
+            | "cts"
+            | "py"
+            | "pyi"
+            | "java"
+            | "c"
+            | "h"
+            | "cc"
+            | "cpp"
+            | "cxx"
+            | "hpp"
+            | "rs"
     )
 }
 

@@ -991,7 +991,12 @@ fn declarations(
             .as_ref()
             .map(|t| keyed_elements(file_path, text, t.root_node()))
             .unwrap_or_default();
-        (entities, tree.map(|t| t.root_node().has_error()), arms, keyed)
+        (
+            entities,
+            tree.map(|t| t.root_node().has_error()),
+            arms,
+            keyed,
+        )
     };
     let (merged_entities, merged_broken, merged_arms, merged_keyed) = parse(merged);
     let (ours_entities, ours_broken, ours_arms, ours_keyed) = parse(ours);
@@ -1173,8 +1178,13 @@ pub fn keyed_elements(path: &str, text: &str, root: tree_sitter::Node) -> Vec<Ke
     // The switch / match / literal a container node belongs to, for the head.
     fn owner(c: tree_sitter::Node<'_>) -> tree_sitter::Node<'_> {
         match c.kind() {
-            "switch_body" | "switch_block" | "match_block" | "block" | "compound_statement"
-            | "literal_value" | "field_initializer_list" => c.parent().unwrap_or(c),
+            "switch_body"
+            | "switch_block"
+            | "match_block"
+            | "block"
+            | "compound_statement"
+            | "literal_value"
+            | "field_initializer_list" => c.parent().unwrap_or(c),
             _ => c,
         }
     }
@@ -1222,7 +1232,10 @@ pub fn keyed_elements(path: &str, text: &str, root: tree_sitter::Node) -> Vec<Ke
             // Java: `case 1, 2:` / `case 1 ->` / `default`, grouped under one
             // `switch_block`.
             ("switch_label", Some(p)) => {
-                let block = p.parent().filter(|g| g.kind() == "switch_block").unwrap_or(p);
+                let block = p
+                    .parent()
+                    .filter(|g| g.kind() == "switch_block")
+                    .unwrap_or(p);
                 let t = squash(&txt(n));
                 match t.strip_prefix("case ") {
                     Some(rest) => {
@@ -1320,11 +1333,16 @@ fn split_top_level(s: &str) -> Vec<String> {
 /// two switches is two keys. The comparison across versions is by element
 /// kind and key and ignores which container, so a duplicate one side
 /// already had (which no merge introduced) never counts against the merge.
-pub fn introduced_duplicate(ours: &[Keyed], theirs: &[Keyed], merged: &[Keyed]) -> Option<Unverified> {
+pub fn introduced_duplicate(
+    ours: &[Keyed],
+    theirs: &[Keyed],
+    merged: &[Keyed],
+) -> Option<Unverified> {
     fn most(els: &[Keyed]) -> HashMap<(&'static str, &str), usize> {
         let mut per: HashMap<(usize, &'static str, &str), usize> = HashMap::new();
         for e in els {
-            *per.entry((e.container, e.kind, e.key.as_str())).or_insert(0) += 1;
+            *per.entry((e.container, e.kind, e.key.as_str()))
+                .or_insert(0) += 1;
         }
         let mut m: HashMap<(&'static str, &str), usize> = HashMap::new();
         for ((_, kind, key), n) in per {

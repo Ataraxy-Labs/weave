@@ -288,11 +288,25 @@ fn functions_both_sides_appended_land_as_a_whole_file_union() {
     let (code, doc) = land(&root, &["--resolver", &resolver]);
     assert_eq!(code, 0, "{doc:#}");
     let f = file(&doc, "m.py");
-    assert_eq!((f["status"].as_str(), f["rule"].as_str(), f["attempts"].as_u64()), (Some("VERIFIED"), Some("elem_union"), Some(0)), "{f:#}");
-    assert!(f["reason"].as_str().unwrap().contains("whole file"), "{f:#}");
+    assert_eq!(
+        (
+            f["status"].as_str(),
+            f["rule"].as_str(),
+            f["attempts"].as_u64()
+        ),
+        (Some("VERIFIED"), Some("elem_union"), Some(0)),
+        "{f:#}"
+    );
+    assert!(
+        f["reason"].as_str().unwrap().contains("whole file"),
+        "{f:#}"
+    );
     assert!(!root.join("in.1").exists(), "the resolver was not called");
     let landed = read(&root, "m.py");
-    assert!(landed.contains("def c():") && landed.contains("def d():"), "{landed}");
+    assert!(
+        landed.contains("def c():") && landed.contains("def d():"),
+        "{landed}"
+    );
 }
 
 #[test]
@@ -734,12 +748,21 @@ fn sqlglot_conflict_lands_as_an_element_union_without_the_resolver() {
         assert_eq!(f["weave"], "clean", "{f:#}");
         assert_eq!(f["attempts"], 0, "{f:#}");
         assert!(!root.join("in.1").exists(), "the resolver was not called");
-        assert!(f["reason"].as_str().unwrap().contains("elem_union"), "{f:#}");
-        assert_eq!(doc["union_allowances"], serde_json::json!(["elem_union", "nest_eu"]));
+        assert!(
+            f["reason"].as_str().unwrap().contains("elem_union"),
+            "{f:#}"
+        );
+        assert_eq!(
+            doc["union_allowances"],
+            serde_json::json!(["elem_union", "nest_eu"])
+        );
         if mode.is_empty() {
             // landed and staged, with both entries, by weave's key order
             let landed = read(&root, BQ_PATH);
-            assert!(landed == bq(&[BQ_F04, BQ_F07]) || landed == bq(&[BQ_F07, BQ_F04]), "{landed}");
+            assert!(
+                landed == bq(&[BQ_F04, BQ_F07]) || landed == bq(&[BQ_F07, BQ_F04]),
+                "{landed}"
+            );
             assert_eq!(unmerged(&root), "");
             assert_eq!(f["sha256"].as_str().unwrap().len(), 64);
         }
@@ -759,14 +782,22 @@ fn a_land_with_no_resolver_lands_an_element_union() {
 // not a union by weave's policy, so the resolver is asked, and a one-sided
 // answer is refused exactly as the sqlglot one was.
 const STEPS_PATH: &str = "pipeline/steps.py";
-const STEPS_BASE: &str = "STEPS = [\n    parse_input,\n    normalise_units,\n    write_report,\n]\n";
-const STEPS_OURS: &str = "STEPS = [\n    parse_input,\n    normalise_units,\n    drop_outliers,\n    write_report,\n]\n";
-const STEPS_THEIRS: &str = "STEPS = [\n    parse_input,\n    normalise_units,\n    fill_gaps,\n    write_report,\n]\n";
+const STEPS_BASE: &str =
+    "STEPS = [\n    parse_input,\n    normalise_units,\n    write_report,\n]\n";
+const STEPS_OURS: &str =
+    "STEPS = [\n    parse_input,\n    normalise_units,\n    drop_outliers,\n    write_report,\n]\n";
+const STEPS_THEIRS: &str =
+    "STEPS = [\n    parse_input,\n    normalise_units,\n    fill_gaps,\n    write_report,\n]\n";
 
 fn steps_merge(name: &str) -> PathBuf {
     mid_merge(
         name,
-        &[(STEPS_PATH, Some(STEPS_BASE), Some(STEPS_OURS), Some(STEPS_THEIRS))],
+        &[(
+            STEPS_PATH,
+            Some(STEPS_BASE),
+            Some(STEPS_OURS),
+            Some(STEPS_THEIRS),
+        )],
     )
 }
 
@@ -801,7 +832,10 @@ fn one_sided_resolution_theirs_only_is_refused() {
     let f = file(&doc, STEPS_PATH);
     assert_eq!((code, f["status"].as_str()), (1, Some("REFUSED")), "{f:#}");
     assert!(dropped(f), "{f:#}");
-    assert!(f["findings"].to_string().contains("`drop_outliers`"), "{f:#}");
+    assert!(
+        f["findings"].to_string().contains("`drop_outliers`"),
+        "{f:#}"
+    );
     // the retry is told which line is missing
     let req = request(&root, 2);
     assert!(
@@ -812,7 +846,8 @@ fn one_sided_resolution_theirs_only_is_refused() {
 
 #[test]
 fn one_sided_resolution_union_is_verified_in_either_order() {
-    let ins = |x: &str| STEPS_BASE.replace("    write_report,\n", &format!("{x}    write_report,\n"));
+    let ins =
+        |x: &str| STEPS_BASE.replace("    write_report,\n", &format!("{x}    write_report,\n"));
     for (i, union) in [
         ins("    drop_outliers,\n    fill_gaps,\n"),
         ins("    fill_gaps,\n    drop_outliers,\n"),

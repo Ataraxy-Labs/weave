@@ -57,6 +57,9 @@
 //! view of the repository's attributes, and declines. Those land through the
 //! resolver, as before.
 
+// Parallel per-side arrays (base/ours/theirs) are indexed together on purpose.
+#![allow(clippy::needless_range_loop, clippy::type_complexity)]
+
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
@@ -86,7 +89,10 @@ pub enum Lang {
 
 pub fn lang(path: &str) -> Option<Lang> {
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
     match ext.as_str() {
         "go" => Some(Lang::Go),
         "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" => Some(Lang::Js),
@@ -98,7 +104,11 @@ pub fn lang(path: &str) -> Option<Lang> {
 fn is_test_path(path: &str) -> bool {
     let p = path.replace('\\', "/");
     let name = p.rsplit('/').next().unwrap_or(&p);
-    let in_test_dir = p.split('/').rev().skip(1).any(|d| matches!(d, "test" | "tests" | "__tests__" | "testdata"));
+    let in_test_dir = p
+        .split('/')
+        .rev()
+        .skip(1)
+        .any(|d| matches!(d, "test" | "tests" | "__tests__" | "testdata"));
     name.ends_with("_test.go")
         || (name.starts_with("test_") && name.ends_with(".py"))
         || name.ends_with("_test.py")
@@ -121,9 +131,20 @@ pub struct Ctx<'a> {
 
 /// Check one region. `nodes` are the region's byte ranges `[lo, hi)` in the
 /// four texts, `roots` the four parse trees' roots.
-pub fn check_region(path: &str, src: [&str; 4], roots: [Node; 4], ranges: [(usize, usize); 4]) -> Res {
-    let Some(l) = lang(path) else { return decline("no element grammar for this language") };
-    let cx = Ctx { lang: l, test_file: is_test_path(path), src };
+pub fn check_region(
+    path: &str,
+    src: [&str; 4],
+    roots: [Node; 4],
+    ranges: [(usize, usize); 4],
+) -> Res {
+    let Some(l) = lang(path) else {
+        return decline("no element grammar for this language");
+    };
+    let cx = Ctx {
+        lang: l,
+        test_file: is_test_path(path),
+        src,
+    };
     // The region (a run of whole lines) as the maximal syntax nodes inside it:
     // the same sequence, by kind, in all four versions; the text around them
     // selected, each walked.
@@ -147,11 +168,17 @@ pub fn check_region(path: &str, src: [&str; 4], roots: [Node; 4], ranges: [(usiz
     let mut prev: [usize; 4] = std::array::from_fn(|v| ranges[v].0);
     for i in 0..seqs[O].len() {
         let n: [Node; 4] = std::array::from_fn(|v| seqs[v][i]);
-        cx.selected(std::array::from_fn(|v| &src[v][prev[v]..n[v].start_byte()]), "text between the region's nodes")?;
+        cx.selected(
+            std::array::from_fn(|v| &src[v][prev[v]..n[v].start_byte()]),
+            "text between the region's nodes",
+        )?;
         cx.walk(n)?;
         prev = std::array::from_fn(|v| n[v].end_byte());
     }
-    cx.selected(std::array::from_fn(|v| &src[v][prev[v]..ranges[v].1]), "text after the region's nodes")
+    cx.selected(
+        std::array::from_fn(|v| &src[v][prev[v]..ranges[v].1]),
+        "text after the region's nodes",
+    )
 }
 
 /// The whole file as one region: for a merge whose per-region certificate
@@ -184,7 +211,9 @@ fn cover<'t>(n: Node<'t>, lo: usize, hi: usize, out: &mut Vec<Node<'t>>) -> Res 
 }
 
 fn kids(n: Node) -> Vec<Node> {
-    (0..n.child_count() as u32).filter_map(|i| n.child(i)).collect()
+    (0..n.child_count() as u32)
+        .filter_map(|i| n.child(i))
+        .collect()
 }
 
 fn norm(s: &str) -> String {
@@ -247,7 +276,11 @@ impl<'a> Ctx<'a> {
         let t: [&str; 4] = std::array::from_fn(|v| self.txt(v, n[v]));
         match sel3(Some(t[O]), Some(t[A]), Some(t[B])) {
             Some(Some(s)) => {
-                return if s == t[MM] { Ok(()) } else { mismatch(format!("a `{}` is not the selection", n[O].kind())) };
+                return if s == t[MM] {
+                    Ok(())
+                } else {
+                    mismatch(format!("a `{}` is not the selection", n[O].kind()))
+                };
             }
             Some(None) => return mismatch("selection deletes a node"),
             None => {}
@@ -258,28 +291,46 @@ impl<'a> Ctx<'a> {
         let colls: Vec<Option<Coll>> = (0..4).map(|v| self.collection(v, n[v])).collect();
         if colls.iter().all(|c| c.is_some()) {
             let colls: Vec<Coll> = colls.into_iter().flatten().collect();
-            if colls.iter().any(|c| c.kind != colls[O].kind || c.comma != colls[O].comma) {
-                return decline(format!("a `{}` is a different collection in each version", n[O].kind()));
+            if colls
+                .iter()
+                .any(|c| c.kind != colls[O].kind || c.comma != colls[O].comma)
+            {
+                return decline(format!(
+                    "a `{}` is a different collection in each version",
+                    n[O].kind()
+                ));
             }
             let c: [Coll; 4] = colls.try_into().ok().expect("four");
             return self.collection_check(n, &c);
         }
         let c: [Vec<Node>; 4] = std::array::from_fn(|v| kids(n[v]));
         if c[O].is_empty() || (1..4).any(|v| c[v].len() != c[O].len()) {
-            return decline(format!("both sides changed the shape of a `{}`", n[O].kind()));
+            return decline(format!(
+                "both sides changed the shape of a `{}`",
+                n[O].kind()
+            ));
         }
         for i in 0..c[O].len() {
             if (1..4).any(|v| c[v][i].kind() != c[O][i].kind()) {
-                return decline(format!("both sides changed the shape of a `{}`", n[O].kind()));
+                return decline(format!(
+                    "both sides changed the shape of a `{}`",
+                    n[O].kind()
+                ));
             }
         }
         let mut prev: [usize; 4] = std::array::from_fn(|v| n[v].start_byte());
         for i in 0..c[O].len() {
-            self.selected(std::array::from_fn(|v| &self.src[v][prev[v]..c[v][i].start_byte()]), "text between children")?;
+            self.selected(
+                std::array::from_fn(|v| &self.src[v][prev[v]..c[v][i].start_byte()]),
+                "text between children",
+            )?;
             self.walk(std::array::from_fn(|v| c[v][i]))?;
             prev = std::array::from_fn(|v| c[v][i].end_byte());
         }
-        self.selected(std::array::from_fn(|v| &self.src[v][prev[v]..n[v].end_byte()]), "text after the last child")
+        self.selected(
+            std::array::from_fn(|v| &self.src[v][prev[v]..n[v].end_byte()]),
+            "text after the last child",
+        )
     }
 
     // ------------------------------------------------------------ recognise
@@ -289,7 +340,12 @@ impl<'a> Ctx<'a> {
         let (kind, comma, open, close) = match (self.lang, n.kind()) {
             (Lang::Go, "literal_value") => {
                 let keyed = kids(n).iter().any(|c| c.kind() == "keyed_element");
-                (if keyed { Kind::Keyed } else { Kind::Positional }, true, "{", "}")
+                (
+                    if keyed { Kind::Keyed } else { Kind::Positional },
+                    true,
+                    "{",
+                    "}",
+                )
             }
             (Lang::Go, "expression_switch_statement") => {
                 n.child_by_field_name("value")?;
@@ -297,14 +353,25 @@ impl<'a> Ctx<'a> {
             }
             (Lang::Go, "block") => (Kind::Statements, false, "{", "}"),
             // A whole file (see `check_file`): its top-level statements.
-            (Lang::Go, "source_file") | (Lang::Js, "program") | (Lang::Py, "module") => (Kind::Statements, false, "", ""),
+            (Lang::Go, "source_file") | (Lang::Js, "program") | (Lang::Py, "module") => {
+                (Kind::Statements, false, "", "")
+            }
             (Lang::Go, "const_declaration") => {
                 if !kids(n).iter().any(|c| c.kind() == "(") {
                     return None;
                 }
-                (Kind::Const { iota: has_ident(n, src, "iota") }, false, "(", ")")
+                (
+                    Kind::Const {
+                        iota: has_ident(n, src, "iota"),
+                    },
+                    false,
+                    "(",
+                    ")",
+                )
             }
-            (Lang::Js, "object" | "export_clause" | "named_imports") => (Kind::Keyed, true, "{", "}"),
+            (Lang::Js, "object" | "export_clause" | "named_imports") => {
+                (Kind::Keyed, true, "{", "}")
+            }
             (Lang::Js, "array") => (Kind::Positional, true, "[", "]"),
             (Lang::Js, "switch_body") => (Kind::Switch, false, "{", "}"),
             (Lang::Js, "statement_block") => (Kind::Statements, false, "{", "}"),
@@ -312,9 +379,15 @@ impl<'a> Ctx<'a> {
             (Lang::Py, "list") => {
                 let all = n.parent().is_some_and(|p| {
                     p.kind() == "assignment"
-                        && p.child_by_field_name("left").is_some_and(|l| &src[l.start_byte()..l.end_byte()] == "__all__")
+                        && p.child_by_field_name("left")
+                            .is_some_and(|l| &src[l.start_byte()..l.end_byte()] == "__all__")
                 });
-                (if all { Kind::Keyed } else { Kind::Positional }, true, "[", "]")
+                (
+                    if all { Kind::Keyed } else { Kind::Positional },
+                    true,
+                    "[",
+                    "]",
+                )
             }
             (Lang::Py, "tuple") => {
                 if !kids(n).iter().any(|c| c.kind() == "(") {
@@ -356,7 +429,13 @@ impl<'a> Ctx<'a> {
             }
             items.push(*c);
         }
-        Some(Coll { kind, comma, open_end, close_start, items })
+        Some(Coll {
+            kind,
+            comma,
+            open_end,
+            close_start,
+            items,
+        })
     }
 
     /// A sequence literal bound to a name in a test file.
@@ -367,8 +446,14 @@ impl<'a> Ctx<'a> {
         let mut at = n.parent();
         while let Some(p) = at {
             match p.kind() {
-                "composite_literal" | "expression_list" | "parenthesized_expression" => at = p.parent(),
-                "short_var_declaration" | "var_spec" | "assignment_statement" | "assignment" | "variable_declarator"
+                "composite_literal" | "expression_list" | "parenthesized_expression" => {
+                    at = p.parent()
+                }
+                "short_var_declaration"
+                | "var_spec"
+                | "assignment_statement"
+                | "assignment"
+                | "variable_declarator"
                 | "assignment_expression" => return true,
                 _ => return false,
             }
@@ -392,20 +477,26 @@ impl<'a> Ctx<'a> {
             Some(format!("s:{}", &t[1..t.len() - 1]))
         };
         let dec = |t: &str| {
-            (!t.is_empty() && t.bytes().all(|c| c.is_ascii_digit()) && (t == "0" || !t.starts_with('0'))).then(|| t.to_string())
+            (!t.is_empty()
+                && t.bytes().all(|c| c.is_ascii_digit())
+                && (t == "0" || !t.starts_with('0')))
+            .then(|| t.to_string())
         };
         let qual = |t: &str| {
             let ok = !t.is_empty()
                 && t.split('.').all(|seg| {
                     let mut c = seg.chars();
-                    c.next().is_some_and(|x| x.is_alphabetic() || x == '_' || x == '$')
+                    c.next()
+                        .is_some_and(|x| x.is_alphabetic() || x == '_' || x == '$')
                         && c.all(|x| x.is_alphanumeric() || x == '_' || x == '$')
                 });
             ok.then(|| format!("n:{t}"))
         };
         match (self.lang, n.kind()) {
             (Lang::Go, "literal_element") => self.label(v, n.named_child(0)?),
-            (Lang::Go, "interpreted_string_literal" | "raw_string_literal" | "rune_literal") => plain(t),
+            (Lang::Go, "interpreted_string_literal" | "raw_string_literal" | "rune_literal") => {
+                plain(t)
+            }
             (Lang::Go, "int_literal") => dec(t).map(|d| format!("i:{d}")),
             (Lang::Go, "identifier" | "field_identifier" | "selector_expression") => qual(t),
             (Lang::Js, "string") => plain(t),
@@ -463,11 +554,19 @@ impl<'a> Ctx<'a> {
             }
             Kind::Switch => {
                 let labels: Option<Vec<String>> = match (self.lang, e.kind()) {
-                    (Lang::Go, "expression_case") => e.child_by_field_name("value").and_then(|vl| {
-                        kids(vl).into_iter().filter(|c| c.is_named()).map(|l| self.label(v, l)).collect()
-                    }),
+                    (Lang::Go, "expression_case") => {
+                        e.child_by_field_name("value").and_then(|vl| {
+                            kids(vl)
+                                .into_iter()
+                                .filter(|c| c.is_named())
+                                .map(|l| self.label(v, l))
+                                .collect()
+                        })
+                    }
                     (Lang::Js, "switch_case") => field_label("value").map(|l| vec![l]),
-                    (Lang::Go, "default_case") | (Lang::Js, "switch_default") => Some(vec!["default".into()]),
+                    (Lang::Go, "default_case") | (Lang::Js, "switch_default") => {
+                        Some(vec!["default".into()])
+                    }
                     _ => None,
                 };
                 match labels {
@@ -494,34 +593,57 @@ impl<'a> Ctx<'a> {
                 (Some(format!("const:{}", names.join(","))), names)
             }
             Kind::Positional => (Some(format!("t:{}", norm(self.txt(v, e)))), vec![]),
-            Kind::Statements => (Some(format!("t:{}", norm(self.txt(v, e)))), self.declared(v, e).into_iter().collect()),
+            Kind::Statements => (
+                Some(format!("t:{}", norm(self.txt(v, e)))),
+                self.declared(v, e).into_iter().collect(),
+            ),
         }
     }
 
     /// The name a declaration whose order is not observable binds.
     fn declared(&self, v: usize, e: Node) -> Option<String> {
         let src = self.src[v];
-        let name = |n: Node| n.child_by_field_name("name").map(|x| src[x.start_byte()..x.end_byte()].to_string());
+        let name = |n: Node| {
+            n.child_by_field_name("name")
+                .map(|x| src[x.start_byte()..x.end_byte()].to_string())
+        };
         match (self.lang, e.kind()) {
             (Lang::Js, "function_declaration" | "generator_function_declaration") => name(e),
             (Lang::Py, "function_definition") => name(e),
             (Lang::Py, "decorated_definition") => {
                 let d = e.child_by_field_name("definition")?;
-                (d.kind() == "function_definition").then(|| name(d)).flatten()
+                (d.kind() == "function_definition")
+                    .then(|| name(d))
+                    .flatten()
             }
             // Go package scope: order of declaration is not observable.
-            (Lang::Go, "function_declaration") if e.parent().is_some_and(|p| p.kind() == "source_file") => name(e),
-            (Lang::Go, "type_declaration") if e.parent().is_some_and(|p| p.kind() == "source_file") => {
-                let specs: Vec<Node> = kids(e).into_iter().filter(|c| c.kind() == "type_spec").collect();
+            (Lang::Go, "function_declaration")
+                if e.parent().is_some_and(|p| p.kind() == "source_file") =>
+            {
+                name(e)
+            }
+            (Lang::Go, "type_declaration")
+                if e.parent().is_some_and(|p| p.kind() == "source_file") =>
+            {
+                let specs: Vec<Node> = kids(e)
+                    .into_iter()
+                    .filter(|c| c.kind() == "type_spec")
+                    .collect();
                 match specs.as_slice() {
                     [one] => name(*one),
                     _ => None,
                 }
             }
-            (Lang::Go, "method_declaration") if e.parent().is_some_and(|p| p.kind() == "source_file") => {
+            (Lang::Go, "method_declaration")
+                if e.parent().is_some_and(|p| p.kind() == "source_file") =>
+            {
                 let recv = e.child_by_field_name("receiver")?;
                 let rt = norm(&src[recv.start_byte()..recv.end_byte()]);
-                let rt = rt.split_whitespace().last()?.trim_matches(['(', ')', '*']).to_string();
+                let rt = rt
+                    .split_whitespace()
+                    .last()?
+                    .trim_matches(['(', ')', '*'])
+                    .to_string();
                 Some(format!("{rt}.{}", name(e)?))
             }
             _ => None,
@@ -546,14 +668,25 @@ impl<'a> Ctx<'a> {
         let kind = c[O].kind;
         let what = format!("{kind:?} `{}`", n[O].kind());
         // Delimiters: selected.
-        self.selected(std::array::from_fn(|v| &self.src[v][n[v].start_byte()..c[v].open_end]), "an opening delimiter")?;
-        self.selected(std::array::from_fn(|v| &self.src[v][c[v].close_start..n[v].end_byte()]), "a closing delimiter")?;
-        let cells = c[O].items.len().max(1) * c[A].items.len().max(1) + c[O].items.len().max(1) * c[B].items.len().max(1);
+        self.selected(
+            std::array::from_fn(|v| &self.src[v][n[v].start_byte()..c[v].open_end]),
+            "an opening delimiter",
+        )?;
+        self.selected(
+            std::array::from_fn(|v| &self.src[v][c[v].close_start..n[v].end_byte()]),
+            "a closing delimiter",
+        )?;
+        let cells = c[O].items.len().max(1) * c[A].items.len().max(1)
+            + c[O].items.len().max(1) * c[B].items.len().max(1);
         if cells > 4_000_000 {
             return decline(format!("{what}: too large"));
         }
-        let keys: [Vec<(String, bool)>; 4] =
-            std::array::from_fn(|v| c[v].items.iter().map(|it| self.align_key(v, kind, *it)).collect());
+        let keys: [Vec<(String, bool)>; 4] = std::array::from_fn(|v| {
+            c[v].items
+                .iter()
+                .map(|it| self.align_key(v, kind, *it))
+                .collect()
+        });
 
         // 1. each side against base. Items of a keyed collection align by key
         // only; a text-identified item that changed is paired with the base
@@ -568,14 +701,30 @@ impl<'a> Ctx<'a> {
                         return String::new();
                     }
                     self.declared(v, *it).unwrap_or_else(|| {
-                        format!("{}:{}", it.kind(), norm(self.txt(v, *it).lines().next().unwrap_or("")))
+                        format!(
+                            "{}:{}",
+                            it.kind(),
+                            norm(self.txt(v, *it).lines().next().unwrap_or(""))
+                        )
                     })
                 })
                 .collect()
         });
         let fate: [Vec<Option<usize>>; 2] = [
-            align(&keys[O], &keys[A], &c[O].items, &c[A].items, by_text.then_some((&sigs[O], &sigs[A]))),
-            align(&keys[O], &keys[B], &c[O].items, &c[B].items, by_text.then_some((&sigs[O], &sigs[B]))),
+            align(
+                &keys[O],
+                &keys[A],
+                &c[O].items,
+                &c[A].items,
+                by_text.then_some((&sigs[O], &sigs[A])),
+            ),
+            align(
+                &keys[O],
+                &keys[B],
+                &c[O].items,
+                &c[B].items,
+                by_text.then_some((&sigs[O], &sigs[B])),
+            ),
         ];
         // identities of each side's items
         let ids = |s: usize| -> Vec<Id> {
@@ -613,7 +762,11 @@ impl<'a> Ctx<'a> {
                 None if t(0).is_some() && t(1).is_some() => {
                     want.insert(Id::Base(i), Want::Walk(i));
                 }
-                None => return decline(format!("{what}: an item one side deleted and the other changed")),
+                None => {
+                    return decline(format!(
+                        "{what}: an item one side deleted and the other changed"
+                    ))
+                }
             }
         }
         let mut ins_text: HashMap<&Id, (usize, &str)> = HashMap::new();
@@ -622,12 +775,16 @@ impl<'a> Ctx<'a> {
             for (j, id) in side_ids[s].iter().enumerate() {
                 if let Id::Ins(..) = id {
                     if !keys[v][j].1 {
-                        return decline(format!("{what}: an inserted element has no decidable key"));
+                        return decline(format!(
+                            "{what}: an inserted element has no decidable key"
+                        ));
                     }
                     let t = self.txt(v, c[v].items[j]);
                     match ins_text.get(id) {
                         Some((_, other)) if *other != t => {
-                            return decline(format!("{what}: both sides inserted one key with different text"));
+                            return decline(format!(
+                                "{what}: both sides inserted one key with different text"
+                            ));
                         }
                         _ => {
                             ins_text.insert(id, (s, t));
@@ -640,7 +797,12 @@ impl<'a> Ctx<'a> {
 
         // each side's sequence of selected items, and which are shared
         let seq = |s: usize| -> Vec<(Id, usize)> {
-            side_ids[s].iter().enumerate().filter(|(_, id)| want.contains_key(id)).map(|(j, id)| (id.clone(), j)).collect()
+            side_ids[s]
+                .iter()
+                .enumerate()
+                .filter(|(_, id)| want.contains_key(id))
+                .map(|(j, id)| (id.clone(), j))
+                .collect()
         };
         let sa = seq(0);
         let sb = seq(1);
@@ -685,7 +847,8 @@ impl<'a> Ctx<'a> {
         }
         for (x, ks) in &holders {
             if ks.len() > 1
-                && (ks.len() > in_o.get(x).copied().unwrap_or(0) || ks.iter().any(|k| !matches!(path[*k], Id::Base(_))))
+                && (ks.len() > in_o.get(x).copied().unwrap_or(0)
+                    || ks.iter().any(|k| !matches!(path[*k], Id::Base(_))))
             {
                 return mismatch(format!("{what}: `{x}` is stated twice"));
             }
@@ -699,10 +862,13 @@ impl<'a> Ctx<'a> {
                     }
                 }
                 Lang::Js => {
-                    let cases: Vec<usize> = (0..m_items.len()).filter(|k| m_items[*k].kind() != "comment").collect();
+                    let cases: Vec<usize> = (0..m_items.len())
+                        .filter(|k| m_items[*k].kind() != "comment")
+                        .collect();
                     for (p, &k) in cases.iter().enumerate() {
                         if inserted[k]
-                            && (!js_case_terminates(m_items[k]) || p > 0 && !js_case_terminates(m_items[cases[p - 1]]))
+                            && (!js_case_terminates(m_items[k])
+                                || p > 0 && !js_case_terminates(m_items[cases[p - 1]]))
                         {
                             return decline(format!("{what}: an inserted case could fall through"));
                         }
@@ -720,7 +886,10 @@ impl<'a> Ctx<'a> {
                     Id::Base(i) => mcol == col(O, *i),
                     Id::Ins(..) => {
                         let (s, _) = ins_text[id];
-                        let j = side_ids[s].iter().position(|x| x == id).expect("inserted by s");
+                        let j = side_ids[s]
+                            .iter()
+                            .position(|x| x == id)
+                            .expect("inserted by s");
                         mcol == col(s + 1, j)
                     }
                 };
@@ -769,7 +938,9 @@ impl<'a> Ctx<'a> {
         };
         let (ra, rb) = (runs(sa), runs(sb));
         let decl = |v: usize, j: usize| self.declared(v, c[v].items[j]).is_some();
-        let last_base_elem = (0..c[O].items.len()).rev().find(|i| c[O].items[*i].kind() != "comment");
+        let last_base_elem = (0..c[O].items.len())
+            .rev()
+            .find(|i| c[O].items[*i].kind() != "comment");
         for (s, (mine, theirs)) in [(&ra, &rb), (&rb, &ra)].into_iter().enumerate() {
             let (v, other) = (s + 1, 1 - s);
             for (anchor, next, run) in mine {
@@ -781,16 +952,24 @@ impl<'a> Ctx<'a> {
                     let ok = match kind {
                         Kind::Keyed | Kind::Switch | Kind::Const { iota: false } => true,
                         Kind::Const { iota: true } => {
-                            matches!(anchor, Some(Id::Base(i)) if Some(*i) == last_base_elem) && next.is_none() && jr.1.is_none()
+                            matches!(anchor, Some(Id::Base(i)) if Some(*i) == last_base_elem)
+                                && next.is_none()
+                                && jr.1.is_none()
                         }
                         Kind::Positional => self.test_table(node),
                         Kind::Statements => {
-                            run.iter().all(|j| c[v].items[*j].kind() == "comment" || decl(v, *j))
-                                && jr.2.iter().all(|j| c[B].items[*j].kind() == "comment" || decl(B, *j))
+                            run.iter()
+                                .all(|j| c[v].items[*j].kind() == "comment" || decl(v, *j))
+                                && jr
+                                    .2
+                                    .iter()
+                                    .all(|j| c[B].items[*j].kind() == "comment" || decl(B, *j))
                         }
                     };
                     if !ok {
-                        return decline(format!("{what}: both sides inserted at one point of an ordered collection"));
+                        return decline(format!(
+                            "{what}: both sides inserted at one point of an ordered collection"
+                        ));
                     }
                     continue;
                 }
@@ -798,7 +977,9 @@ impl<'a> Ctx<'a> {
                 // the other side must have left the neighbours alone.
                 let sensitive = match kind {
                     Kind::Positional => !self.test_table(node),
-                    Kind::Statements => !run.iter().all(|j| c[v].items[*j].kind() == "comment" || decl(v, *j)),
+                    Kind::Statements => !run
+                        .iter()
+                        .all(|j| c[v].items[*j].kind() == "comment" || decl(v, *j)),
                     _ => false,
                 };
                 if !sensitive {
@@ -813,20 +994,28 @@ impl<'a> Ctx<'a> {
                     _ => false,
                 };
                 if changed(anchor) || changed(next) {
-                    return decline(format!("{what}: an insertion next to an item the other side changed"));
+                    return decline(format!(
+                        "{what}: an insertion next to an item the other side changed"
+                    ));
                 }
                 let lo = match anchor {
                     Some(Id::Base(i)) => *i + 1,
                     None => 0,
-                    Some(Id::Ins(..)) => return decline(format!("{what}: an insertion after a joint insertion")),
+                    Some(Id::Ins(..)) => {
+                        return decline(format!("{what}: an insertion after a joint insertion"))
+                    }
                 };
                 let hi = match next {
                     Some(Id::Base(i)) => *i,
                     None => c[O].items.len(),
-                    Some(Id::Ins(..)) => return decline(format!("{what}: an insertion before a joint insertion")),
+                    Some(Id::Ins(..)) => {
+                        return decline(format!("{what}: an insertion before a joint insertion"))
+                    }
                 };
                 if (lo..hi).any(|i| fate[other][i].is_none()) {
-                    return decline(format!("{what}: an insertion next to an item the other side deleted"));
+                    return decline(format!(
+                        "{what}: an insertion next to an item the other side deleted"
+                    ));
                 }
             }
         }
@@ -876,13 +1065,16 @@ impl<'a> Ctx<'a> {
             }
         };
         // states: (i, j) -> predecessor, per step
-        let mut layers: Vec<HashMap<(usize, usize), (usize, usize, Id)>> = Vec::with_capacity(m.len());
+        let mut layers: Vec<HashMap<(usize, usize), (usize, usize, Id)>> =
+            Vec::with_capacity(m.len());
         let mut cur: HashSet<(usize, usize)> = HashSet::from([(0, 0)]);
         let mut budget = 2_000_000usize;
         for k in 0..m.len() {
             let mut next: HashMap<(usize, usize), (usize, usize, Id)> = HashMap::new();
             for &(i, j) in &cur {
-                budget = budget.checked_sub(1).ok_or(Fail::Decline(format!("{what}: too many ways to read the merge")))?;
+                budget = budget.checked_sub(1).ok_or(Fail::Decline(format!(
+                    "{what}: too many ways to read the merge"
+                )))?;
                 let a = sa.get(i).map(|x| &x.0);
                 let b = sb.get(j).map(|x| &x.0);
                 if let Some(a) = a {
@@ -937,7 +1129,11 @@ impl<'a> Ctx<'a> {
         let mut prev = c.open_end;
         let mut commas = 0usize;
         let mut elements = 0usize;
-        let mut bounds: Vec<(usize, usize)> = c.items.iter().map(|n| (n.start_byte(), n.end_byte())).collect();
+        let mut bounds: Vec<(usize, usize)> = c
+            .items
+            .iter()
+            .map(|n| (n.start_byte(), n.end_byte()))
+            .collect();
         bounds.push((c.close_start, c.close_start));
         for (k, (s, e)) in bounds.iter().enumerate() {
             let gap = &src[prev..*s];
@@ -973,9 +1169,17 @@ impl<'a> Ctx<'a> {
 }
 
 /// The node a side holds for a both-changed base item.
-fn sa_sb_node<'t>(c: &[Coll<'t>; 4], s: usize, id: &Id, sa: &[(Id, usize)], sb: &[(Id, usize)]) -> Option<Node<'t>> {
+fn sa_sb_node<'t>(
+    c: &[Coll<'t>; 4],
+    s: usize,
+    id: &Id,
+    sa: &[(Id, usize)],
+    sb: &[(Id, usize)],
+) -> Option<Node<'t>> {
     let sq = if s == 0 { sa } else { sb };
-    sq.iter().find(|(x, _)| x == id).map(|(_, j)| c[s + 1].items[*j])
+    sq.iter()
+        .find(|(x, _)| x == id)
+        .map(|(_, j)| c[s + 1].items[*j])
 }
 
 /// Align a side's items with base: LCS over alignment keys. Then, given
@@ -998,7 +1202,11 @@ fn align(
     let mut dp = vec![0u32; (n + 1) * w];
     for i in (0..n).rev() {
         for j in (0..m).rev() {
-            dp[i * w + j] = if kb[i].0 == ks[j].0 { dp[(i + 1) * w + j + 1] + 1 } else { dp[(i + 1) * w + j].max(dp[i * w + j + 1]) };
+            dp[i * w + j] = if kb[i].0 == ks[j].0 {
+                dp[(i + 1) * w + j + 1] + 1
+            } else {
+                dp[(i + 1) * w + j].max(dp[i * w + j + 1])
+            };
         }
     }
     let mut fate = vec![None; n];
@@ -1022,7 +1230,11 @@ fn align(
         // item was changed into the side item facing it.
         let (k, l) = (bi - pi, bj - pj);
         if let Some((sb, ss)) = sigs.filter(|_| k > 0 && l > 0) {
-            if k == l && (0..k).all(|x| nb[pi + x].kind() == ns[pj + x].kind() && nb[pi + x].kind() != "comment") {
+            if k == l
+                && (0..k).all(|x| {
+                    nb[pi + x].kind() == ns[pj + x].kind() && nb[pi + x].kind() != "comment"
+                })
+            {
                 for x in 0..k {
                     fate[pi + x] = Some(pj + x);
                 }
@@ -1061,7 +1273,9 @@ fn align(
 fn has_ident(n: Node, src: &str, name: &str) -> bool {
     let mut stack = vec![n];
     while let Some(x) = stack.pop() {
-        if (x.kind() == name || x.kind() == "identifier") && &src[x.start_byte()..x.end_byte()] == name {
+        if (x.kind() == name || x.kind() == "identifier")
+            && &src[x.start_byte()..x.end_byte()] == name
+        {
             return true;
         }
         stack.extend(kids(x));
@@ -1081,15 +1295,22 @@ fn has_kind(n: Node, kind: &str) -> bool {
 }
 
 fn js_case_terminates(case: Node) -> bool {
-    let body: Vec<Node> =
-        kids(case).into_iter().skip_while(|c| c.kind() != ":").skip(1).filter(|c| c.is_named() && c.kind() != "comment").collect();
+    let body: Vec<Node> = kids(case)
+        .into_iter()
+        .skip_while(|c| c.kind() != ":")
+        .skip(1)
+        .filter(|c| c.is_named() && c.kind() != "comment")
+        .collect();
     body.last().is_some_and(|s| terminates(*s))
 }
 
 fn terminates(s: Node) -> bool {
     match s.kind() {
         "break_statement" | "return_statement" | "throw_statement" | "continue_statement" => true,
-        "statement_block" => kids(s).into_iter().filter(|c| c.is_named() && c.kind() != "comment").last().is_some_and(terminates),
+        "statement_block" => kids(s)
+            .into_iter()
+            .rfind(|c| c.is_named() && c.kind() != "comment")
+            .is_some_and(terminates),
         _ => false,
     }
 }

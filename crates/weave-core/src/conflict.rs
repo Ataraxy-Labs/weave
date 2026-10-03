@@ -1481,9 +1481,7 @@ impl MergeStats {
             }
             ResolutionStrategy::InnerMerged
             | ResolutionStrategy::StatementMerged
-            | ResolutionStrategy::ElementUnion => {
-                self.resolved_via_inner_merge += 1
-            }
+            | ResolutionStrategy::ElementUnion => self.resolved_via_inner_merge += 1,
             _ => {}
         }
     }

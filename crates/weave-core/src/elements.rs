@@ -83,6 +83,9 @@
 //! - any version that does not parse, and a result that does not parse,
 //!   drops a line all three kept, or loses a line a side wrote.
 
+// Parallel per-side arrays (base/ours/theirs) are indexed together on purpose.
+#![allow(clippy::needless_range_loop, clippy::type_complexity)]
+
 use std::collections::{HashMap, HashSet};
 
 use tree_sitter::{Node, Tree};
@@ -130,7 +133,13 @@ pub(crate) fn is_test_path(path: &str) -> bool {
 
 /// Merge three versions of one entity (or one member, or one attribute block)
 /// by element union, or `None`.
-pub(crate) fn union(base: &str, ours: &str, theirs: &str, path: &str, host: &Host) -> Option<String> {
+pub(crate) fn union(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    path: &str,
+    host: &Host,
+) -> Option<String> {
     let l = lang(path)?;
     if base == ours || base == theirs || ours == theirs || base.trim().is_empty() {
         return None;
@@ -154,11 +163,7 @@ fn union_with(
 ) -> Option<String> {
     let frame = Frame::find(l, path, [base, ours, theirs])
         .or_else(|| why(|| "a version does not parse as a fragment".into()))?;
-    let srcs = [
-        frame.wrap(base)?,
-        frame.wrap(ours)?,
-        frame.wrap(theirs)?,
-    ];
+    let srcs = [frame.wrap(base)?, frame.wrap(ours)?, frame.wrap(theirs)?];
     let trees: Vec<Tree> = srcs
         .iter()
         .map(|s| parse(path, s))
@@ -169,7 +174,11 @@ fn union_with(
         scope,
         srcs: [&srcs[0], &srcs[1], &srcs[2]],
     };
-    let roots = [trees[0].root_node(), trees[1].root_node(), trees[2].root_node()];
+    let roots = [
+        trees[0].root_node(),
+        trees[1].root_node(),
+        trees[2].root_node(),
+    ];
     // Text outside the root node (leading indentation, a final newline).
     let lead = m.trivial(std::array::from_fn(|v| &srcs[v][..roots[v].start_byte()]))?;
     let tail = m.trivial(std::array::from_fn(|v| &srcs[v][roots[v].end_byte()..]))?;
@@ -279,7 +288,10 @@ impl Frame {
 /// the first non-blank line of each is indented by exactly it.
 fn common_indent(texts: &[&str; 3]) -> Option<String> {
     let first = texts[0].lines().find(|l| !l.trim().is_empty())?;
-    let ind: String = first.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    let ind: String = first
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
     if ind.is_empty() {
         return Some(ind);
     }
@@ -306,7 +318,9 @@ struct M<'a> {
 }
 
 fn kids(n: Node) -> Vec<Node> {
-    (0..n.child_count() as u32).filter_map(|i| n.child(i)).collect()
+    (0..n.child_count() as u32)
+        .filter_map(|i| n.child(i))
+        .collect()
 }
 
 fn norm(s: &str) -> String {
@@ -343,17 +357,32 @@ impl<'a> M<'a> {
             if cb.kind == co.kind && cb.kind == ct.kind {
                 return self.merge_collection(n, [cb, co, ct]);
             }
-            return why(|| format!("a `{}` is a different collection in each version", n[0].kind()));
+            return why(|| {
+                format!(
+                    "a `{}` is a different collection in each version",
+                    n[0].kind()
+                )
+            });
         }
         // Descend: the same shape in all three, merged child by child.
         let c: [Vec<Node>; 3] = std::array::from_fn(|v| kids(n[v]));
         let line = n[0].start_position().row + 1;
         if c[0].len() != c[1].len() || c[0].len() != c[2].len() || c[0].is_empty() {
-            return why(|| format!("both changed the shape of a `{}` (fragment line {line})", n[0].kind()));
+            return why(|| {
+                format!(
+                    "both changed the shape of a `{}` (fragment line {line})",
+                    n[0].kind()
+                )
+            });
         }
         for i in 0..c[0].len() {
             if c[0][i].kind() != c[1][i].kind() || c[0][i].kind() != c[2][i].kind() {
-                return why(|| format!("both changed the shape of a `{}` (fragment line {line})", n[0].kind()));
+                return why(|| {
+                    format!(
+                        "both changed the shape of a `{}` (fragment line {line})",
+                        n[0].kind()
+                    )
+                });
             }
         }
         // Only collections compose finer than a line. Outside one, an edit only
@@ -375,17 +404,21 @@ impl<'a> M<'a> {
             a.iter().any(|x| b.iter().any(|y| x.0 <= y.1 && y.0 <= x.1))
         };
         if meets(&rows[0], &rows[1]) || meets(&rows[0], &rows[2]) || meets(&rows[1], &rows[2]) {
-            return why(|| format!("edits by both sides share a line of a `{}` (line {line})", n[0].kind()));
+            return why(|| {
+                format!(
+                    "edits by both sides share a line of a `{}` (line {line})",
+                    n[0].kind()
+                )
+            });
         }
         let mut out = String::new();
         let mut prev: [usize; 3] = std::array::from_fn(|v| n[v].start_byte());
         for i in 0..c[0].len() {
             let gap: [&str; 3] =
                 std::array::from_fn(|v| &self.srcs[v][prev[v]..c[v][i].start_byte()]);
-            out.push_str(
-                self.trivial(gap)
-                    .or_else(|| why(|| format!("both changed the text between children (line {line})")))?,
-            );
+            out.push_str(self.trivial(gap).or_else(|| {
+                why(|| format!("both changed the text between children (line {line})"))
+            })?);
             out.push_str(&self.merge_node([c[0][i], c[1][i], c[2][i]])?);
             prev = std::array::from_fn(|v| c[v][i].end_byte());
         }
@@ -676,7 +709,8 @@ fn qualified_name(n: Node, src: &str) -> Option<String> {
     let ok = !t.is_empty()
         && t.split('.').all(|seg| {
             let mut ch = seg.chars();
-            ch.next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+            ch.next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
                 && ch.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
         });
     ok.then(|| format!("n:{t}"))
@@ -733,9 +767,9 @@ impl<'a> M<'a> {
                         .child_by_field_name("key")
                         .or_else(|| e.named_child(0))
                         .and_then(|k| self.label(v, k)),
-                    (Lang::Js, "pair") => e
-                        .child_by_field_name("key")
-                        .and_then(|k| self.label(v, k)),
+                    (Lang::Js, "pair") => {
+                        e.child_by_field_name("key").and_then(|k| self.label(v, k))
+                    }
                     (Lang::Js, "shorthand_property_identifier") => self.label(v, e),
                     (Lang::Js, "method_definition") => {
                         let accessor = kids(e)
@@ -745,17 +779,16 @@ impl<'a> M<'a> {
                         if accessor {
                             None
                         } else {
-                            e.child_by_field_name("name")
-                                .and_then(|k| self.label(v, k))
+                            e.child_by_field_name("name").and_then(|k| self.label(v, k))
                         }
                     }
                     (Lang::Js, "export_specifier" | "import_specifier") => e
                         .child_by_field_name("alias")
                         .or_else(|| e.child_by_field_name("name"))
                         .map(|k| format!("s:{}", &src[k.start_byte()..k.end_byte()])),
-                    (Lang::Py, "pair") => e
-                        .child_by_field_name("key")
-                        .and_then(|k| self.label(v, k)),
+                    (Lang::Py, "pair") => {
+                        e.child_by_field_name("key").and_then(|k| self.label(v, k))
+                    }
                     // A set literal or `__all__`: the element is its own key.
                     (Lang::Py, "string" | "integer") => self.label(v, e),
                     _ => None,
@@ -764,10 +797,13 @@ impl<'a> M<'a> {
             }
             Kind::Switch => {
                 let labels: Option<Vec<String>> = match (self.lang, e.kind()) {
-                    (Lang::Go, "expression_case") => e.child_by_field_name("value").and_then(|vl| {
-                        let ls: Vec<Node> = kids(vl).into_iter().filter(|c| c.is_named()).collect();
-                        ls.iter().map(|l| self.label(v, *l)).collect()
-                    }),
+                    (Lang::Go, "expression_case") => {
+                        e.child_by_field_name("value").and_then(|vl| {
+                            let ls: Vec<Node> =
+                                kids(vl).into_iter().filter(|c| c.is_named()).collect();
+                            ls.iter().map(|l| self.label(v, *l)).collect()
+                        })
+                    }
                     (Lang::Js, "switch_case") => e
                         .child_by_field_name("value")
                         .and_then(|l| self.label(v, l))
@@ -818,10 +854,7 @@ impl<'a> M<'a> {
             (Lang::Go, "function_declaration" | "type_declaration")
                 if e.parent().is_some_and(|p| p.kind() == "source_file") =>
             {
-                let n = name(e).or_else(|| {
-                    e.named_child(0)
-                        .and_then(|s| name(s))
-                })?;
+                let n = name(e).or_else(|| e.named_child(0).and_then(&name))?;
                 Some(format!("fn:{n}"))
             }
             (Lang::Go, "method_declaration")
@@ -829,7 +862,11 @@ impl<'a> M<'a> {
             {
                 let recv = e.child_by_field_name("receiver")?;
                 let rt = norm(&src[recv.start_byte()..recv.end_byte()]);
-                let rt = rt.split_whitespace().last()?.trim_matches(['(', ')', '*']).to_string();
+                let rt = rt
+                    .split_whitespace()
+                    .last()?
+                    .trim_matches(['(', ')', '*'])
+                    .to_string();
                 Some(format!("fn:{rt}.{}", name(e)?))
             }
             (Lang::Py, "function_definition") => name(e).map(|n| format!("fn:{n}")),
@@ -926,8 +963,12 @@ impl<'a> M<'a> {
                 "composite_literal" | "expression_list" | "parenthesized_expression" => {
                     at = p.parent();
                 }
-                "short_var_declaration" | "var_spec" | "assignment_statement" | "assignment"
-                | "variable_declarator" | "assignment_expression" => return true,
+                "short_var_declaration"
+                | "var_spec"
+                | "assignment_statement"
+                | "assignment"
+                | "variable_declarator"
+                | "assignment_expression" => return true,
                 _ => return false,
             }
         }
@@ -981,7 +1022,11 @@ fn align_keyed(base: &[Slot], side: &[Slot]) -> Option<Align> {
             return None;
         }
     }
-    let at: HashMap<String, usize> = idents(side).into_iter().enumerate().map(|(j, k)| (k, j)).collect();
+    let at: HashMap<String, usize> = idents(side)
+        .into_iter()
+        .enumerate()
+        .map(|(j, k)| (k, j))
+        .collect();
     let fate = idents(base).iter().map(|k| at.get(k).copied()).collect();
     finish(fate, side.len())
 }
@@ -1116,9 +1161,12 @@ impl<'a> M<'a> {
         let line = n[0].start_position().row + 1;
         let what = format!("{:?} `{}` at fragment line {line}", kind, n[0].kind());
         let read: [(Vec<Slot>, String); 3] = [
-            self.slots(0, &c[0]).or_else(|| why(|| format!("{what}: slots do not tile")))?,
-            self.slots(1, &c[1]).or_else(|| why(|| format!("{what}: slots do not tile")))?,
-            self.slots(2, &c[2]).or_else(|| why(|| format!("{what}: slots do not tile")))?,
+            self.slots(0, &c[0])
+                .or_else(|| why(|| format!("{what}: slots do not tile")))?,
+            self.slots(1, &c[1])
+                .or_else(|| why(|| format!("{what}: slots do not tile")))?,
+            self.slots(2, &c[2])
+                .or_else(|| why(|| format!("{what}: slots do not tile")))?,
         ];
         let (bs, os, ts) = (&read[0].0, &read[1].0, &read[2].0);
         let align = |side: &[Slot]| match kind {
@@ -1126,8 +1174,14 @@ impl<'a> M<'a> {
             _ => align_keyed(bs, side),
         };
         let (ao, at) = (
-            align(os).or_else(|| why(|| format!("{what}: ours does not align with base (a move, or duplicate keys)")))?,
-            align(ts).or_else(|| why(|| format!("{what}: theirs does not align with base (a move, or duplicate keys)")))?,
+            align(os).or_else(|| {
+                why(|| format!("{what}: ours does not align with base (a move, or duplicate keys)"))
+            })?,
+            align(ts).or_else(|| {
+                why(|| {
+                    format!("{what}: theirs does not align with base (a move, or duplicate keys)")
+                })
+            })?,
         );
         let sides: [(&Align, &Vec<Slot>, usize); 2] = [(&ao, os, 1), (&at, ts, 2)];
 
@@ -1202,15 +1256,21 @@ impl<'a> M<'a> {
                         // other editing the element is two edits to adjacent
                         // lines: a conflict, as in a line merge.
                         if o.lead != t.lead || o.rest.trim_end() != t.rest.trim_end() {
-                            return why(|| format!("{what}: one side changed the text around an element the other edited"));
+                            return why(|| {
+                                format!("{what}: one side changed the text around an element the other edited")
+                            });
                         }
                         let lead = self
                             .trivial([b.lead.as_str(), o.lead.as_str(), t.lead.as_str()])
-                            .or_else(|| why(|| format!("{what}: both changed the text above one element")))?
+                            .or_else(|| {
+                                why(|| format!("{what}: both changed the text above one element"))
+                            })?
                             .to_string();
                         let rest = self
                             .trivial([b.rest.as_str(), o.rest.as_str(), t.rest.as_str()])
-                            .or_else(|| why(|| format!("{what}: both changed the text after one element")))?
+                            .or_else(|| {
+                                why(|| format!("{what}: both changed the text after one element"))
+                            })?
                             .to_string();
                         let body = self.merge_node([b.node, o.node, t.node])?;
                         let mut s = b.clone();
@@ -1230,13 +1290,17 @@ impl<'a> M<'a> {
                 }
                 (None, Some(k)) => {
                     if !ts[k].same(&bs[i]) {
-                        return why(|| format!("{what}: an element deleted by one side, changed by the other"));
+                        return why(|| {
+                            format!("{what}: an element deleted by one side, changed by the other")
+                        });
                     }
                     None
                 }
                 (Some(j), None) => {
                     if !os[j].same(&bs[i]) {
-                        return why(|| format!("{what}: an element deleted by one side, changed by the other"));
+                        return why(|| {
+                            format!("{what}: an element deleted by one side, changed by the other")
+                        });
                     }
                     None
                 }
@@ -1249,7 +1313,9 @@ impl<'a> M<'a> {
         let mut gaps: HashMap<Option<usize>, [Vec<Slot>; 2]> = HashMap::new();
         for (si, (a, side, _v)) in sides.iter().enumerate() {
             for (anchor, run) in &a.runs {
-                let entry = gaps.entry(*anchor).or_insert_with(|| [Vec::new(), Vec::new()]);
+                let entry = gaps
+                    .entry(*anchor)
+                    .or_insert_with(|| [Vec::new(), Vec::new()]);
                 for j in run {
                     entry[si].push(side[*j].clone());
                 }
@@ -1270,8 +1336,8 @@ impl<'a> M<'a> {
             // Next to an element the other side changed, an insertion into an
             // order-sensitive collection is a claim about order.
             // Hoisted declarations have no position to lose.
-            let declarations = kind == Kind::Statements
-                && ro.iter().chain(&rt).all(|s| !s.names.is_empty());
+            let declarations =
+                kind == Kind::Statements && ro.iter().chain(&rt).all(|s| !s.names.is_empty());
             if order_sensitive_kind && !declarations {
                 let succ = anchor.map_or(0, |a| a + 1);
                 let touched = |a: &Align, side: &[Slot]| {
@@ -1279,21 +1345,24 @@ impl<'a> M<'a> {
                         || (succ < bs.len() && edge_changed(a, side, succ, false))
                 };
                 if !ro.is_empty() && touched(&at, ts) || !rt.is_empty() && touched(&ao, os) {
-                    return why(|| format!("{what}: an insertion next to an element the other side changed"));
+                    return why(|| {
+                        format!("{what}: an insertion next to an element the other side changed")
+                    });
                 }
             }
             let run: Vec<(Slot, usize)> = if ro.is_empty() || rt.is_empty() {
                 let v = if ro.is_empty() { 2 } else { 1 };
                 ro.into_iter().chain(rt).map(|s| (s, v)).collect()
             } else {
-                if !order_free(anchor)
-                    && !self.declared_union(kind, &c[0], n[0], &ro, &rt, bs)
-                {
+                if !order_free(anchor) && !self.declared_union(kind, &c[0], n[0], &ro, &rt, bs) {
                     let names = self.names_of(0, n[0]);
-                    return why(|| format!("{what}: both sides inserted at one point of an ordered collection (names {names:?})"));
+                    return why(|| {
+                        format!("{what}: both sides inserted at one point of an ordered collection (names {names:?})")
+                    });
                 }
-                order_runs(ro, rt)
-                    .or_else(|| why(|| format!("{what}: one key inserted by both sides with different text")))?
+                order_runs(ro, rt).or_else(|| {
+                    why(|| format!("{what}: one key inserted by both sides with different text"))
+                })?
             };
             inserted.insert(
                 anchor,
@@ -1327,13 +1396,16 @@ impl<'a> M<'a> {
         self.check_unique(kind, &seq)
             .or_else(|| why(|| format!("{what}: a key, label or name would be stated twice")))?;
         if kind == Kind::Switch {
-            self.check_switch(&seq)
-                .or_else(|| why(|| format!("{what}: a case could fall through (or `fallthrough`)")))?;
+            self.check_switch(&seq).or_else(|| {
+                why(|| format!("{what}: a case could fall through (or `fallthrough`)"))
+            })?;
         }
 
         // Render.
-        let prefix: [&str; 3] = std::array::from_fn(|v| &self.srcs[v][n[v].start_byte()..c[v].open_end]);
-        let suffix: [&str; 3] = std::array::from_fn(|v| &self.srcs[v][c[v].close_start..n[v].end_byte()]);
+        let prefix: [&str; 3] =
+            std::array::from_fn(|v| &self.srcs[v][n[v].start_byte()..c[v].open_end]);
+        let suffix: [&str; 3] =
+            std::array::from_fn(|v| &self.srcs[v][c[v].close_start..n[v].end_byte()]);
         let tail: [&str; 3] = std::array::from_fn(|v| read[v].1.as_str());
         let mut out = String::new();
         out.push_str(self.trivial(prefix)?);
@@ -1367,9 +1439,7 @@ impl<'a> M<'a> {
             Kind::Keyed | Kind::Const { iota: false } => true,
             // Appending after every base constant renumbers nothing that
             // exists; inserting ahead of one renumbers it and all after.
-            Kind::Const { iota: true } => {
-                !bs.is_empty() && anchor == Some(bs.len() - 1)
-            }
+            Kind::Const { iota: true } => !bs.is_empty() && anchor == Some(bs.len() - 1),
             Kind::Switch => true, // the per-case guards are in `check_switch`
             Kind::Positional => self.test_table(n),
             Kind::Statements => {
@@ -1399,9 +1469,8 @@ impl<'a> M<'a> {
                 // A declared registry: every inserted statement calls one
                 // declared function with a distinct string key, none of which
                 // the base already registers.
-                let calls: Option<Vec<(String, String)>> = all()
-                    .map(|s| self.registry_call(s.v, s.node))
-                    .collect();
+                let calls: Option<Vec<(String, String)>> =
+                    all().map(|s| self.registry_call(s.v, s.node)).collect();
                 let Some(calls) = calls else {
                     return false;
                 };
@@ -1456,7 +1525,8 @@ impl<'a> M<'a> {
         let mut base_ids: HashSet<String> = HashSet::new();
         for p in seq.iter().filter(|p| !p.inserted) {
             base_ids.extend(p.slot.names.iter().cloned());
-            if let (Kind::Keyed | Kind::Switch | Kind::Const { .. }, Some(k)) = (kind, &p.slot.key) {
+            if let (Kind::Keyed | Kind::Switch | Kind::Const { .. }, Some(k)) = (kind, &p.slot.key)
+            {
                 base_ids.insert(k.clone());
             }
         }
@@ -1565,8 +1635,7 @@ fn terminates(s: Node) -> bool {
         "break_statement" | "return_statement" | "throw_statement" | "continue_statement" => true,
         "statement_block" => kids(s)
             .into_iter()
-            .filter(|c| c.is_named() && c.kind() != "comment")
-            .last()
+            .rfind(|c| c.is_named() && c.kind() != "comment")
             .is_some_and(terminates),
         _ => false,
     }
@@ -1712,7 +1781,8 @@ pub(crate) fn iota_renumbered(
         let tree = parse(path, t)?;
         Some(iota_values(t, tree.root_node()))
     };
-    let (Some(b), Some(o), Some(th), Some(m)) = (read(base), read(ours), read(theirs), read(merged))
+    let (Some(b), Some(o), Some(th), Some(m)) =
+        (read(base), read(ours), read(theirs), read(merged))
     else {
         return None;
     };
@@ -1739,7 +1809,10 @@ fn iota_values(src: &str, root: Node) -> HashMap<String, (String, usize, Vec<Str
     let mut stack = vec![root];
     while let Some(n) = stack.pop() {
         if n.kind() == "const_declaration" && contains_ident(n, src, "iota") {
-            let specs: Vec<Node> = kids(n).into_iter().filter(|c| c.kind() == "const_spec").collect();
+            let specs: Vec<Node> = kids(n)
+                .into_iter()
+                .filter(|c| c.kind() == "const_spec")
+                .collect();
             let mut block_names = Vec::new();
             if let Some(first) = specs.first() {
                 if let Some(ty) = first.child_by_field_name("type") {
@@ -1847,30 +1920,54 @@ mod tests {
             "\t\tcase OpBitNot:\n\t\t\tvm.not()\n\n\t\tcase OpEnd:",
         );
         let m = u("vm.go", GO_SWITCH_BASE, &o, &t).expect("united");
-        assert!(m.contains("case OpShiftLeft:\n\t\t\tvm.shl()\n\n\t\tcase OpBitNot:")
-            || m.contains("case OpBitNot:\n\t\t\tvm.not()\n\n\t\tcase OpShiftLeft:"), "{m}");
-        assert!(m.find("OpBitNot").unwrap() < m.find("OpShiftLeft").unwrap(), "by key: {m}");
+        assert!(
+            m.contains("case OpShiftLeft:\n\t\t\tvm.shl()\n\n\t\tcase OpBitNot:")
+                || m.contains("case OpBitNot:\n\t\t\tvm.not()\n\n\t\tcase OpShiftLeft:"),
+            "{m}"
+        );
+        assert!(
+            m.find("OpBitNot").unwrap() < m.find("OpShiftLeft").unwrap(),
+            "by key: {m}"
+        );
         assert!(m.contains("case OpEnd:"));
     }
 
     #[test]
     fn go_switch_refusals() {
         // The same label from both sides with different bodies.
-        let o = GO_SWITCH_BASE.replace("\t\tcase OpEnd:", "\t\tcase OpX:\n\t\t\ta()\n\n\t\tcase OpEnd:");
-        let t = GO_SWITCH_BASE.replace("\t\tcase OpEnd:", "\t\tcase OpX:\n\t\t\tb()\n\n\t\tcase OpEnd:");
+        let o = GO_SWITCH_BASE.replace(
+            "\t\tcase OpEnd:",
+            "\t\tcase OpX:\n\t\t\ta()\n\n\t\tcase OpEnd:",
+        );
+        let t = GO_SWITCH_BASE.replace(
+            "\t\tcase OpEnd:",
+            "\t\tcase OpX:\n\t\t\tb()\n\n\t\tcase OpEnd:",
+        );
         assert!(u("vm.go", GO_SWITCH_BASE, &o, &t).is_none());
         // Both sides extend one case's label list.
         let o = GO_SWITCH_BASE.replace("case OpOr:", "case OpOr, OpXor:");
         let t = GO_SWITCH_BASE.replace("case OpOr:", "case OpOr, OpNor:");
         assert!(u("vm.go", GO_SWITCH_BASE, &o, &t).is_none());
         // A label already present.
-        let o = GO_SWITCH_BASE.replace("\t\tcase OpEnd:", "\t\tcase OpY:\n\t\t\ta()\n\n\t\tcase OpEnd:");
-        let t = GO_SWITCH_BASE.replace("\t\tcase OpEnd:", "\t\tcase OpZ, OpAnd:\n\t\t\tb()\n\n\t\tcase OpEnd:");
+        let o = GO_SWITCH_BASE.replace(
+            "\t\tcase OpEnd:",
+            "\t\tcase OpY:\n\t\t\ta()\n\n\t\tcase OpEnd:",
+        );
+        let t = GO_SWITCH_BASE.replace(
+            "\t\tcase OpEnd:",
+            "\t\tcase OpZ, OpAnd:\n\t\t\tb()\n\n\t\tcase OpEnd:",
+        );
         assert!(u("vm.go", GO_SWITCH_BASE, &o, &t).is_none());
         // fallthrough anywhere in the switch.
         let base = GO_SWITCH_BASE.replace("vm.and()", "vm.and()\n\t\t\tfallthrough");
-        let o = base.replace("\t\tcase OpEnd:", "\t\tcase OpY:\n\t\t\ta()\n\n\t\tcase OpEnd:");
-        let t = base.replace("\t\tcase OpEnd:", "\t\tcase OpZ:\n\t\t\tb()\n\n\t\tcase OpEnd:");
+        let o = base.replace(
+            "\t\tcase OpEnd:",
+            "\t\tcase OpY:\n\t\t\ta()\n\n\t\tcase OpEnd:",
+        );
+        let t = base.replace(
+            "\t\tcase OpEnd:",
+            "\t\tcase OpZ:\n\t\t\tb()\n\n\t\tcase OpEnd:",
+        );
         assert!(u("vm.go", &base, &o, &t).is_none());
         // A tagless switch is a chain of conditions.
         let base = "func f() {\n\tswitch {\n\tcase a > 1:\n\t\tx()\n\t}\n}\n";
@@ -1878,8 +1975,14 @@ mod tests {
         let t = base.replace("\t}\n}", "\tcase a > 2:\n\t\tz()\n\t}\n}");
         assert!(u("x.go", base, &o, &t).is_none());
         // A label that is a call.
-        let o = GO_SWITCH_BASE.replace("\t\tcase OpEnd:", "\t\tcase f():\n\t\t\ta()\n\n\t\tcase OpEnd:");
-        let t = GO_SWITCH_BASE.replace("\t\tcase OpEnd:", "\t\tcase OpZ:\n\t\t\tb()\n\n\t\tcase OpEnd:");
+        let o = GO_SWITCH_BASE.replace(
+            "\t\tcase OpEnd:",
+            "\t\tcase f():\n\t\t\ta()\n\n\t\tcase OpEnd:",
+        );
+        let t = GO_SWITCH_BASE.replace(
+            "\t\tcase OpEnd:",
+            "\t\tcase OpZ:\n\t\t\tb()\n\n\t\tcase OpEnd:",
+        );
         assert!(u("vm.go", GO_SWITCH_BASE, &o, &t).is_none());
         // A type switch: overlapping types, first match wins.
         let base = "func f(x any) {\n\tswitch x.(type) {\n\tcase int:\n\t\ta()\n\t}\n}\n";
@@ -1891,12 +1994,24 @@ mod tests {
     #[test]
     fn go_map_literal_entries_unite_and_collide() {
         let base = "func TestX(t *testing.T) {\n\tconfig := map[string]struct {\n\t\tarity int\n\t}{\n\t\t\"now\":  {0},\n\t\t\"take\": {2},\n\t}\n\t_ = config\n}\n";
-        let o = base.replace("\t\t\"take\": {2},\n", "\t\t\"take\": {2},\n\t\t\"chunk\":  {2},\n");
-        let t = base.replace("\t\t\"take\": {2},\n", "\t\t\"take\": {2},\n\t\t\"zip\":    {2},\n");
+        let o = base.replace(
+            "\t\t\"take\": {2},\n",
+            "\t\t\"take\": {2},\n\t\t\"chunk\":  {2},\n",
+        );
+        let t = base.replace(
+            "\t\t\"take\": {2},\n",
+            "\t\t\"take\": {2},\n\t\t\"zip\":    {2},\n",
+        );
         let m = u("builtin_test.go", base, &o, &t).expect("united");
-        assert!(m.contains("\t\t\"take\": {2},\n\t\t\"chunk\":  {2},\n\t\t\"zip\":    {2},\n\t}"), "{m}");
+        assert!(
+            m.contains("\t\t\"take\": {2},\n\t\t\"chunk\":  {2},\n\t\t\"zip\":    {2},\n\t}"),
+            "{m}"
+        );
         // One key, two values.
-        let t2 = base.replace("\t\t\"take\": {2},\n", "\t\t\"take\": {2},\n\t\t\"chunk\":  {3},\n");
+        let t2 = base.replace(
+            "\t\t\"take\": {2},\n",
+            "\t\t\"take\": {2},\n\t\t\"chunk\":  {3},\n",
+        );
         assert!(u("builtin_test.go", base, &o, &t2).is_none());
         // Both modify one entry.
         let o3 = base.replace("\"now\":  {0}", "\"now\":  {1}");
@@ -1907,8 +2022,14 @@ mod tests {
     #[test]
     fn go_test_table_rows_unite_but_product_slices_need_a_declaration() {
         let base = "func TestExpr(t *testing.T) {\n\ttests := []struct {\n\t\tcode string\n\t\twant any\n\t}{\n\t\t{\n\t\t\t`1`,\n\t\t\t1,\n\t\t},\n\t}\n\t_ = tests\n}\n";
-        let o = base.replace("\t\t},\n\t}\n", "\t\t},\n\t\t{\n\t\t\t`1 << 4`,\n\t\t\t16,\n\t\t},\n\t}\n");
-        let t = base.replace("\t\t},\n\t}\n", "\t\t},\n\t\t{\n\t\t\t`~5`,\n\t\t\t-6,\n\t\t},\n\t}\n");
+        let o = base.replace(
+            "\t\t},\n\t}\n",
+            "\t\t},\n\t\t{\n\t\t\t`1 << 4`,\n\t\t\t16,\n\t\t},\n\t}\n",
+        );
+        let t = base.replace(
+            "\t\t},\n\t}\n",
+            "\t\t},\n\t\t{\n\t\t\t`~5`,\n\t\t\t-6,\n\t\t},\n\t}\n",
+        );
         let m = u("expr_test.go", base, &o, &t).expect("a test table unites");
         assert!(m.contains("`1 << 4`") && m.contains("`~5`"), "{m}");
         assert!(m.find("`1`").unwrap() < m.find("`1 << 4`").unwrap());
@@ -2005,7 +2126,10 @@ mod tests {
         );
         assert!(u("src/jsonata.js", JS_IIFE, &o, &t2).is_none());
         // An empty case groups with what follows it.
-        let t3 = JS_IIFE.replace("            case 'name':", "            case 'zip':\n            case 'name':");
+        let t3 = JS_IIFE.replace(
+            "            case 'name':",
+            "            case 'zip':\n            case 'name':",
+        );
         assert!(u("src/jsonata.js", JS_IIFE, &o, &t3).is_none());
     }
 
@@ -2019,7 +2143,10 @@ mod tests {
             "    return { evaluate };",
             "    staticFrame.bind('startsWith', defineFunction(fn.startsWith, '<s-s:b>'));\n    return { evaluate };",
         );
-        assert!(u("src/jsonata.js", JS_IIFE, &o, &t).is_none(), "statements are ordered");
+        assert!(
+            u("src/jsonata.js", JS_IIFE, &o, &t).is_none(),
+            "statements are ordered"
+        );
         let m = ud("src/jsonata.js", JS_IIFE, &o, &t, "bind").expect("declared registry");
         assert!(m.find("'chunk'").unwrap() < m.find("'startsWith'").unwrap());
         // A registered key twice, even declared.
@@ -2033,16 +2160,26 @@ mod tests {
     #[test]
     fn js_export_object_with_several_names_per_line() {
         let base = "var functions = (function() {\n    function a() {}\n    return {\n        sum, count,\n        decodeUrl\n    };\n})();\n";
-        let o = base.replace(
-            "function a() {}\n",
-            "function a() {}\n    function chunk() {}\n",
-        ).replace("        decodeUrl\n", "        decodeUrl,\n        chunk\n");
-        let t = base.replace(
-            "function a() {}\n",
-            "function a() {}\n    function startsWith() {}\n    function endsWith() {}\n",
-        ).replace("        decodeUrl\n", "        decodeUrl,\n        startsWith, endsWith\n");
+        let o = base
+            .replace(
+                "function a() {}\n",
+                "function a() {}\n    function chunk() {}\n",
+            )
+            .replace("        decodeUrl\n", "        decodeUrl,\n        chunk\n");
+        let t = base
+            .replace(
+                "function a() {}\n",
+                "function a() {}\n    function startsWith() {}\n    function endsWith() {}\n",
+            )
+            .replace(
+                "        decodeUrl\n",
+                "        decodeUrl,\n        startsWith, endsWith\n",
+            );
         let m = u("src/functions.js", base, &o, &t).expect("united");
-        assert!(m.contains("decodeUrl,\n        chunk,\n        startsWith, endsWith\n    };"), "{m}");
+        assert!(
+            m.contains("decodeUrl,\n        chunk,\n        startsWith, endsWith\n    };"),
+            "{m}"
+        );
         assert!(m.contains("function chunk()") && m.contains("function endsWith()"));
     }
 
@@ -2070,7 +2207,10 @@ mod tests {
             "        exp.IntDiv: lambda self, e: self.func(\"intDiv\", e.this),\n        exp.IsNan",
         );
         let m = u("sqlglot/generators/clickhouse.py", PY_ATTRS, &o, &t).expect("united");
-        let (i, f) = (m.find("exp.IntDiv").unwrap(), m.find("exp.IsFinite").unwrap());
+        let (i, f) = (
+            m.find("exp.IntDiv").unwrap(),
+            m.find("exp.IsFinite").unwrap(),
+        );
         assert!(i < f, "{m}");
         assert!(m.starts_with("    TRANSFORMS = {\n"));
         // A splat inserted by a side has no key.
@@ -2094,7 +2234,8 @@ mod tests {
         assert!(u("tests/test_plugins.py", base, &o, &t).is_some());
         // A literal passed to a call is not a named table: parametrize names
         // its test ids by position.
-        let base = "@pytest.mark.parametrize(\"x\", [\n    \"a\",\n])\ndef test_x(x):\n    assert x\n";
+        let base =
+            "@pytest.mark.parametrize(\"x\", [\n    \"a\",\n])\ndef test_x(x):\n    assert x\n";
         let o = base.replace("    \"a\",\n", "    \"a\",\n    \"b\",\n");
         let t = base.replace("    \"a\",\n", "    \"a\",\n    \"c\",\n");
         assert!(u("tests/test_x.py", base, &o, &t).is_none());
@@ -2118,10 +2259,15 @@ mod tests {
         assert!(u("x.go", base, &o, &t).is_none());
         // Edits on different lines of one body are fine (diff3 would agree).
         let base = "func f() {\n\tm := map[string]int{\n\t\t\"a\": 1,\n\t}\n\tg(a)\n}\n";
-        let o = base.replace("\t\t\"a\": 1,\n", "\t\t\"a\": 1,\n\t\t\"b\": 2,\n").replace("g(a)", "g(z)");
+        let o = base
+            .replace("\t\t\"a\": 1,\n", "\t\t\"a\": 1,\n\t\t\"b\": 2,\n")
+            .replace("g(a)", "g(z)");
         let t = base.replace("\t\t\"a\": 1,\n", "\t\t\"a\": 1,\n\t\t\"c\": 3,\n");
         let m = u("x.go", base, &o, &t).expect("united");
-        assert!(m.contains("g(z)") && m.contains("\"b\": 2") && m.contains("\"c\": 3"), "{m}");
+        assert!(
+            m.contains("g(z)") && m.contains("\"b\": 2") && m.contains("\"c\": 3"),
+            "{m}"
+        );
         // Inside a collection too: two entries of a one-line dict, one edited
         // by each side, are one line edited twice.
         let base = "def f():\n    h = {\"a\": 1, \"b\": 2}\n    return h\n";
@@ -2139,6 +2285,9 @@ mod tests {
         // Deletion against an untouched element is fine.
         let t = "H = {\n    \"a\": 1,\n    \"b\": 2,\n    \"d\": 4,\n}\n";
         let m = u("m.py", base, o, t).expect("united");
-        assert!(!m.contains("\"a\"") && m.contains("\"c\"") && m.contains("\"d\""), "{m}");
+        assert!(
+            !m.contains("\"a\"") && m.contains("\"c\"") && m.contains("\"d\""),
+            "{m}"
+        );
     }
 }

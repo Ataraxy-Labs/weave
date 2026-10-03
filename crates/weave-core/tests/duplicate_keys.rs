@@ -13,7 +13,10 @@
 use weave_core::entity_merge;
 
 fn fixture(name: &str) -> String {
-    let p = format!("{}/tests/fixtures/expr-vm/{name}", env!("CARGO_MANIFEST_DIR"));
+    let p = format!(
+        "{}/tests/fixtures/expr-vm/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{p}: {e}"))
 }
 

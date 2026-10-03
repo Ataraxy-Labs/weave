@@ -13,15 +13,23 @@ fn read(v: &Value) -> Result<Option<String>, String> {
         None => Ok(None),
         Some(p) => {
             let bytes = std::fs::read(p).map_err(|e| format!("read {p}: {e}"))?;
-            String::from_utf8(bytes).map(|s| Some(normalize(&s))).map_err(|_| "not utf-8".into())
+            String::from_utf8(bytes)
+                .map(|s| Some(normalize(&s)))
+                .map_err(|_| "not utf-8".into())
         }
     }
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let dump = args.iter().position(|a| a == "--dump").map(|i| args[i + 1].clone());
-    let emit = args.iter().position(|a| a == "--emit-construct").map(|i| args[i + 1].clone());
+    let dump = args
+        .iter()
+        .position(|a| a == "--dump")
+        .map(|i| args[i + 1].clone());
+    let emit = args
+        .iter()
+        .position(|a| a == "--emit-construct")
+        .map(|i| args[i + 1].clone());
     let reg = sem_core::parser::plugins::create_default_registry();
     let out = std::io::stdout();
     let mut out = out.lock();
@@ -29,15 +37,31 @@ fn main() {
         let job: Value = serde_json::from_str(&line.unwrap()).expect("bad job line");
         let id = job["id"].clone();
         let path = job["path"].as_str().unwrap_or("").to_string();
-        let texts: Result<Vec<Option<String>>, String> =
-            ["base", "ours", "theirs", "merged"].iter().map(|f| read(&job[*f])).collect();
+        let texts: Result<Vec<Option<String>>, String> = ["base", "ours", "theirs", "merged"]
+            .iter()
+            .map(|f| read(&job[*f]))
+            .collect();
         let t = match texts {
             Ok(t) if t[3].is_some() => t,
-            Ok(_) => { writeln!(out, "{}", json!({"id": id, "error": "no merged"})).unwrap(); continue; }
-            Err(e) => { writeln!(out, "{}", json!({"id": id, "error": e})).unwrap(); continue; }
+            Ok(_) => {
+                writeln!(out, "{}", json!({"id": id, "error": "no merged"})).unwrap();
+                continue;
+            }
+            Err(e) => {
+                writeln!(out, "{}", json!({"id": id, "error": e})).unwrap();
+                continue;
+            }
         };
-        let v: Vec<Option<Version>> = t.iter().map(|s| s.as_ref().map(|s| decompose(&reg, &path, s))).collect();
-        let (o, a, b, m) = (v[0].as_ref(), v[1].as_ref(), v[2].as_ref(), v[3].as_ref().unwrap());
+        let v: Vec<Option<Version>> = t
+            .iter()
+            .map(|s| s.as_ref().map(|s| decompose(&reg, &path, s)))
+            .collect();
+        let (o, a, b, m) = (
+            v[0].as_ref(),
+            v[1].as_ref(),
+            v[2].as_ref(),
+            v[3].as_ref().unwrap(),
+        );
         let r = check(&path, o, a, b, m);
         let merged = t[3].as_ref().unwrap();
         let cons = |allow: &[&str]| match construct(o, a, b, allow) {
@@ -47,7 +71,12 @@ fn main() {
         };
         if let Some(dir) = &emit {
             if let Some(c) = construct(o, a, b, &["nest", "subsume_ins"]) {
-                let safe: String = id.as_str().unwrap_or("x").chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+                let safe: String = id
+                    .as_str()
+                    .unwrap_or("x")
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect();
                 std::fs::write(format!("{dir}/{safe}.construct"), c).unwrap();
             }
         }
@@ -57,9 +86,18 @@ fn main() {
                 if v[0].1 == "decline" {
                     continue;
                 }
-                let safe: String = id.as_str().unwrap_or("x").chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+                let safe: String = id
+                    .as_str()
+                    .unwrap_or("x")
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect();
                 let stem = format!("{dir}/{safe}.{n}");
-                let (ot, at, bt) = (get(o, k).unwrap_or_default(), get(a, k).unwrap(), get(b, k).unwrap());
+                let (ot, at, bt) = (
+                    get(o, k).unwrap_or_default(),
+                    get(a, k).unwrap(),
+                    get(b, k).unwrap(),
+                );
                 std::fs::write(format!("{stem}.o"), &ot).unwrap();
                 std::fs::write(format!("{stem}.a"), &at).unwrap();
                 std::fs::write(format!("{stem}.b"), &bt).unwrap();
@@ -68,7 +106,18 @@ fn main() {
                 }
             }
         }
-        let both: Vec<Value> = r.both.iter().map(|(k, v)| { let mut o = serde_json::Map::new(); o.insert("key".into(), json!(k)); for (n, s) in v { o.insert((*n).into(), json!(s)); } Value::Object(o) }).collect();
+        let both: Vec<Value> = r
+            .both
+            .iter()
+            .map(|(k, v)| {
+                let mut o = serde_json::Map::new();
+                o.insert("key".into(), json!(k));
+                for (n, s) in v {
+                    o.insert((*n).into(), json!(s));
+                }
+                Value::Object(o)
+            })
+            .collect();
         writeln!(out, "{}", json!({
             "id": id, "regions": m.keys.len(), "n_hard": r.hard.len(),
             "hard": r.hard.iter().take(8).collect::<Vec<_>>(), "both": both,
