@@ -6,8 +6,12 @@
 //! * **PROVEN** — weave merged the file cleanly AND the independent merge
 //!   certificate (`weave-certify`, which shares no merge code with weave)
 //!   shows the result is the three-way selection of base, ours and theirs.
-//! * **VERIFIED** — an external resolver (any program; see [`Resolver`])
-//!   wrote the file, and the answer passed the exact [`gate`].
+//! * **VERIFIED** — the file's answer passed the exact [`gate`], and it came
+//!   from one of two places: an external resolver (any program; see
+//!   [`Resolver`]) wrote it, or weave's element union did — a clean merge
+//!   whose both-changed regions the certificate admits only with the
+//!   `elem_union` check ([`UNION_ALLOWANCES`]). No resolver is called for the
+//!   second; see [`land_unit`] for why it is VERIFIED and not PROVEN.
 //! * **REFUSED** — nothing above holds. The file keeps its conflict markers and
 //!   stays unmerged in the index; the resolver's answer is never written.
 //!
@@ -46,6 +50,13 @@ type R<T> = Result<T, Box<dyn std::error::Error>>;
 /// `imp_strict` plus a check that every import line one side added that the
 /// merge keeps binds a name the merged file uses.
 pub const PROOF_ALLOWANCES: [&str; 3] = ["imp_used", "subsume_ins", "nest"];
+
+/// What else may admit a both-changed region of weave's clean merge, for a
+/// VERIFIED landing (never PROVEN): `elem_union`, the certificate's own check
+/// of an element union (`weave_certify::elem`), and `nest_eu`, `nest` with
+/// children it admits. Not in the proof rule set, so a file that
+/// needs one of these must also pass the gate.
+pub const UNION_ALLOWANCES: [&str; 2] = ["elem_union", "nest_eu"];
 
 /// Version tag of the JSON report / certificate document.
 pub const SCHEMA: &str = "weave-land/1";
@@ -794,7 +805,8 @@ pub struct FileReport {
     pub path: String,
     pub kind: Kind,
     pub status: Status,
-    /// `certificate` | `gate` | `resolver` | `no-resolver` | `not-text`.
+    /// `certificate` | `elem_union` | `gate` | `resolver` | `no-resolver` |
+    /// `not-text`.
     pub rule: &'static str,
     /// One sentence.
     pub reason: String,
@@ -814,6 +826,21 @@ pub struct FileReport {
 /// Land one file: weave, then the certificate, then the resolver behind the
 /// gate. `Err` only for a failure of the whole run (the resolver cannot be
 /// started at all).
+///
+/// A clean weave merge the certificate admits with its v2 rule set is PROVEN.
+/// One it admits only by also allowing [`UNION_ALLOWANCES`] — weave united
+/// elements two sides inserted into one collection, and the certificate's
+/// independent `elem_union` check, reading the four parse trees, found every
+/// inserted element verbatim, base order kept, no key twice, a construct the
+/// policy calls a set, and a result that parses — lands VERIFIED, after the
+/// same gate a resolver's answer must pass (DROPPED / UNDELETED included),
+/// with no resolver call. When the region-by-region verdict fails, the
+/// check also reads the whole file as one statement list (both sides
+/// appending named top-level declarations at one point). Not PROVEN: PROVEN means the certificate's
+/// fixed proof rule set, measured before it was adopted; `elem_union` is a
+/// policy about which collections are sets, not a three-way selection, and
+/// it has not been measured that way. Any doubt — the check declines or
+/// crashes, the gate fails — sends the file on to the resolver, as before.
 pub fn land_unit(u: &Unit, host: &Host, resolver: Option<&Resolver>) -> R<FileReport> {
     let mut report = FileReport {
         path: u.path.clone(),
@@ -839,8 +866,32 @@ pub fn land_unit(u: &Unit, host: &Host, resolver: Option<&Resolver>) -> R<FileRe
         let merged = entity_merge_fmt(base, ours, theirs, &u.path, &fmt, host);
         if merged.is_clean() {
             report.weave = "clean";
-            match certify(u, &merged.content) {
-                Ok(admitted) => {
+            let cert = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                certify(u, &merged.content)
+            }))
+            .unwrap_or_else(|_| Err("the certificate crashed on this file".into()));
+            match cert {
+                Ok((admitted, true)) => {
+                    let v = gate(u, &Candidate::File(merged.content.clone()));
+                    if v.pass() {
+                        report.status = Status::Verified;
+                        report.rule = "elem_union";
+                        report.reason = format!(
+                            "weave's element union passed the independent element check \
+                             (both-changed regions admitted by: {}) and the gate; no resolver \
+                             was asked",
+                            admitted.join(", ")
+                        );
+                        report.sha256 = Some(sha256(&merged.content));
+                        report.landed = Landed::File(merged.content);
+                        return Ok(report);
+                    }
+                    unproven = format!(
+                        "weave's element union passed the element check but not the gate ({}); ",
+                        v.reasons.join(", ")
+                    );
+                }
+                Ok((admitted, false)) => {
                     report.status = Status::Proven;
                     report.rule = "certificate";
                     report.reason = if admitted.is_empty() {
@@ -950,9 +1001,12 @@ pub fn land_unit(u: &Unit, host: &Host, resolver: Option<&Resolver>) -> R<FileRe
     Ok(report)
 }
 
-/// The certificate on weave's clean merge: `Ok(allowances that admitted a
-/// both-changed region)` when certified, `Err(why not)` otherwise.
-fn certify(u: &Unit, merged: &str) -> Result<Vec<&'static str>, String> {
+/// The certificate on weave's clean merge: `Ok((allowances that admitted a
+/// both-changed region, whether one needed [`UNION_ALLOWANCES`]))` when every
+/// both-changed region is admitted — or, failing that, when `elem_union`
+/// admits the whole file as one statement list — and `Err(why not)`
+/// otherwise.
+fn certify(u: &Unit, merged: &str) -> Result<(Vec<&'static str>, bool), String> {
     use weave_certify::{check, decompose, normalize};
     let version = |t: Option<&str>| t.map(|t| decompose(&REGISTRY, &u.path, &normalize(t)));
     let (o, a, b) = (
@@ -962,15 +1016,38 @@ fn certify(u: &Unit, merged: &str) -> Result<Vec<&'static str>, String> {
     );
     let m = decompose(&REGISTRY, &u.path, &normalize(merged));
     let r = check(&u.path, o.as_ref(), a.as_ref(), b.as_ref(), &m);
+    by_region(&r).or_else(|why| {
+        // Both sides inserting top-level declarations at one point leaves the
+        // text after an inserted entity a region neither side wrote; the
+        // whole file read as one statement list may still be a union.
+        match (a.as_ref(), b.as_ref()) {
+            (Some(a), Some(b)) if weave_certify::elem_union_file(&u.path, o.as_ref(), a, b, &m).is_ok() => {
+                Ok((vec!["elem_union (whole file)"], true))
+            }
+            _ => Err(why),
+        }
+    })
+}
+
+/// The certificate's verdict region by region (see [`certify`]).
+fn by_region(r: &weave_certify::Report) -> Result<(Vec<&'static str>, bool), String> {
     if let Some((rule, key)) = r.hard.first() {
         return Err(format!("{rule} at `{key}`"));
     }
     let mut admitted: Vec<&'static str> = Vec::new();
+    let mut union = false;
     for (key, verdicts) in &r.both {
-        let by = verdicts
-            .iter()
-            .find(|(a, s)| PROOF_ALLOWANCES.contains(a) && *s == "admit")
-            .map(|(a, _)| *a);
+        let admits = |set: &[&str]| {
+            verdicts
+                .iter()
+                .find(|(a, s)| set.contains(a) && *s == "admit")
+                .map(|(a, _)| *a)
+        };
+        let by = admits(&PROOF_ALLOWANCES).or_else(|| {
+            let a = admits(&UNION_ALLOWANCES);
+            union |= a.is_some();
+            a
+        });
         match by {
             Some(a) if !admitted.contains(&a) => admitted.push(a),
             Some(_) => {}
@@ -981,7 +1058,7 @@ fn certify(u: &Unit, merged: &str) -> Result<Vec<&'static str>, String> {
             }
         }
     }
-    Ok(admitted)
+    Ok((admitted, union))
 }
 
 fn sha256(text: &str) -> String {
@@ -1236,6 +1313,7 @@ pub fn document(plan: &Plan, reports: &[FileReport], mode: &str) -> serde_json::
             "mode": mode,
         },
         "proof_allowances": PROOF_ALLOWANCES,
+        "union_allowances": UNION_ALLOWANCES,
         "summary": {
             "proven": count(Status::Proven),
             "verified": count(Status::Verified),
@@ -1491,6 +1569,39 @@ mod tests {
             follow_newlines("a\nb\n".into(), &["x\r\n", "y\r\n"]),
             "a\r\nb\r\n"
         );
+    }
+
+    // An element union inside a class: both sides add an entry at one point of a
+    // registry dict. The union is admitted only by the `elem_union` check; a
+    // result with one side's entry removed, or base order changed, is not
+    // admitted by anything, so it could never land without the resolver.
+    #[test]
+    fn certify_admits_an_element_union_and_refuses_a_tampered_one() {
+        let base = "class Gen:\n    TRANSFORMS = {\n        exp.Abs: rename_func(\"ABS\"),\n        exp.IntDiv: rename_func(\"DIV\"),\n        exp.Mod: rename_func(\"MOD\"),\n    }\n";
+        let at = "        exp.IntDiv: rename_func(\"DIV\"),\n";
+        let ins = |x: &str| base.replace(at, &format!("{at}{x}"));
+        let (fin, unix) = (
+            "        exp.IsFinite: rename_func(\"IS_FINITE\"),\n",
+            "        exp.TimeToUnix: rename_func(\"UNIX_SECONDS\"),\n",
+        );
+        let (ours, theirs) = (ins(fin), ins(unix));
+        let u = unit("gen.py", base, &ours, &theirs, "");
+        let union = ins(&format!("{fin}{unix}"));
+        assert_eq!(certify(&u, &union), Ok((vec!["elem_union"], true)));
+        // and weave's own merge is that union, or the other order
+        let host = Host::default();
+        let merged = entity_merge_fmt(base, &ours, &theirs, "gen.py", &MarkerFormat::default(), &host);
+        assert!(merged.is_clean());
+        assert_eq!(certify(&u, &merged.content), Ok((vec!["elem_union"], true)));
+        let abs = "        exp.Abs: rename_func(\"ABS\"),\n";
+        for (what, bad) in [
+            ("ours dropped", union.replace(fin, "")),
+            ("theirs dropped", union.replace(unix, "")),
+            ("base order changed", union.replace(&format!("{abs}{at}"), &format!("{at}{abs}"))),
+            ("an entry rewritten", union.replace("UNIX_SECONDS", "UNIX_MILLIS")),
+        ] {
+            assert!(certify(&u, &bad).is_err(), "{what}: {:?}", certify(&u, &bad));
+        }
     }
 
     #[test]

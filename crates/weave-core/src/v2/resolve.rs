@@ -33,6 +33,9 @@ pub(crate) struct ResolveCtx<'a> {
     /// What this merge may reach outside itself. `container_merge` asks it for
     /// a second-opinion line merge when the in-process one refuses.
     pub host: &'a crate::host::Host,
+    /// The file being merged: the language of an element union, and where
+    /// its `weave-set` declaration is read.
+    pub file_path: &'a str,
 }
 
 /// What resolve decided, plus the facts `bind` needs from it.
@@ -446,6 +449,12 @@ fn intra_entity(
         ) {
             let complexity = classify_conflict(Some(base_rc), Some(ours_rc), Some(theirs_rc));
             if inner.has_conflicts {
+                // The member-wise merge left a member conflicted; the element
+                // union reads the whole body and may unite what the member
+                // ladder could only see as two neighbouring lines.
+                if let Some(r) = element_union(base_rc, ours_rc, theirs_rc, ctx, &out_name) {
+                    return r;
+                }
                 return Resolved {
                     disposition: Disposition::Conflict {
                         text: inner.content,
@@ -473,6 +482,16 @@ fn intra_entity(
                 rename: None,
                 tally: Tally::BothMerged,
             };
+        }
+    }
+
+    // Collections inside the body — a map, a switch, a test table — that both
+    // sides inserted into: united element by element where the collection's
+    // meaning does not depend on order (`elements.rs`). Every verdict this can
+    // move was already a conflict.
+    if rename.is_none() {
+        if let Some(r) = element_union(base_rc, ours_rc, theirs_rc, ctx, &out_name) {
+            return r;
         }
     }
 
@@ -562,6 +581,25 @@ fn intra_entity(
     conflict_disposition(conflict, ctx, strategy)
 }
 
+fn element_union(
+    base_rc: &str,
+    ours_rc: &str,
+    theirs_rc: &str,
+    ctx: &ResolveCtx<'_>,
+    out_name: &str,
+) -> Option<Resolved> {
+    let merged = crate::elements::union(base_rc, ours_rc, theirs_rc, ctx.file_path, ctx.host)?;
+    Some(Resolved {
+        disposition: Disposition::Emit {
+            text: merged,
+            name: out_name.to_string(),
+        },
+        strategy: ResolutionStrategy::ElementUnion,
+        rename: None,
+        tally: Tally::BothMerged,
+    })
+}
+
 pub(crate) fn inner_merge(
     arena: &Arena,
     triple: &Triple,
@@ -614,6 +652,7 @@ pub(crate) fn inner_merge(
         license,
         evidence,
         ctx.host,
+        ctx.file_path,
     )
 }
 

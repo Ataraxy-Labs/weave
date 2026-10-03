@@ -24,6 +24,8 @@ use std::collections::{HashMap, HashSet};
 
 use std::rc::Rc;
 
+pub mod elem;
+
 struct Ent {
     id: String,
     parent: Option<String>,
@@ -36,6 +38,8 @@ struct Src {
     t: String,
     off: Vec<usize>,
     ents: Vec<Ent>,
+    /// The parse tree, for languages `elem_union` reads (else `None`).
+    tree: Option<tree_sitter::Tree>,
 }
 
 pub struct Version {
@@ -43,6 +47,8 @@ pub struct Version {
     pub text: HashMap<String, String>,
     /// For a single-entity region key: (sem-core id, first line, last line).
     span: HashMap<String, (String, usize, usize)>,
+    /// Every region key: its byte range [lo, hi) in the source.
+    bytes: HashMap<String, (usize, usize)>,
     src: Rc<Src>,
 }
 
@@ -74,7 +80,10 @@ pub fn decompose(reg: &ParserRegistry, path: &str, t: &str) -> Version {
         .filter(|e| e.entity_type != "chunk" && e.start_line >= 1 && e.start_line <= n && e.end_line >= e.start_line)
         .map(|e| Ent { s: e.start_line - 1, e: e.end_line.min(n) - 1, tn: format!("{}::{}", e.entity_type, e.name), id: e.id, parent: e.parent_id })
         .collect();
-    build(Rc::new(Src { t: t.to_string(), off, ents }), 0, n, None)
+    // Entities come from `extract_entities` exactly as before; the tree is a
+    // second parse, taken only where `elem_union` can use it.
+    let tree = elem::lang(path).and_then(|_| reg.extract_entities_with_tree(path, t)).and_then(|(_, tree)| tree);
+    build(Rc::new(Src { t: t.to_string(), off, ents, tree }), 0, n, None)
 }
 
 /// Regions of lines [lo, hi) cut at the entities whose parent is `parent`.
@@ -101,21 +110,21 @@ fn build(src: Rc<Src>, lo: usize, hi: usize, parent: Option<&str>) -> Version {
             _ => ents.push((s, e, key, Some(id))),
         }
     }
-    let slice = |a: usize, b: usize| src.t[src.off[a]..src.off[b]].to_string();
-    let (mut keys, mut text, mut span) = (vec![], HashMap::new(), HashMap::new());
-    let mut push = |k: String, s: String| {
+    let (mut keys, mut text, mut span, mut bytes) = (vec![], HashMap::new(), HashMap::new(), HashMap::new());
+    let mut push = |k: String, a: usize, b: usize| {
         keys.push(k.clone());
-        text.insert(k, s);
+        text.insert(k.clone(), src.t[src.off[a]..src.off[b]].to_string());
+        bytes.insert(k, (src.off[a], src.off[b]));
     };
-    push("^".into(), slice(lo, ents.first().map_or(hi, |e| e.0)));
+    push("^".into(), lo, ents.first().map_or(hi, |e| e.0));
     for (i, (s, e, k, id)) in ents.iter().enumerate() {
-        push(k.clone(), slice(*s, e + 1));
-        push(format!("after:{k}"), slice(e + 1, ents.get(i + 1).map_or(hi, |x| x.0)));
+        push(k.clone(), *s, e + 1);
+        push(format!("after:{k}"), e + 1, ents.get(i + 1).map_or(hi, |x| x.0));
         if let Some(id) = id {
             span.insert(k.clone(), (id.to_string(), *s, *e));
         }
     }
-    Version { keys, text, span, src: src.clone() }
+    Version { keys, text, span, bytes, src: src.clone() }
 }
 
 /// The children of region `k` as a Version of their own, if `k` is one entity.
@@ -591,7 +600,10 @@ pub struct Report {
     pub both: Vec<(String, Vec<(&'static str, &'static str)>)>,
 }
 
-pub const ALLOWANCES: [&str; 9] = ["diff3", "imp_strict", "imp_loose", "union", "subsume_any", "subsume", "subsume_ins", "nest", "imp_used"];
+pub const ALLOWANCES: [&str; 11] = [
+    "diff3", "imp_strict", "imp_loose", "union", "subsume_any", "subsume", "subsume_ins", "nest", "imp_used",
+    "elem_union", "nest_eu",
+];
 
 impl Report {
     /// Certified with this set of allowances enabled.
@@ -619,18 +631,28 @@ fn allowances(path: &str, k: &str, o: Option<&Version>, a: &Version, b: &Version
         (None, None) => "conflict",
         _ => "mismatch",
     };
-    let nest = match (descend(o, k), descend(Some(a), k), descend(Some(b), k), descend(Some(m), k)) {
+    // `nest`: the children are the selection, recursively. `nest_eu`: the
+    // same, where a child may also be admitted by `elem_union`.
+    let (nest, nest_eu) = match (descend(o, k), descend(Some(a), k), descend(Some(b), k), descend(Some(m), k)) {
         (so, Some(sa), Some(sb), Some(sm)) if so.is_some() || ok.is_none() => {
             let sub = check(path, so.as_ref(), Some(&sa), Some(&sb), &sm);
-            if !sub.hard.is_empty() {
-                "mismatch"
-            } else if sub.certified(&["nest"]) {
-                "admit"
-            } else {
-                "conflict"
-            }
+            let v = |allow: &[&str]| {
+                if !sub.hard.is_empty() {
+                    "mismatch"
+                } else if sub.certified(allow) {
+                    "admit"
+                } else {
+                    "conflict"
+                }
+            };
+            (v(&["nest"]), v(&["nest", "nest_eu", "elem_union"]))
         }
-        _ => "decline",
+        _ => ("decline", "decline"),
+    };
+    let eu = match elem_union(path, k, o, a, b, m) {
+        Ok(()) => "admit",
+        Err(elem::Fail::Mismatch(_)) => "mismatch",
+        Err(elem::Fail::Decline(_)) => "decline",
     };
     vec![
         ("diff3", verdict(diff3(o_, a_, b_), m_)),
@@ -642,7 +664,36 @@ fn allowances(path: &str, k: &str, o: Option<&Version>, a: &Version, b: &Version
         ("subsume_ins", if ok.is_some() { verdict(subsume(o_, a_, b_, true).map(String::from), m_) } else { "decline" }),
         ("nest", nest),
         ("imp_used", if region && ok.is_some() { import_used(path, o_, a_, b_, m_, &m.src.t) } else { "decline" }),
+        ("elem_union", eu),
+        ("nest_eu", nest_eu),
     ]
+}
+
+/// The `elem_union` check of region `k` (see [`elem`]): `Ok` = admitted.
+/// Only a region present in all four versions, with a base, in a language
+/// [`elem`] reads, is examined; anything else declines.
+pub fn elem_union(path: &str, k: &str, o: Option<&Version>, a: &Version, b: &Version, m: &Version) -> Result<(), elem::Fail> {
+    let no = |why: &str| elem::Fail::Decline(why.to_string());
+    let o = o.ok_or_else(|| no("no base"))?;
+    let vs = [o, a, b, m];
+    let mut ranges = [(0, 0); 4];
+    let mut roots = Vec::with_capacity(4);
+    for (v, x) in vs.iter().enumerate() {
+        ranges[v] = *x.bytes.get(k).ok_or_else(|| no("not a region of this version"))?;
+        roots.push(x.src.tree.as_ref().ok_or_else(|| no("no parse tree"))?.root_node());
+    }
+    elem::check_region(path, std::array::from_fn(|v| vs[v].src.t.as_str()), [roots[0], roots[1], roots[2], roots[3]], ranges)
+}
+
+/// `elem_union` over the whole file (see [`elem::check_file`]).
+pub fn elem_union_file(path: &str, o: Option<&Version>, a: &Version, b: &Version, m: &Version) -> Result<(), elem::Fail> {
+    let no = |why: &str| elem::Fail::Decline(why.to_string());
+    let vs = [o.ok_or_else(|| no("no base"))?, a, b, m];
+    let mut roots = Vec::with_capacity(4);
+    for x in vs {
+        roots.push(x.src.tree.as_ref().ok_or_else(|| no("no parse tree"))?.root_node());
+    }
+    elem::check_file(path, std::array::from_fn(|v| vs[v].src.t.as_str()), [roots[0], roots[1], roots[2], roots[3]])
 }
 
 fn get<'a>(v: Option<&'a Version>, k: &str) -> Option<&'a String> {

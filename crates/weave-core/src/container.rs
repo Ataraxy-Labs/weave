@@ -548,6 +548,7 @@ fn merge_trivia(
     license: License,
     evidence: &mut Vec<LicensedGap>,
     host: &Host,
+    path: &str,
 ) -> String {
     if o == t {
         return o.to_string();
@@ -559,6 +560,11 @@ fn merge_trivia(
         return o.to_string();
     }
     if let Some(merged) = diffy_merge(b, o, t).or_else(|| granted_line_merge(host, b, o, t)) {
+        return merged;
+    }
+    // An attribute block is where a class keeps its registries
+    // (`TRANSFORMS = {…}`): both sides adding an entry is an element union.
+    if let Some(merged) = crate::elements::union(b, o, t, path, host) {
         return merged;
     }
     // An attribute block is a sequence of statements, not merely opaque
@@ -682,6 +688,7 @@ pub(crate) fn container_merge(
     license: License,
     evidence: &mut Vec<LicensedGap>,
     host: &Host,
+    path: &str,
 ) -> Option<InnerMergeResult> {
     let b = decompose(base, base_children, base_start_line)?;
     let o = decompose(ours, ours_children, ours_start_line)?;
@@ -706,6 +713,7 @@ pub(crate) fn container_merge(
         license,
         &mut evidence_local,
         host,
+        path,
     ));
 
     out.push_str(&merge_trivia(
@@ -718,6 +726,7 @@ pub(crate) fn container_merge(
         license,
         &mut evidence_local,
         host,
+        path,
     ));
 
     for key in &order {
@@ -745,6 +754,7 @@ pub(crate) fn container_merge(
                 license,
                 &mut evidence_local,
                 host,
+                path,
             ),
             (Some(lo), None) => lo.to_string(),
             (None, Some(lt)) => lt.to_string(),
@@ -766,6 +776,9 @@ pub(crate) fn container_merge(
                     diffy_merge(pb, po, pt)
                         .or_else(|| granted_line_merge(host, pb, po, pt))
                         .or_else(|| try_decorator_aware_merge(pb, po, pt, decorators_compose))
+                        // A member that is a collection both sides inserted
+                        // into: `elements.rs`.
+                        .or_else(|| crate::elements::union(pb, po, pt, path, host))
                         // One level further down: the member's own body is a
                         // sequence of statements. Same table, same fold.
                         .or_else(|| {
@@ -872,6 +885,7 @@ pub(crate) fn container_merge(
         license,
         &mut evidence_local,
         host,
+        path,
     ));
     out.push_str(&merge_trivia(
         "closing",
@@ -883,6 +897,7 @@ pub(crate) fn container_merge(
         license,
         &mut evidence_local,
         host,
+        path,
     ));
     if !ours.ends_with('\n') {
         while out.ends_with('\n') {

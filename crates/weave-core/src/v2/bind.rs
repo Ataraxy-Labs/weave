@@ -730,6 +730,7 @@ fn composed_by_the_merge(strategy: &ResolutionStrategy) -> bool {
             | ResolutionStrategy::DecoratorMerged
             | ResolutionStrategy::InnerMerged
             | ResolutionStrategy::StatementMerged
+            | ResolutionStrategy::ElementUnion
     )
 }
 

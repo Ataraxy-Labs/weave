@@ -3641,6 +3641,7 @@ version = "0.1.0"
 dependencies = [
  "sem-core",
  "serde_json",
+ "tree-sitter",
 ]
 
 [[package]]

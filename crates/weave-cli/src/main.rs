@@ -135,7 +135,10 @@ enum Commands {
     /// conflicts on:
     ///
     ///   1. weave merges it. A clean result that the independent merge
-    ///      certificate proves is the three-way selection is PROVEN.
+    ///      certificate proves is the three-way selection is PROVEN. A clean
+    ///      element union (entries two sides added to one map, switch, test
+    ///      table...) that the certificate's own element check admits, and
+    ///      that passes the gate of step 3, is VERIFIED with no resolver call.
     ///
     ///   2. Anything else goes to --resolver <cmd>, any program: it gets the
     ///      file's base/ours/theirs/conflicted text and path as JSON on stdin

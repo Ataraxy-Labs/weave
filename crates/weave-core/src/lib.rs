@@ -9,6 +9,7 @@ pub(crate) mod container;
 pub mod datafile;
 pub(crate) mod dataunion;
 pub(crate) mod determinate;
+pub(crate) mod elements;
 pub mod diagnose;
 pub mod explain;
 pub mod frame;

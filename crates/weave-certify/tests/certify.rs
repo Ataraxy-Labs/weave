@@ -361,3 +361,245 @@ fn references_skip_comments_strings_and_prefixes() {
     let r = references("x.ts", "const t = `lit ${u}` + v; /* w */\n");
     assert!(r.contains("v") && !r.contains("lit") && !r.contains("w"), "{r:?}");
 }
+
+// ---------------------------------------------------------------- elem_union
+
+/// Every both-changed region's `elem_union` verdict, and whether the whole
+/// file is certified with it.
+fn eu(path: &str, o: &str, a: &str, b: &str, m: &str) -> (Vec<&'static str>, bool) {
+    let r = run_at(path, o, a, b, m);
+    assert!(r.hard.is_empty(), "{path}: {:?}", r.hard);
+    let v = r.both.iter().map(|(_, v)| v.iter().find(|(n, _)| *n == "elem_union").unwrap().1).collect();
+    (v, r.certified(&["elem_union", "nest_eu", "nest"]))
+}
+
+const PY_CLASS: &str = "class Gen:\n    TRANSFORMS = {\n        exp.Abs: rename_func(\"ABS\"),\n        exp.IntDiv: rename_func(\"DIV\"),\n        exp.Mod: rename_func(\"MOD\"),\n    }\n\n    def f(self):\n        return 1\n";
+
+fn py_sides() -> (String, String, String) {
+    let at = "        exp.IntDiv: rename_func(\"DIV\"),\n";
+    let ins = |x: &str| PY_CLASS.replace(at, &format!("{at}{x}"));
+    let a = ins("        exp.IsFinite: lambda self, e: self.sql(\n            e.this\n        ),\n");
+    let b = ins("        exp.TimeToUnix: rename_func(\"UNIX_SECONDS\"),\n");
+    let m = ins("        exp.IsFinite: lambda self, e: self.sql(\n            e.this\n        ),\n        exp.TimeToUnix: rename_func(\"UNIX_SECONDS\"),\n");
+    (a, b, m)
+}
+
+#[test]
+fn elem_union_admits_two_entries_added_at_one_point_of_a_dict_in_a_class() {
+    let (a, b, m) = py_sides();
+    let (v, ok) = eu("gen.py", PY_CLASS, &a, &b, &m);
+    assert_eq!(v, ["admit"]);
+    assert!(ok);
+    // the other order is a union too (a dict is a set of keys)
+    let m2 = m.replace(
+        "        exp.IsFinite: lambda self, e: self.sql(\n            e.this\n        ),\n        exp.TimeToUnix: rename_func(\"UNIX_SECONDS\"),\n",
+        "        exp.TimeToUnix: rename_func(\"UNIX_SECONDS\"),\n        exp.IsFinite: lambda self, e: self.sql(\n            e.this\n        ),\n",
+    );
+    assert_eq!(eu("gen.py", PY_CLASS, &a, &b, &m2).0, ["admit"]);
+    // and a method one side added elsewhere in the class does not get in the way
+    let a3 = a.replace("        return 1\n", "        return 1\n\n    def g(self):\n        return 2\n");
+    let m3 = m.replace("        return 1\n", "        return 1\n\n    def g(self):\n        return 2\n");
+    assert_eq!(eu("gen.py", PY_CLASS, &a3, &b, &m3).0, ["admit"]);
+}
+
+#[test]
+fn elem_union_refuses_a_tampered_merge() {
+    let (a, b, m) = py_sides();
+    let finite = "        exp.IsFinite: lambda self, e: self.sql(\n            e.this\n        ),\n";
+    let unix = "        exp.TimeToUnix: rename_func(\"UNIX_SECONDS\"),\n";
+    let abs = "        exp.Abs: rename_func(\"ABS\"),\n";
+    let div = "        exp.IntDiv: rename_func(\"DIV\"),\n";
+    let cases = [
+        // one side's element removed
+        ("ours dropped", m.replace(finite, "")),
+        ("theirs dropped", m.replace(unix, "")),
+        // base order changed
+        ("base reordered", m.replace(&format!("{abs}{div}"), &format!("{div}{abs}"))),
+        // a side's element not verbatim
+        ("rewritten", m.replace("UNIX_SECONDS", "UNIX_MILLIS")),
+        // an element nobody wrote
+        ("invented", m.replace(unix, &format!("{unix}        exp.Ln: rename_func(\"LN\"),\n"))),
+        // stated twice
+        ("doubled", m.replace(unix, &format!("{unix}{unix}"))),
+        // a base element dropped
+        ("base dropped", m.replace(abs, "")),
+    ];
+    for (what, bad) in cases {
+        let (v, ok) = eu("gen.py", PY_CLASS, &a, &b, &bad);
+        assert_ne!(v, ["admit"], "{what}");
+        assert!(!ok, "{what}");
+    }
+}
+
+#[test]
+fn elem_union_refuses_one_key_inserted_twice_differently() {
+    let at = "        exp.IntDiv: rename_func(\"DIV\"),\n";
+    let a = PY_CLASS.replace(at, &format!("{at}        exp.Ln: rename_func(\"LN\"),\n"));
+    let b = PY_CLASS.replace(at, &format!("{at}        exp.Ln: rename_func(\"LOG\"),\n"));
+    let m = PY_CLASS.replace(at, &format!("{at}        exp.Ln: rename_func(\"LN\"),\n        exp.Ln: rename_func(\"LOG\"),\n"));
+    assert_ne!(eu("gen.py", PY_CLASS, &a, &b, &m).0, ["admit"]);
+    // the same entry from both sides is one entry
+    let same = PY_CLASS.replace(at, &format!("{at}        exp.Ln: rename_func(\"LN\"),\n"));
+    let other = same.replace("        return 1\n", "        return 3\n");
+    assert_eq!(eu("gen.py", PY_CLASS, &same, &other, &other).0, ["admit"], "{:?}", eu_why("gen.py", PY_CLASS, &same, &other, &other));
+}
+
+const GO_SWITCH: &str = "package vm\n\nfunc (vm *VM) Run() {\n\tfor {\n\t\tswitch op {\n\t\tcase OpPush:\n\t\t\tvm.push()\n\n\t\tcase OpEnd:\n\t\t\treturn\n\t\t}\n\t}\n}\n";
+
+#[test]
+fn elem_union_go_switch_cases_and_fallthrough() {
+    let ins = |x: &str| GO_SWITCH.replace("\t\tcase OpEnd:", &format!("{x}\t\tcase OpEnd:"));
+    let (sl, bn) = ("\t\tcase OpShiftLeft:\n\t\t\tvm.shl()\n\n", "\t\tcase OpBitNot:\n\t\t\tvm.not()\n\n");
+    let (a, b) = (ins(sl), ins(bn));
+    let m = ins(&format!("{bn}{sl}"));
+    assert_eq!(eu("vm/vm.go", GO_SWITCH, &a, &b, &m).0, ["admit"], "{:?}", eu_why("vm/vm.go", GO_SWITCH, &a, &b, &m));
+    // a case label both sides use
+    let b2 = ins("\t\tcase OpShiftLeft, OpX:\n\t\t\tvm.x()\n\n");
+    let m2 = ins(&format!("{sl}\t\tcase OpShiftLeft, OpX:\n\t\t\tvm.x()\n\n"));
+    assert_ne!(eu("vm/vm.go", GO_SWITCH, &a, &b2, &m2).0, ["admit"]);
+    // fallthrough makes adjacency meaning
+    let b3 = ins("\t\tcase OpBitNot:\n\t\t\tvm.not()\n\t\t\tfallthrough\n\n");
+    let m3 = ins(&format!("{sl}\t\tcase OpBitNot:\n\t\t\tvm.not()\n\t\t\tfallthrough\n\n"));
+    assert_ne!(eu("vm/vm.go", GO_SWITCH, &a, &b3, &m3).0, ["admit"]);
+}
+
+#[test]
+fn elem_union_go_iota_block_only_at_the_tail() {
+    let base = "package vm\n\nfunc ops() {\n\tconst (\n\t\tOpPush Opcode = iota\n\t\tOpPop\n\t\tOpEnd\n\t)\n}\n";
+    let a = base.replace("\tOpEnd\n", "\tOpEnd\n\tOpA\n");
+    let b = base.replace("\tOpEnd\n", "\tOpEnd\n\tOpB\n");
+    let m = base.replace("\tOpEnd\n", "\tOpEnd\n\tOpA\n\tOpB\n");
+    assert_eq!(eu("vm/op.go", base, &a, &b, &m).0, ["admit"], "{:?}", eu_why("vm/op.go", base, &a, &b, &m));
+    let a = base.replace("\tOpEnd\n", "\tOpA\n\tOpEnd\n");
+    let b = base.replace("\tOpEnd\n", "\tOpB\n\tOpEnd\n");
+    let m = base.replace("\tOpEnd\n", "\tOpA\n\tOpB\n\tOpEnd\n");
+    assert_ne!(eu("vm/op.go", base, &a, &b, &m).0, ["admit"]);
+}
+
+#[test]
+fn elem_union_js_object_and_ordered_lists() {
+    let base = "export const registry = {\n  alpha: 1,\n  omega: 9,\n};\n";
+    let a = base.replace("  omega", "  beta: 2,\n  omega");
+    let b = base.replace("  omega", "  gamma: 3,\n  omega");
+    let m = base.replace("  omega", "  beta: 2,\n  gamma: 3,\n  omega");
+    assert_eq!(eu("src/reg.js", base, &a, &b, &m).0, ["admit"]);
+    // a missing comma is not a separator
+    let bad = base.replace("  omega", "  beta: 2\n  gamma: 3,\n  omega");
+    assert_ne!(eu("src/reg.js", base, &a, &b, &bad).0, ["admit"]);
+    // an array outside a test file is ordered: both inserting at one point is not a union
+    let base = "export const steps = [\n  alpha,\n  omega,\n];\n";
+    let a = base.replace("  omega", "  beta,\n  omega");
+    let b = base.replace("  omega", "  gamma,\n  omega");
+    let m = base.replace("  omega", "  beta,\n  gamma,\n  omega");
+    assert_eq!(eu("src/steps.js", base, &a, &b, &m).0, ["decline"]);
+    // in a test file, a named table is
+    assert_eq!(eu("test/steps.test.js", base, &a, &b, &m).0, ["admit"]);
+}
+
+#[test]
+fn elem_union_statements_one_side_insertion_must_not_touch_the_other_side_s_edit() {
+    let base = "function f() {\n  a();\n  b();\n  c();\n  d();\n}\n";
+    // ours inserts after a(); theirs edits d(): apart, a union
+    let a = base.replace("  b();\n", "  x();\n  b();\n");
+    let b = base.replace("  d();\n", "  d(1);\n");
+    let m = base.replace("  b();\n", "  x();\n  b();\n").replace("  d();\n", "  d(1);\n");
+    assert_eq!(eu("src/f.js", base, &a, &b, &m).0, ["admit"]);
+    // theirs edits b(), right next to ours' insertion: refused
+    let b = base.replace("  b();\n", "  b(1);\n");
+    let m = base.replace("  b();\n", "  x();\n  b(1);\n");
+    assert_eq!(eu("src/f.js", base, &a, &b, &m).0, ["decline"]);
+}
+
+/// Why `elem_union` declines or rejects each both-changed region (debugging aid).
+#[allow(dead_code)]
+fn eu_why(path: &str, o: &str, a: &str, b: &str, m: &str) -> Vec<String> {
+    let reg = create_default_registry();
+    let d = |t: &str| decompose(&reg, path, t);
+    let (o, a, b, m) = (d(o), d(a), d(b), d(m));
+    let r = check(path, Some(&o), Some(&a), Some(&b), &m);
+    r.both.iter().map(|(k, _)| format!("{k}: {:?}", elem_union(path, k, Some(&o), &a, &b, &m))).collect()
+}
+
+/// `ELEM_PATH=<repo path> ELEM_DIR=<dir with o a b m> cargo test -p
+/// weave-certify elem_why_files -- --ignored --nocapture`: why `elem_union`
+/// declines each both-changed region of a real merge.
+#[test]
+#[ignore]
+fn elem_why_files() {
+    let (path, dir) = (std::env::var("ELEM_PATH").unwrap(), std::env::var("ELEM_DIR").unwrap());
+    let r = |n: &str| normalize(&std::fs::read_to_string(format!("{dir}/{n}")).unwrap());
+    for line in eu_why(&path, &r("o"), &r("a"), &r("b"), &r("m")) {
+        println!("{line}");
+    }
+    println!("whole file: {:?}", eu_file(&path, &r("o"), &r("a"), &r("b"), &r("m")));
+}
+
+#[test]
+fn elem_union_leaves_a_key_base_already_states_twice_to_base() {
+    // sqlglot's PostgresGenerator.TRANSFORMS states one key twice (the later
+    // entry wins); two entries added elsewhere are still a union.
+    let base = "class G:\n    T = {\n        exp.A: f,\n        exp.U: g,\n        exp.U: h,\n        exp.Z: z,\n    }\n";
+    let ins = |x: &str| base.replace("        exp.Z: z,\n", &format!("{x}        exp.Z: z,\n"));
+    let (a, b) = (ins("        exp.B: b,\n"), ins("        exp.C: c,\n"));
+    let m = ins("        exp.B: b,\n        exp.C: c,\n");
+    assert_eq!(eu("g.py", base, &a, &b, &m).0, ["admit"], "{:?}", eu_why("g.py", base, &a, &b, &m));
+    // an insertion may not join the duplicate
+    let b2 = ins("        exp.U: k,\n");
+    let m2 = ins("        exp.B: b,\n        exp.U: k,\n");
+    assert_ne!(eu("g.py", base, &a, &b2, &m2).0, ["admit"]);
+}
+
+fn eu_file(path: &str, o: &str, a: &str, b: &str, m: &str) -> Result<(), elem::Fail> {
+    let reg = create_default_registry();
+    let d = |t: &str| decompose(&reg, path, t);
+    elem_union_file(path, Some(&d(o)), &d(a), &d(b), &d(m))
+}
+
+#[test]
+fn elem_union_whole_file_admits_declarations_both_sides_appended() {
+    // Both sides append a function at the end of a Go file: the per-region
+    // certificate fails (the text after ours' new function is a region no side
+    // wrote); the file as one statement list of package-scope declarations is
+    // a union.
+    let base = "package lib\n\nfunc a() int {\n\treturn 1\n}\n";
+    let (fx, fy) = ("\nfunc x() int {\n\treturn 2\n}\n", "\nfunc y() int {\n\treturn 3\n}\n");
+    let (a, b) = (format!("{base}{fx}"), format!("{base}{fy}"));
+    let m = format!("{base}{fx}{fy}");
+    let r = run_at("lib/lib.go", base, &a, &b, &m);
+    assert!(!r.hard.is_empty(), "the per-region certificate cannot see it");
+    assert_eq!(eu_file("lib/lib.go", base, &a, &b, &m), Ok(()));
+    assert_eq!(eu_file("lib/lib.go", base, &a, &b, &format!("{base}{fy}{fx}")), Ok(()));
+    // tampered: a side's function dropped, or base's changed
+    assert!(eu_file("lib/lib.go", base, &a, &b, &a).is_err());
+    assert!(eu_file("lib/lib.go", base, &a, &b, &m.replace("return 1", "return 0")).is_err());
+    // one name declared by both sides, differently: refused
+    let b2 = format!("{base}\nfunc x() int {{\n\treturn 9\n}}\n");
+    assert!(eu_file("lib/lib.go", base, &a, &b2, &format!("{base}{fx}\nfunc x() int {{\n\treturn 9\n}}\n")).is_err());
+    // statements that are not declarations, at one point: not a union
+    let pb = "x = 1\n";
+    assert!(eu_file("m.py", pb, "x = 1\nf()\n", "x = 1\ng()\n", "x = 1\nf()\ng()\n").is_err());
+    assert_eq!(eu_file("m.py", pb, "x = 1\n\ndef f():\n    pass\n", "x = 1\n\ndef g():\n    pass\n", "x = 1\n\ndef f():\n    pass\n\ndef g():\n    pass\n"), Ok(()));
+}
+
+/// `ELEM_CASES=<dir> cargo test -p weave-certify elem_cases -- --ignored
+/// --nocapture`: for each `<dir>/<case>/{path,o,a,b,m}`, whether `weave land`'s
+/// certificate (v2 rule set plus elem_union / nest_eu, or the whole file)
+/// admits `m`. For mutation runs over real merges.
+#[test]
+#[ignore]
+fn elem_cases() {
+    let root = std::env::var("ELEM_CASES").unwrap();
+    let reg = create_default_registry();
+    let mut dirs: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().map(|e| e.path()).collect();
+    dirs.sort();
+    for d in dirs {
+        let r = |n: &str| normalize(&std::fs::read_to_string(d.join(n)).unwrap());
+        let path = r("path").trim().to_string();
+        let v = |t: &str| decompose(&reg, &path, t);
+        let (o, a, b, m) = (v(&r("o")), v(&r("a")), v(&r("b")), v(&r("m")));
+        let rep = check(&path, Some(&o), Some(&a), Some(&b), &m);
+        let regional = rep.certified(&["imp_used", "subsume_ins", "nest", "elem_union", "nest_eu"]);
+        let admitted = regional || elem_union_file(&path, Some(&o), &a, &b, &m).is_ok();
+        println!("{} {}", d.file_name().unwrap().to_string_lossy(), if admitted { "ADMIT" } else { "refuse" });
+    }
+}

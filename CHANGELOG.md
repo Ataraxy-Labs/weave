@@ -9,6 +9,64 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+### Added — insertions into one collection inside one entity merge as a union
+
+Two branches that each add an entry to the same registry map, a case to the
+same switch, or a row to the same test table used to conflict whenever the
+two additions landed on neighbouring lines, even though the entity merge had
+already narrowed the conflict to one function. A new rung of the entity
+ladder (`weave_core::elements`, tried after the container merge and before
+the statement fold) merges such collections element by element: each side
+must only insert, delete what the other left alone, or modify; insertions
+both sides made at one point are ordered by key, so the answer is the same
+from either direction.
+
+By default it unites only collections whose meaning does not depend on
+order: Go map and keyed struct literals, JS object literals and export lists,
+Python dicts (constant or dotted-name keys), Go switches with a tag and no
+`fallthrough`, JS switches whose cases cannot fall through, distinctly
+named declarations (JS `function`, Go top-level `func`, Python `def`), Go `const`
+blocks without `iota` or appended after their last constant, and slice /
+array / list literals in test files. Ordered collections in product code,
+runs of registry calls (`frame.bind("k", …)`), and `iota` insertions ahead of
+an existing constant need the `weave-set` attribute. A key or case label
+inserted twice, an element both sides changed that does not itself merge, a
+type switch or tagless switch, and anything that does not reparse stay
+conflicts. `WEAVE_DEBUG_ELEMENTS=1` says which guard refused.
+
+### Added — `weave land` lands an element union without the resolver
+
+weave's element union was clean, but `weave land`'s certificate did not
+cover it, so every such file still went to the resolver. The certificate
+(`weave-certify`) now has `elem_union`, its own check of an element union,
+read from the four parse trees and sharing no code with the merge: every
+element a side inserted is in the result verbatim, base elements keep base
+order, no key, case label, constant or declared name is stated twice, a
+point both sides inserted at is in a construct the (auto) policy treats as a
+set, and every subtree parses. A file whose both-changed regions need it
+(or `nest_eu`, `nest` over children it admits) lands VERIFIED, with rule
+`elem_union` and no resolver call, after passing the same gate a resolver's
+answer must pass. It is not PROVEN: the PROVEN rule set is
+the fixed proof set. Collections opted in with `weave-set` are not covered by
+the check and still go to the resolver. The report gains `union_allowances`.
+
+The same check also reads a whole file as one statement list when the
+region-by-region verdict fails: both sides appending top-level declarations
+at one point (Go package-scope `func`/`type`/methods, JS `function`, Python
+`def`, distinct names) leaves the text after the first new entity a region
+neither side wrote, which the per-region certificate cannot admit. Such a
+file lands VERIFIED (`elem_union (whole file)`) under the same policy and
+gate; appended classes or other statements still go to the resolver.
+
+### Changed — a Go `iota` block is never silently renumbered
+
+Both sides inserting constants ahead of an existing one in an `iota` block
+gave that constant a value neither side wrote (`OpEnd` at `n+3`, where ours
+had `n+2` and theirs `n+1`), and weave merged it clean. The merge gate now
+refuses that (check `iota`) unless the file's `weave-set` attribute names the
+block by its type or first constant; appending after the last constant is
+unaffected.
+
 ### Fixed — `weave land` no longer verifies a one-sided resolution
 
 The gate behind `weave land --resolver` labelled VERIFIED an answer that kept

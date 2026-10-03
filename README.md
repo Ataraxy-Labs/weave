@@ -355,7 +355,7 @@ next two commands; see [Quickstart](#quickstart).
 | Status | Meaning |
 |---|---|
 | **PROVEN** | weave merged the file cleanly **and** an independent merge certificate (`crates/weave-certify`, which shares no merge code with weave) shows the result is the three-way selection of base, ours and theirs. Where both sides changed one region, only the rules `imp_used` (import lines, each one a side added still used by the merged file), `subsume_ins` and `nest` can admit it. |
-| **VERIFIED** | A resolver of your choice wrote the file, and its answer passed the exact gate below. |
+| **VERIFIED** | The answer passed the exact gate below, and either a resolver of your choice wrote it, or weave merged the file cleanly as an element union (two sides adding entries to one map, switch, const block or test table) that the certificate's own `elem_union` check admits — every inserted element verbatim, base order kept, no key twice, a construct the policy treats as a set, a result that parses. The check also reads the whole file as one statement list, so both sides appending distinctly named top-level functions (Go `func`/types/methods, JS `function`, Python `def`) lands the same way. The second needs no resolver call; it is VERIFIED, not PROVEN, because `elem_union` is not part of the proof rule set. |
 | **REFUSED** | Neither. The file keeps its conflict markers and stays unmerged, so `git commit` refuses. A rejected answer is never written. |
 
 ```bash
@@ -390,7 +390,7 @@ and `findings`, with `null` for an absent side. It prints the complete resolved 
 A failed answer gets one retry, with the findings fed back. It passes (VERIFIED) or it is
 refused, with the findings.
 
-In a pre-registered blind audit (n = 200 accepted files per arm), a cheap model resolving agent-PR
+In a blind audit (n = 200 accepted files per arm), a cheap model resolving agent-PR
 conflicts on its own had 22.0% of its accepted merges judged wrong. Behind this pipeline the
 figure was 9.5%. That gate did not have the both-sides rule (the last bullet), which was added
 after a one-sided answer was seen passing it.

@@ -411,6 +411,7 @@ pub(crate) fn merge_file(
         ours_all: &ours_all,
         theirs_all: &theirs_all,
         host,
+        file_path,
     };
     let mut resolved: Vec<resolve::Resolved> = matching
         .triples

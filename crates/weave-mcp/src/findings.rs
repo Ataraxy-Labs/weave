@@ -333,6 +333,7 @@ pub(crate) fn op_of(r: &ResolutionStrategy) -> Op {
         | ResolutionStrategy::DecoratorMerged
         | ResolutionStrategy::InnerMerged
         | ResolutionStrategy::StatementMerged
+        | ResolutionStrategy::ElementUnion
         | ResolutionStrategy::FootprintLicensed
         | ResolutionStrategy::RuleSettled { .. } => op.op = "edited",
         ResolutionStrategy::AddedOurs | ResolutionStrategy::AddedTheirs => op.op = "added",
@@ -919,6 +920,7 @@ mod tests {
             ResolutionStrategy::DecoratorMerged,
             ResolutionStrategy::InnerMerged,
             ResolutionStrategy::StatementMerged,
+            ResolutionStrategy::ElementUnion,
             ResolutionStrategy::FootprintLicensed,
             ResolutionStrategy::ConflictBothModified,
             ResolutionStrategy::ConflictStatementScoped,

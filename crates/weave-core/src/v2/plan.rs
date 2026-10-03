@@ -414,6 +414,7 @@ mod tests {
             ours_all: &[],
             theirs_all: &[],
             host: &crate::host::Host::default(),
+            file_path: "",
         };
         let resolved: Vec<_> = m
             .triples
@@ -459,6 +460,7 @@ mod tests {
             ours_all: &[],
             theirs_all: &[],
             host: &crate::host::Host::default(),
+            file_path: "",
         };
         let resolved: Vec<_> = m
             .triples
@@ -660,6 +662,7 @@ mod tests {
             ours_all: &[],
             theirs_all: &[],
             host: &crate::host::Host::default(),
+            file_path: "",
         };
         let mut resolved: Vec<_> = m
             .triples

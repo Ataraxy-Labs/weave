@@ -110,6 +110,9 @@ ENVIRONMENT:
                                  takes the line-level route (default 10). Read
                                  once, here, and handed to the merge.
     WEAVE_VERBOSE=1              print merge stats to stderr on every merge
+    WEAVE_DEBUG_ELEMENTS=1       say on stderr why the element union (two
+                                 sides inserting into one map, switch or
+                                 table) refused a collection
     WEAVE_STATS=1                accumulate lifetime counters in
                                  ~/.weave/stats.json (read by `weave stats`).
                                  Off by default: the merge path does no
@@ -125,6 +128,14 @@ ATTRIBUTES:
                                  container in the file; a value: the
                                  containers of those names. Read with
                                  `git check-attr`, only when needed.
+                                 Inside one function or object, maps, keyed
+                                 struct literals, dicts, object literals,
+                                 switch cases (no fallthrough) and test-file
+                                 tables unite without it; it opts in product
+                                 slices/arrays/lists (by variable name),
+                                 registry call runs (by method: `bind`), and
+                                 a Go iota block insertion that renumbers an
+                                 existing constant (by type: `Opcode`).
 
 EXIT CODES (three states, stable contract):
     exit 0    clean     — merge fully resolved AND verified; result written

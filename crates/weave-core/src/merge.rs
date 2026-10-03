@@ -124,6 +124,10 @@ pub enum ResolutionStrategy {
     /// The body was a sequence of statements and the statement triples merged
     /// (`statement.rs`). Reached only after every other clean path refused.
     StatementMerged,
+    /// Both sides inserted distinct elements into one collection inside the
+    /// body — a map, a switch, a test table — and the collection's meaning
+    /// does not depend on order (`elements.rs`).
+    ElementUnion,
     /// A conflict the whole ladder refused, resolved by `v2::bind` under
     /// disjoint composition: the two sides inserted into one slot and neither block
     /// writes what the other writes or reads. Every one of these
@@ -351,6 +355,7 @@ fn settle(
             &[],
         )
         .is_some()
+        || iota_refusal(base, ours, theirs, &settled.content, file_path, host).is_some()
     {
         return conflicted;
     }
@@ -698,6 +703,7 @@ fn fail_closed(
         .collect();
     let verify = |merged: &str, renames: &[(String, String)]| {
         crate::verify::verify(base, ours, theirs, merged, file_path, registry, renames)
+            .or_else(|| iota_refusal(base, ours, theirs, merged, file_path, host))
     };
     let Some(refusal) = verify(&composed.content, &renames) else {
         return composed;
@@ -732,6 +738,36 @@ fn fail_closed(
         stats,
         audit: composed.audit,
     }
+}
+
+/// A Go `iota` constant the merge gave a value neither side gave it.
+///
+/// Every constant after an insertion point of an `iota` block is renumbered.
+/// One side doing that is that side's edit; both sides inserting ahead of one
+/// constant renumber it to a value nobody wrote — `OpEnd` sits at `n + 3`
+/// where ours had `n + 2` and theirs `n + 1` — and code that depends on the
+/// number (a table, a wire format, a sentinel) breaks silently. Refused
+/// unless the file's `weave-set` declaration names the block (its type, or
+/// its first constant). See `elements.rs` for the policy.
+fn iota_refusal(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    merged: &str,
+    file_path: &str,
+    host: &Host,
+) -> Option<crate::verify::Unverified> {
+    let (names, constant) =
+        crate::elements::iota_renumbered(base, ours, theirs, merged, file_path)?;
+    if crate::host::SetScope::read(host, file_path).admits(&names) {
+        return None;
+    }
+    Some(crate::verify::Unverified {
+        check: "iota",
+        detail: format!(
+            "`{constant}` would take a value neither side gave it (both sides inserted ahead of it in one iota block)"
+        ),
+    })
 }
 
 pub(crate) fn is_whitespace_only_diff(a: &str, b: &str) -> bool {

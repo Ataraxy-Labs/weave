@@ -247,27 +247,52 @@ fn verified_by_the_gate() {
 
 #[test]
 fn a_clean_but_unproven_weave_merge_goes_to_the_resolver() {
-    // Each side appends a different function at the end: weave merges it, but
-    // the certificate does not admit weave's placement of the gap after them.
-    let base = "def a():\n    return 1\n\n\ndef b():\n    return 2\n";
-    let ours = "def a():\n    return 1\n\n\ndef b():\n    return 2\n\n\ndef d():\n    return 4\n";
-    let theirs = "def a():\n    return 1\n\n\ndef b():\n    return 2\n\n\ndef c():\n    return 3\n";
+    // Each side appends a different class at the end: weave merges it, but
+    // the certificate does not admit weave's placement of the gap after them,
+    // and a class is not a declaration whose order `elem_union` may ignore
+    // (its body runs where it stands).
+    let base = "class A:\n    x = 1\n\n\nclass B:\n    x = 2\n";
+    let ours = "class A:\n    x = 1\n\n\nclass B:\n    x = 2\n\n\nclass D:\n    x = 4\n";
+    let theirs = "class A:\n    x = 1\n\n\nclass B:\n    x = 2\n\n\nclass C:\n    x = 3\n";
     let root = mid_merge(
         "unproven",
         &[("m.py", Some(base), Some(ours), Some(theirs))],
     );
-    let good = "def a():\n    return 1\n\n\ndef b():\n    return 2\n\n\ndef d():\n    return 4\n\n\ndef c():\n    return 3\n";
+    let good = "class A:\n    x = 1\n\n\nclass B:\n    x = 2\n\n\nclass D:\n    x = 4\n\n\nclass C:\n    x = 3\n";
     let resolver = fake_resolver(&root, &[good]);
     let (code, doc) = land(&root, &["--resolver", &resolver]);
     assert_eq!(code, 0, "{doc:#}");
     let f = file(&doc, "m.py");
     assert_eq!(f["weave"], "clean");
     assert_eq!(f["status"], "VERIFIED");
+    assert_eq!(f["rule"], "gate");
     assert!(
         f["reason"].as_str().unwrap().contains("not certified"),
         "{f:#}"
     );
     assert_eq!(read(&root, "m.py"), good);
+}
+
+#[test]
+fn functions_both_sides_appended_land_as_a_whole_file_union() {
+    // The same with functions: the file read as one statement list of
+    // declarations is a union, so no resolver is asked.
+    let base = "def a():\n    return 1\n\n\ndef b():\n    return 2\n";
+    let ours = "def a():\n    return 1\n\n\ndef b():\n    return 2\n\n\ndef d():\n    return 4\n";
+    let theirs = "def a():\n    return 1\n\n\ndef b():\n    return 2\n\n\ndef c():\n    return 3\n";
+    let root = mid_merge(
+        "whole-file-union",
+        &[("m.py", Some(base), Some(ours), Some(theirs))],
+    );
+    let resolver = fake_resolver(&root, &[ours]);
+    let (code, doc) = land(&root, &["--resolver", &resolver]);
+    assert_eq!(code, 0, "{doc:#}");
+    let f = file(&doc, "m.py");
+    assert_eq!((f["status"].as_str(), f["rule"].as_str(), f["attempts"].as_u64()), (Some("VERIFIED"), Some("elem_union"), Some(0)), "{f:#}");
+    assert!(f["reason"].as_str().unwrap().contains("whole file"), "{f:#}");
+    assert!(!root.join("in.1").exists(), "the resolver was not called");
+    let landed = read(&root, "m.py");
+    assert!(landed.contains("def c():") && landed.contains("def d():"), "{landed}");
 }
 
 #[test]
@@ -620,7 +645,8 @@ fn json_schema_is_stable() {
             "not_examined",
             "proof_allowances",
             "schema",
-            "summary"
+            "summary",
+            "union_allowances"
         ]
     );
     assert_eq!(doc["schema"], "weave-land/1");
@@ -650,11 +676,16 @@ fn json_schema_is_stable() {
 
 // ---------------------------------------------------- one-sided resolutions
 //
-// A one-sided resolution: on a real conflict between two reference patches
+// On a real conflict between two reference patches
 // (f04 adds `exp.IsFinite`, f07 adds `exp.TimeToUnix`, adjacent entries of one
 // dict inside `BigQueryGenerator`), an answer that keeps only one side passed
 // the gate as VERIFIED, silently dropping the other side's entry. The base is
 // sqlglot @ d2fbb21's `sqlglot/generators/bigquery.py` (MIT), unmodified.
+//
+// weave now merges that conflict itself (an element union of the dict) and the
+// certificate's `elem_union` check admits it, so it lands without a resolver.
+// The one-sided answers are kept under test on a collection weave does not
+// unite — an ordered list in product code — where the resolver is still asked.
 
 const BQ_PATH: &str = "sqlglot/generators/bigquery.py";
 const BQ_BASE: &str = include_str!("fixtures/sqlglot-d2fbb21-bigquery.py");
@@ -684,24 +715,79 @@ fn dropped(f: &Value) -> bool {
 }
 
 #[test]
-fn one_sided_resolution_ours_only_is_refused() {
-    let ours = bq(&[BQ_F04]);
+fn sqlglot_conflict_lands_as_an_element_union_without_the_resolver() {
     for mode in [
         &[][..],
         &["--base", "HEAD~1", "--ours", "HEAD", "--theirs", "theirs"][..],
     ] {
-        let root = bq_merge("onesided-ours");
+        let root = bq_merge("union-landed");
+        // a resolver that would drop theirs' entry, were it asked
+        let ours = bq(&[BQ_F04]);
         let resolver = fake_resolver(&root, &[&ours, &ours]);
         let mut args = vec!["--resolver", resolver.as_str()];
         args.extend_from_slice(mode);
         let (code, doc) = land(&root, &args);
         let f = file(&doc, BQ_PATH);
+        assert_eq!(code, 0, "{f:#}");
+        assert_eq!(f["status"], "VERIFIED", "{f:#}");
+        assert_eq!(f["rule"], "elem_union", "{f:#}");
+        assert_eq!(f["weave"], "clean", "{f:#}");
+        assert_eq!(f["attempts"], 0, "{f:#}");
+        assert!(!root.join("in.1").exists(), "the resolver was not called");
+        assert!(f["reason"].as_str().unwrap().contains("elem_union"), "{f:#}");
+        assert_eq!(doc["union_allowances"], serde_json::json!(["elem_union", "nest_eu"]));
+        if mode.is_empty() {
+            // landed and staged, with both entries, by weave's key order
+            let landed = read(&root, BQ_PATH);
+            assert!(landed == bq(&[BQ_F04, BQ_F07]) || landed == bq(&[BQ_F07, BQ_F04]), "{landed}");
+            assert_eq!(unmerged(&root), "");
+            assert_eq!(f["sha256"].as_str().unwrap().len(), 64);
+        }
+    }
+}
+
+#[test]
+fn a_land_with_no_resolver_lands_an_element_union() {
+    let root = bq_merge("union-no-resolver");
+    let (code, doc) = land(&root, &[]);
+    let f = file(&doc, BQ_PATH);
+    assert_eq!((code, f["status"].as_str()), (0, Some("VERIFIED")), "{f:#}");
+    assert_eq!(doc["summary"]["verified"], 1);
+}
+
+// Both sides add an entry at one point of an ordered list in product code:
+// not a union by weave's policy, so the resolver is asked, and a one-sided
+// answer is refused exactly as the sqlglot one was.
+const STEPS_PATH: &str = "pipeline/steps.py";
+const STEPS_BASE: &str = "STEPS = [\n    parse_input,\n    normalise_units,\n    write_report,\n]\n";
+const STEPS_OURS: &str = "STEPS = [\n    parse_input,\n    normalise_units,\n    drop_outliers,\n    write_report,\n]\n";
+const STEPS_THEIRS: &str = "STEPS = [\n    parse_input,\n    normalise_units,\n    fill_gaps,\n    write_report,\n]\n";
+
+fn steps_merge(name: &str) -> PathBuf {
+    mid_merge(
+        name,
+        &[(STEPS_PATH, Some(STEPS_BASE), Some(STEPS_OURS), Some(STEPS_THEIRS))],
+    )
+}
+
+#[test]
+fn one_sided_resolution_ours_only_is_refused() {
+    for mode in [
+        &[][..],
+        &["--base", "HEAD~1", "--ours", "HEAD", "--theirs", "theirs"][..],
+    ] {
+        let root = steps_merge("onesided-ours");
+        let resolver = fake_resolver(&root, &[STEPS_OURS, STEPS_OURS]);
+        let mut args = vec!["--resolver", resolver.as_str()];
+        args.extend_from_slice(mode);
+        let (code, doc) = land(&root, &args);
+        let f = file(&doc, STEPS_PATH);
         assert_eq!(f["weave"], "conflicted", "{f:#}");
         assert_eq!(f["status"], "REFUSED", "{f:#}");
         assert_eq!(code, 1);
         assert!(dropped(f), "{f:#}");
         assert!(
-            f["findings"].to_string().contains("`TimeToUnix`"),
+            f["findings"].to_string().contains("`fill_gaps`"),
             "the finding names theirs' dropped line: {f:#}"
         );
     }
@@ -709,33 +795,37 @@ fn one_sided_resolution_ours_only_is_refused() {
 
 #[test]
 fn one_sided_resolution_theirs_only_is_refused() {
-    let theirs = bq(&[BQ_F07]);
-    let root = bq_merge("onesided-theirs");
-    let resolver = fake_resolver(&root, &[&theirs, &theirs]);
+    let root = steps_merge("onesided-theirs");
+    let resolver = fake_resolver(&root, &[STEPS_THEIRS, STEPS_THEIRS]);
     let (code, doc) = land(&root, &["--resolver", &resolver]);
-    let f = file(&doc, BQ_PATH);
+    let f = file(&doc, STEPS_PATH);
     assert_eq!((code, f["status"].as_str()), (1, Some("REFUSED")), "{f:#}");
     assert!(dropped(f), "{f:#}");
-    assert!(f["findings"].to_string().contains("`IsFinite`"), "{f:#}");
+    assert!(f["findings"].to_string().contains("`drop_outliers`"), "{f:#}");
     // the retry is told which line is missing
     let req = request(&root, 2);
     assert!(
-        req["findings"].to_string().contains("`IsFinite`"),
+        req["findings"].to_string().contains("`drop_outliers`"),
         "{req:#}"
     );
 }
 
 #[test]
 fn one_sided_resolution_union_is_verified_in_either_order() {
-    for (i, union) in [bq(&[BQ_F04, BQ_F07]), bq(&[BQ_F07, BQ_F04])]
-        .iter()
-        .enumerate()
+    let ins = |x: &str| STEPS_BASE.replace("    write_report,\n", &format!("{x}    write_report,\n"));
+    for (i, union) in [
+        ins("    drop_outliers,\n    fill_gaps,\n"),
+        ins("    fill_gaps,\n    drop_outliers,\n"),
+    ]
+    .iter()
+    .enumerate()
     {
-        let root = bq_merge(&format!("onesided-union-{i}"));
+        let root = steps_merge(&format!("onesided-union-{i}"));
         let resolver = fake_resolver(&root, &[union]);
         let (code, doc) = land(&root, &["--resolver", &resolver]);
-        let f = file(&doc, BQ_PATH);
+        let f = file(&doc, STEPS_PATH);
         assert_eq!((code, f["status"].as_str()), (0, Some("VERIFIED")), "{f:#}");
-        assert_eq!(&read(&root, BQ_PATH), union);
+        assert_eq!(f["rule"], "gate", "{f:#}");
+        assert_eq!(&read(&root, STEPS_PATH), union);
     }
 }

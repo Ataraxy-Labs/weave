@@ -1479,7 +1479,9 @@ impl MergeStats {
             ResolutionStrategy::DiffyMerged | ResolutionStrategy::DecoratorMerged => {
                 self.resolved_via_diffy += 1
             }
-            ResolutionStrategy::InnerMerged | ResolutionStrategy::StatementMerged => {
+            ResolutionStrategy::InnerMerged
+            | ResolutionStrategy::StatementMerged
+            | ResolutionStrategy::ElementUnion => {
                 self.resolved_via_inner_merge += 1
             }
             _ => {}
