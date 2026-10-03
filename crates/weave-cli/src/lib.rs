@@ -8,8 +8,11 @@
 
 pub mod gitscan;
 pub mod land;
+pub mod mergestate;
+pub mod onto;
 pub(crate) mod parsers;
 pub mod patch;
+pub mod preserve;
 pub mod repo_scope;
 pub mod wire;
 pub mod worktree;

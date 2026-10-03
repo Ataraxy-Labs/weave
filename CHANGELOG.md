@@ -9,6 +9,57 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+### Fixed — a merge may not state a `case` label or a map key twice
+
+Two features that each added `case 3:` (different bodies) to one Go switch
+merged clean and broke the build twice in a multi-agent run. The two
+insertions are line-disjoint, so `git merge-file` merges them cleanly; the
+entity merge's fallback took that answer; and `case 3:` is too short a line
+for the line rules to count. `weave_core::verify` now reads keyed elements —
+switch / match case labels (Go, JS/TS, Java, C/C++, Python `match`), Go
+composite-literal keys, JS/TS object and Python dict keys, Rust struct-literal
+fields — and refuses a merge that states a key more often in one container
+than either side states it in any container (`keys:`). It is part of the
+fail-closed check every composed merge passes, and also the last step of
+`entity_merge` on every clean answer that is not one side's own file,
+whichever rung wrote it (the large-file line route included). `weave check`
+and `weave land`'s gate report it as `DUP`.
+
+### Fixed — `weave land` examines files git merges line-cleanly
+
+`weave land` counted files both sides changed that git merges line-cleanly as
+"not examined". That is where the duplicate `case 3:` was. Such a file is now
+checked: when the answer in the tree is git's merge, it must pass weave's own
+merge check, or the file becomes a unit (REFUSED unless an answer passes the
+gate).
+
+### Added — `weave land` judges the answer already in the tree first
+
+A file the merge driver resolved by itself (stage 0 in the index), or with
+`--result <rev>` that revision's file, is labelled before any resolver is
+asked: PROVEN when it is weave's certified merge, VERIFIED when it passes the
+gate. Before, a driver-merged file the certificate could not prove went to
+the resolver as if unresolved, and a resolver that only answers files it was
+shown conflicted (the agent) declined, so `weave land` wrote conflict markers
+into a file that had been clean. In one multi-agent run that was 28% of all
+refused files. Replaying the `--onto` flow (driver, then `weave land` over the
+whole merge) on real conflicting pairs, expr lands 36/54 conflicting pairs with no resolver
+call instead of 31/54, 0 wrong.
+
+### Added — `weave land --onto <remote>/<branch>` and `--verify-cmd`
+
+The whole landing in one command: fetch, `git merge --no-commit` of the tip,
+the gate over every file of the merge, commit, the gate over any other merge
+on the branch not yet checked, `--verify-cmd` on the final tree, then a
+fast-forward-only update of the remote branch. When the branch moved, the new
+tip is merged and everything runs again; nothing is published that has not
+passed the gate and the verify command against the exact tip it lands on.
+Every refusal publishes nothing. A land script without these steps re-merged
+a newer main after a push race and published it with no check on the final
+tree; three of its broken mains were semantic conflicts no per-file gate can
+see (two lexer changes that each compiled), which only a verify command that
+runs the tests refuses. Setups should pass at least a build.
+
 ### Added — insertions into one collection inside one entity merge as a union
 
 Two branches that each add an entry to the same registry map, a case to the

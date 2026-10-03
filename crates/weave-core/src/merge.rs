@@ -301,10 +301,78 @@ pub fn entity_merge_with_registry(
     host: &Host,
 ) -> MergeResult {
     let composed = compose(base, ours, theirs, file_path, registry, marker_format, host);
-    if composed.is_clean() {
-        return composed;
+    let result = if composed.is_clean() {
+        composed
+    } else {
+        settle(composed, base, ours, theirs, file_path, registry, host)
+    };
+    keys_hold(result, base, ours, theirs, file_path, registry, marker_format)
+}
+
+/// The last check on every clean answer, whatever rung wrote it: no switch,
+/// match or literal states a key more often than either side states it
+/// ([`crate::verify::duplicate_keys`]).
+///
+/// `fail_closed` and `settle` already ask it as part of
+/// [`crate::verify::verify`]; this is the backstop for the rungs that skip
+/// that gate (the line route for a file too large to read for structure) and
+/// for any rung added later. One side's own file (the fast paths, a
+/// subsuming side) is never refused: whatever it states, a developer wrote.
+/// A refusal is one conflict over the whole file, the way `fail_closed`
+/// writes one when even git's line merge cannot be verified.
+fn keys_hold(
+    result: MergeResult,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    file_path: &str,
+    registry: &ParserRegistry,
+    marker_format: &MarkerFormat,
+) -> MergeResult {
+    if !result.is_clean() || result.content == ours || result.content == theirs {
+        return result;
     }
-    settle(composed, base, ours, theirs, file_path, registry, host)
+    if [base, ours, theirs, result.content.as_str()]
+        .iter()
+        .any(|t| is_binary(t) || (t.len() > STRUCTURE_LIMIT_BYTES && !keyed_code(file_path)))
+    {
+        return result;
+    }
+    let Some(refusal) =
+        crate::verify::duplicate_keys(file_path, ours, theirs, &result.content, registry)
+    else {
+        return result;
+    };
+    let conflict = EntityConflict {
+        entity_name: refusal.to_string(),
+        entity_type: "unverified merge".to_string(),
+        kind: ConflictKind::BothModified,
+        complexity: classify_conflict(Some(base), Some(ours), Some(theirs)),
+        ours_content: Some(ours.to_string()),
+        theirs_content: Some(theirs.to_string()),
+        base_content: Some(base.to_string()),
+    };
+    let marker_format = marker_format.clone().for_file(file_path);
+    let mut stats = result.stats.clone();
+    stats.mark_fallback();
+    stats.entities_conflicted = stats.entities_conflicted.max(1);
+    MergeResult {
+        content: conflict.to_conflict_markers(&marker_format, "fail_closed"),
+        conflicts: vec![conflict],
+        warnings: result.warnings,
+        stats,
+        audit: result.audit,
+    }
+}
+
+/// Source languages whose keyed elements are read even above the structure
+/// limit: one tree-sitter parse, no entity matching.
+fn keyed_code(file_path: &str) -> bool {
+    matches!(
+        file_path.rsplit('.').next().unwrap_or(""),
+        "go" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "py" | "pyi"
+            | "java" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "rs"
+    )
 }
 
 /// A conflicted merge, settled by the deterministic rules if one applies to

@@ -395,10 +395,21 @@ conflicts on its own had 22.0% of its accepted merges judged wrong. Behind this 
 figure was 9.5%. That gate did not have the both-sides rule (the last bullet), which was added
 after a one-sided answer was seen passing it.
 
-The labels cover files git's line merge conflicts on. Files both sides changed that git merges
-cleanly are counted as not examined. Each file is checked on its own three stages, so an effect
-across files (a caller in a file neither side touched) is outside the gate. Renames are not
-followed.
+**An answer already in the tree** is judged before any resolver is asked: a file the merge
+driver resolved by itself (stage 0 in the index), or, with `--result <rev>`, that revision's
+file. It is PROVEN when it is weave's certified merge and VERIFIED when it passes the gate. So
+a file weave's driver merged cleanly is not handed back to the resolver as if it were
+unresolved.
+
+The labels cover files git's line merge conflicts on, and every other file both sides changed
+whose merge does not pass weave's own merge check. A file git merges line-cleanly is examined
+too: git's answer must lose no line both sides kept, state nothing twice, and state no `case`
+label, map/object/dict key or struct-literal field twice in one container where neither side
+does (two features each adding `case 3:` to one switch is line-clean to git and does not
+compile). One that fails is a unit like a conflicted file. Each file is checked on its own
+three stages, so an effect across files (a caller in a file neither side touched) is outside
+the gate, and so is a semantic conflict that leaves every file well-formed — that is what
+`--verify-cmd` is for. Renames are not followed.
 
 | Flag | |
 |---|---|
@@ -407,8 +418,47 @@ followed.
 | `--certificate <file>` | Write the same JSON as the review certificate for the merge commit. It records the three commits and each file's status, rule, reason, findings and landed sha256. |
 | `--dry-run` | Decide and report, but write nothing. |
 | `--base/--ours/--theirs <rev>` | Read a merge between revisions instead of the one in progress. Implies `--dry-run`; useful in CI. |
+| `--result <rev>` | With the above: judge `<rev>`'s files as the merge's answer (re-check a merge commit as committed). |
 
 Exit codes: `0` every file PROVEN or VERIFIED, `1` some file REFUSED, `2` the run failed.
+
+### The whole landing: `weave land --onto <remote>/<branch>`
+
+`--onto` owns the loop an agent's `land` script used to: it fetches the branch, merges its tip
+in (`git merge --no-commit`, through whatever merge driver is configured), runs the gate over
+**every** file of that merge (conflicted, driver-merged and line-clean alike), commits it, gates
+any other merge commit on the branch not yet checked (as committed, or as the branch now holds
+the file, so a later fix counts), runs `--verify-cmd` on the final tree, and
+then updates the branch on the remote fast-forward only. If the branch moved meanwhile, it merges
+the new tip and checks everything again; nothing is ever published that has not passed the gate
+and the verify command against the exact tip it lands on. Any refusal publishes nothing and
+exits 1; a refused merge is left in progress with the refused files conflicted, and running
+`--onto` again checks the in-place resolution and commits it.
+
+```bash
+weave land --onto origin/main --verify-cmd 'go vet ./... && go test ./...'
+```
+
+**Set a verify command.** The gate reads each file on its own; it cannot see that two features
+which each merge cleanly no longer work together (in one benchmark run, two lexer changes that
+both parsed and compiled made a new operator unreachable). At the least run a compile or build
+(`go vet ./...` — it type-checks test files too —, `cargo check`, `tsc --noEmit`,
+`npm run build`); better, the tests the merge touched. It runs with `sh -c` in the repository
+root, on a clean checkout of the commit to be published, with `WEAVE_LAND_ONTO` (the tip landed
+onto) and `WEAVE_LAND_HEAD` in the environment; a non-zero exit, a timeout, or a change to
+tracked files refuses.
+
+| Flag | |
+|---|---|
+| `--onto <remote>/<branch>` | Land the current branch there, as above. |
+| `--verify-cmd <cmd>` | Run on the final tree before publishing; failure refuses. Recommended: at least a build. |
+| `--verify-timeout <secs>` | Default 1800. |
+| `--attempts <n>` | How many times to merge a moved tip and retry (default 5). |
+| `--certificate-dir <dir>` | Write every gate certificate there. |
+| `--resolver <cmd>` | As above, for files neither weave nor an in-place resolution answers. |
+
+Checked merges are remembered by commit id (`.git/weave-land-verified`) and verify passes by
+tree and command (`.git/weave-land-verify-ok`), so a retry repeats no work.
 
 ## CLI Commands
 
@@ -425,6 +475,7 @@ for the full flag list; the table below is what each one is for.
 | `weave patch extract <base-file> <changed-file>` | Emit the typed ops that turn `base-file` into `changed-file` |
 | `weave patch apply <ops-file> <target-file>` | Apply those ops to a target file, three-way against the ops' base, in case the target has drifted since the ops were extracted |
 | `weave land [--resolver <cmd>]` | Land a merge, labelling each conflicted file PROVEN, VERIFIED or REFUSED; see [above](#landing-an-agents-merge-weave-land) |
+| `weave land --onto origin/main [--verify-cmd <cmd>]` | Merge, gate, verify and publish fast-forward only, re-checking when main moves; see [above](#the-whole-landing-weave-land---onto-remotebranch) |
 | `weave summary <file>` | Parse a file's weave conflict markers into a structured (optionally JSON) summary |
 | `weave stats` | Lifetime merge counters, if you've opted in with `WEAVE_STATS=1` (off by default) |
 | `weave bench` | Run the 31-scenario synthetic benchmark against weave, Mergiraf, and git |

@@ -34,6 +34,13 @@
 //!    does, and may not state a key at one table path more often than either
 //!    side does. Line-disjoint additions of the same key are clean to a line
 //!    merge and fatal to every consumer of the file.
+//! 6. **keys** — no switch, match, map / object / dict literal or struct
+//!    literal states one key (a `case` label, a map key, a field) more often
+//!    than either side states it in one container ([`duplicate_keys`]). Two
+//!    sides each adding `case 3:` to one switch is line-disjoint, clean to a
+//!    line merge, and does not compile; `case 3:` is too short a line for
+//!    rule 2 to count. The merge also asks this of every clean answer as its
+//!    last step, whichever rung wrote it.
 //!
 //! The line primitives here are shared with `weave check`, which asks the same
 //! questions of a resolution a person wrote. A person may write a line no side
@@ -49,7 +56,7 @@ use sem_core::parser::registry::ParserRegistry;
 /// Why a clean answer was refused: which check, and the evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unverified {
-    /// `markers` | `lines` | `bindings` | `parse`.
+    /// `markers` | `lines` | `bindings` | `parse` | `keys` | `data` | `iota`.
     pub check: &'static str,
     pub detail: String,
 }
@@ -980,17 +987,24 @@ fn declarations(
             .as_ref()
             .map(|t| arm_keys(text, t.root_node()))
             .unwrap_or_default();
-        (entities, tree.map(|t| t.root_node().has_error()), arms)
+        let keyed = tree
+            .as_ref()
+            .map(|t| keyed_elements(file_path, text, t.root_node()))
+            .unwrap_or_default();
+        (entities, tree.map(|t| t.root_node().has_error()), arms, keyed)
     };
-    let (merged_entities, merged_broken, merged_arms) = parse(merged);
-    let (ours_entities, ours_broken, ours_arms) = parse(ours);
-    let (theirs_entities, theirs_broken, theirs_arms) = parse(theirs);
+    let (merged_entities, merged_broken, merged_arms, merged_keyed) = parse(merged);
+    let (ours_entities, ours_broken, ours_arms, ours_keyed) = parse(ours);
+    let (theirs_entities, theirs_broken, theirs_arms, theirs_keyed) = parse(theirs);
 
     if merged_broken == Some(true) && ours_broken == Some(false) && theirs_broken == Some(false) {
         return Some(Unverified {
             check: "parse",
             detail: "the result does not parse, and both sides do".to_string(),
         });
+    }
+    if let Some(u) = introduced_duplicate(&ours_keyed, &theirs_keyed, &merged_keyed) {
+        return Some(u);
     }
 
     let names = |entities: &[SemanticEntity], text: &str| {
@@ -1019,7 +1033,7 @@ fn declarations(
         // Dangling uses are a question about programs: only where there is a
         // grammar tree, and never about Markdown headings or YAML keys.
         merged_broken?;
-        let (base_entities, _, _) = parse(base);
+        let (base_entities, _, _, _) = parse(base);
         dangling_use(
             file_path,
             [base, ours, theirs, merged],
@@ -1103,6 +1117,274 @@ fn arm_keys(text: &str, root: tree_sitter::Node) -> Vec<String> {
         stack.extend(n.children(&mut cursor));
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Keyed elements — the post-merge key invariant
+// ---------------------------------------------------------------------------
+
+/// One element a container looks up by key: a `case` label of a switch, a
+/// key of a map / object / dict literal, a field of a struct literal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Keyed {
+    /// The container instance (a tree node id; meaningful within one tree).
+    pub container: usize,
+    /// What the container is, for the reader: its first line, squashed.
+    pub container_head: String,
+    /// The element's node kind (`expression_case`, `keyed_element`, `pair`…):
+    /// keys are compared across versions per kind.
+    pub kind: &'static str,
+    /// The key, squashed (quotes off where the language treats `a` and `"a"`
+    /// as one key).
+    pub key: String,
+}
+
+/// Every keyed element in a tree. Within one container a key is an answer
+/// to one question — which branch runs for `3`, what `"a"` maps to — and two
+/// elements with one key are two answers: a compile error in Go (`duplicate
+/// case 3 in expression switch`, `duplicate key "a" in map literal`), dead
+/// code or a silently overwritten value elsewhere. Both sides adding an
+/// element under one new key, each with its own body, is the shape, and a
+/// line merge of disjoint hunks writes both. A `case 3:` line is too short
+/// for the line rules to count, so the key itself has to be read.
+pub fn keyed_elements(path: &str, text: &str, root: tree_sitter::Node) -> Vec<Keyed> {
+    let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let unquote_keys = matches!(
+        extension(path),
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "py" | "pyi"
+    );
+    let src = text.as_bytes();
+    let txt = |n: tree_sitter::Node| n.utf8_text(src).unwrap_or("").to_string();
+    let head = |n: tree_sitter::Node| -> String {
+        let t = n.utf8_text(src).unwrap_or("");
+        let first = squash(t.lines().next().unwrap_or(""));
+        first.chars().take(60).collect()
+    };
+    let key_of = |s: &str| -> String {
+        let k = squash(s);
+        if unquote_keys {
+            let q = k.trim_matches(|c| c == '"' || c == '\'' || c == '`');
+            if q.len() + 2 == k.len() {
+                return q.to_string();
+            }
+        }
+        k
+    };
+    // The switch / match / literal a container node belongs to, for the head.
+    fn owner(c: tree_sitter::Node<'_>) -> tree_sitter::Node<'_> {
+        match c.kind() {
+            "switch_body" | "switch_block" | "match_block" | "block" | "compound_statement"
+            | "literal_value" | "field_initializer_list" => c.parent().unwrap_or(c),
+            _ => c,
+        }
+    }
+    let mut out = Vec::new();
+    let mut push = |container: tree_sitter::Node, kind: &'static str, key: String| {
+        if key.is_empty() {
+            return;
+        }
+        out.push(Keyed {
+            container: container.id(),
+            container_head: head(owner(container)),
+            kind,
+            key,
+        });
+    };
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        let parent = n.parent();
+        match (n.kind(), parent) {
+            // Go: `case a, b:` — each expression is its own key.
+            ("expression_case", Some(p)) => {
+                if let Some(v) = n.child_by_field_name("value") {
+                    let mut c = v.walk();
+                    for e in v.named_children(&mut c) {
+                        push(p, "case", key_of(&txt(e)));
+                    }
+                }
+            }
+            // Go type switch: `case int, string:`.
+            ("type_case", Some(p)) => {
+                let mut c = n.walk();
+                for t in n.children_by_field_name("type", &mut c) {
+                    push(p, "case", key_of(&txt(t)));
+                }
+            }
+            ("default_case" | "switch_default", Some(p)) => push(p, "case", "default".into()),
+            // JS / TS `case v:`; C / C++ / PHP `case v:` (no value = default).
+            ("switch_case" | "case_statement", Some(p)) => {
+                let k = n
+                    .child_by_field_name("value")
+                    .map(|v| key_of(&txt(v)))
+                    .unwrap_or_else(|| "default".into());
+                push(p, "case", k);
+            }
+            // Java: `case 1, 2:` / `case 1 ->` / `default`, grouped under one
+            // `switch_block`.
+            ("switch_label", Some(p)) => {
+                let block = p.parent().filter(|g| g.kind() == "switch_block").unwrap_or(p);
+                let t = squash(&txt(n));
+                match t.strip_prefix("case ") {
+                    Some(rest) => {
+                        for k in split_top_level(rest) {
+                            push(block, "case", key_of(&k));
+                        }
+                    }
+                    None => push(block, "case", t),
+                }
+            }
+            // Python `match` (and Scala): the patterns and the guard.
+            ("case_clause", Some(p)) => {
+                let mut c = n.walk();
+                let pats: Vec<String> = n
+                    .named_children(&mut c)
+                    .filter(|x| x.kind() == "case_pattern")
+                    .map(|x| squash(&txt(x)))
+                    .collect();
+                if !pats.is_empty() {
+                    let guard = n
+                        .child_by_field_name("guard")
+                        .map(|g| format!(" {}", squash(&txt(g))))
+                        .unwrap_or_default();
+                    push(p, "case", format!("{}{guard}", pats.join(", ")));
+                }
+            }
+            // Go composite literals: map keys, struct fields, array indexes.
+            ("keyed_element", Some(p)) => {
+                let k = n.child_by_field_name("key").or_else(|| n.named_child(0));
+                if let Some(k) = k {
+                    push(p, "key", key_of(&txt(k)));
+                }
+            }
+            // JS / TS object literal and Python dict entries. A computed key
+            // (`[k]: v`, `**d`) names nothing statically.
+            ("pair", Some(p)) if matches!(p.kind(), "object" | "dictionary") => {
+                if let Some(k) = n.child_by_field_name("key") {
+                    if k.kind() != "computed_property_name" {
+                        push(p, "key", key_of(&txt(k)));
+                    }
+                }
+            }
+            ("shorthand_property_identifier", Some(p)) if p.kind() == "object" => {
+                push(p, "key", key_of(&txt(n)));
+            }
+            ("method_definition", Some(p)) if p.kind() == "object" => {
+                if let Some(k) = n.child_by_field_name("name") {
+                    if k.kind() != "computed_property_name" {
+                        push(p, "key", key_of(&txt(k)));
+                    }
+                }
+            }
+            // Rust struct expressions.
+            ("field_initializer", Some(p)) => {
+                if let Some(k) = n.child_by_field_name("field") {
+                    push(p, "key", key_of(&txt(k)));
+                }
+            }
+            ("shorthand_field_initializer", Some(p)) => push(p, "key", key_of(&txt(n))),
+            _ => {}
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.children(&mut cursor));
+    }
+    out
+}
+
+/// `a, f(b, c), d` → `a`, `f(b, c)`, `d`.
+fn split_top_level(s: &str) -> Vec<String> {
+    let (mut out, mut cur, mut depth) = (Vec::new(), String::new(), 0i32);
+    for c in s.chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(cur.trim().to_string());
+                cur.clear();
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(c);
+    }
+    out.push(cur.trim().to_string());
+    out.retain(|k| !k.is_empty());
+    out
+}
+
+/// The post-merge key invariant: no container of `merged` states one key
+/// more often than any single container of ours or of theirs states it.
+///
+/// A key stated twice in one container that neither side states twice
+/// anywhere was put there twice by the merge — both sides added it, each
+/// with its own element. Per container, not per file: the same `case 1:` in
+/// two switches is two keys. The comparison across versions is by element
+/// kind and key and ignores which container, so a duplicate one side
+/// already had (which no merge introduced) never counts against the merge.
+pub fn introduced_duplicate(ours: &[Keyed], theirs: &[Keyed], merged: &[Keyed]) -> Option<Unverified> {
+    fn most(els: &[Keyed]) -> HashMap<(&'static str, &str), usize> {
+        let mut per: HashMap<(usize, &'static str, &str), usize> = HashMap::new();
+        for e in els {
+            *per.entry((e.container, e.kind, e.key.as_str())).or_insert(0) += 1;
+        }
+        let mut m: HashMap<(&'static str, &str), usize> = HashMap::new();
+        for ((_, kind, key), n) in per {
+            let slot = m.entry((kind, key)).or_insert(0);
+            *slot = (*slot).max(n);
+        }
+        m
+    }
+    let (o, t) = (most(ours), most(theirs));
+    let mut per: HashMap<(usize, &str, &str), (usize, &str)> = HashMap::new();
+    for e in merged {
+        per.entry((e.container, e.kind, e.key.as_str()))
+            .or_insert((0, e.container_head.as_str()))
+            .0 += 1;
+    }
+    let mut over: Vec<(&str, &str, usize, usize, usize, &str)> = per
+        .into_iter()
+        .filter_map(|((_, kind, key), (m, head))| {
+            let (a, b) = (
+                o.get(&(kind, key)).copied().unwrap_or(0),
+                t.get(&(kind, key)).copied().unwrap_or(0),
+            );
+            (m >= 2 && m > a.max(b)).then_some((kind, key, m, a, b, head))
+        })
+        .collect();
+    over.sort();
+    over.first().map(|(kind, key, m, a, b, head)| Unverified {
+        check: "keys",
+        detail: format!(
+            "the {} `{}` is stated {m}x in one `{}`; ours states it {a}x there, theirs {b}x",
+            if *kind == "case" { "case" } else { "key" },
+            clip(key),
+            clip(head),
+        ),
+    })
+}
+
+/// [`introduced_duplicate`] on three texts: `None` when there is no grammar
+/// tree for the file, or no key the merge stated twice.
+pub fn duplicate_keys(
+    file_path: &str,
+    ours: &str,
+    theirs: &str,
+    merged: &str,
+    registry: &ParserRegistry,
+) -> Option<Unverified> {
+    let keyed = |text: &str| -> Option<Vec<Keyed>> {
+        let (_, tree) = registry.extract_entities_with_tree(file_path, text)?;
+        let tree = tree?;
+        Some(keyed_elements(file_path, text, tree.root_node()))
+    };
+    let merged = keyed(merged)?;
+    if merged.is_empty() {
+        return None;
+    }
+    introduced_duplicate(
+        &keyed(ours).unwrap_or_default(),
+        &keyed(theirs).unwrap_or_default(),
+        &merged,
+    )
 }
 
 /// One key per declaration: a top-level item by its bare name, so that it

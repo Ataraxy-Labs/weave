@@ -22,8 +22,13 @@
 //! verifier here ([`crate::worktree::check`]) rather than restated.
 //!
 //! Scope: the files git's line merge conflicts on (content, add/add,
-//! modify/delete). Files both sides changed that git merges line-cleanly are
-//! counted as not examined — git's guarantee is the one they carry. Each file
+//! modify/delete), and every other file both sides changed whose merge — the
+//! answer in the tree, else git's line merge — is not git's line merge or
+//! fails weave's own merge check ([`weave_core::verify::verify`]: a line both
+//! kept lost, a line or a `case` label / map key stated twice). The rest are
+//! counted as `not_examined`: git merged them line-cleanly and the check
+//! passed. An answer the tree already holds (a file the merge driver
+//! resolved; `--result`'s file) is judged before any resolver. Each file
 //! is checked on its own three stages, as the gate was measured; a cross-file
 //! effect (a caller in another file) is outside it.
 
@@ -97,8 +102,22 @@ pub struct Unit {
     pub ours: Option<String>,
     pub theirs: Option<String>,
     /// `git merge-file` output (plain `merge` style); `None` for
-    /// modify/delete, where git writes no markers.
+    /// modify/delete, where git writes no markers. For a file git merges
+    /// line-cleanly that is a unit anyway (see [`plan`]), git's clean text.
     pub gitmerged: Option<String>,
+    /// The answer the tree already holds, when there is one to judge: in
+    /// working-tree mode a file the merge driver resolved (stage 0 in the
+    /// index), with `--result <rev>` the file at that rev. It is labelled
+    /// before any resolver is asked: PROVEN when it is weave's certified
+    /// merge, VERIFIED when it passes the [`gate`].
+    pub present: Option<Candidate>,
+    /// git merged the file line-cleanly, and that merge is known bad: it
+    /// failed weave's merge check, or the merge driver refused the file. An
+    /// answer then has to differ from git's somewhere (to state `case 3`
+    /// once, say), so the gate does not hold it to every line of git's merge
+    /// (AUTOMERGED); it holds it to both sides' changes, the whole file read
+    /// as one block (DROPPED / UNDELETED).
+    pub unverified_git_merge: bool,
 }
 
 impl Unit {
@@ -192,6 +211,22 @@ impl GateVerdict {
 ///    A resolution that keeps one side of a block verbatim fails this unless
 ///    the other side's change is subsumed by it.
 pub fn gate(u: &Unit, cand: &Candidate) -> GateVerdict {
+    gate_with(u, cand, false)
+}
+
+/// Whether a `weave check` finding is the line-multiplicity rule (a line
+/// stated more often than any version states it).
+fn is_line_duplication(f: &worktree::Finding) -> bool {
+    f.class == "DUP" && f.detail.contains("line(s) appear more often than any version")
+}
+
+/// [`gate`]; with `merge_result`, the answer is a merge as committed — it may
+/// carry the committer's own new code beside the merge (a test table with
+/// one more `want any` row), so the line-multiplicity rule, which reads any
+/// extra copy of a line as a resolution stating it twice, is not asked. Keys
+/// stated twice, definitions stated twice, lost lines and both sides'
+/// changes still are.
+fn gate_with(u: &Unit, cand: &Candidate, merge_result: bool) -> GateVerdict {
     let mut v = GateVerdict::default();
     if let Candidate::File(c) = cand {
         let theirs_or_ours: BTreeSet<&str> = u.sides().into_iter().flat_map(markers).collect();
@@ -226,6 +261,9 @@ pub fn gate(u: &Unit, cand: &Candidate) -> GateVerdict {
             Ok(found) => {
                 let pre = preexisting(u);
                 for f in found {
+                    if merge_result && is_line_duplication(&f) {
+                        continue;
+                    }
                     let names = backticked(&f.detail);
                     let key = (f.class.to_string(), finding_pattern(&f.detail));
                     let already = matches!(f.class, "DUP" | "DANGLING")
@@ -245,6 +283,7 @@ pub fn gate(u: &Unit, cand: &Candidate) -> GateVerdict {
             for f in found
                 .into_iter()
                 .filter(|f| matches!(f.class, "LOSS" | "DUP"))
+                .filter(|f| !(merge_result && is_line_duplication(f)))
             {
                 v.fail("LINES", f.class, f.detail);
             }
@@ -252,12 +291,18 @@ pub fn gate(u: &Unit, cand: &Candidate) -> GateVerdict {
     }
 
     if let Candidate::File(c) = cand {
-        if let Some(detail) = automerged(u.base.as_deref(), u.gitmerged.as_deref(), c) {
+        let automerged = if u.unverified_git_merge {
+            None
+        } else {
+            automerged(u.base.as_deref(), u.gitmerged.as_deref(), c)
+        };
+        if let Some(detail) = automerged {
             v.fail("AUTOMERGED", "AUTOMERGED", detail);
         }
         if let (Some(o), Some(t)) = (u.ours.as_deref(), u.theirs.as_deref()) {
             let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                dropped(u.base.as_deref().unwrap_or(""), o, t, c).map_err(|e| e.to_string())
+                dropped(u.base.as_deref().unwrap_or(""), o, t, c, u.unverified_git_merge)
+                    .map_err(|e| e.to_string())
             }))
             .unwrap_or_else(|_| Err("the check crashed on this file".into()));
             match run {
@@ -371,23 +416,22 @@ fn finding_pattern(detail: &str) -> String {
 
 /// The AUTOMERGED rule: a significant line git's merge placed outside every
 /// conflict block, and that base does not already state as often, must be in
-/// the candidate at least as often as git's merge states it there.
+/// the candidate at least as often as git's merge states it there. For a
+/// file git merged line-cleanly (a unit only because its merge failed weave's
+/// merge check, or because the tree holds another answer) that is every line
+/// of git's merge: each side's change must survive there too.
 fn automerged(base: Option<&str>, gitmerged: Option<&str>, cand: &str) -> Option<String> {
     let gitmerged = gitmerged?;
-    let (mut depth, mut has_block) = (0usize, false);
+    let mut depth = 0usize;
     let mut outside: HashMap<&str, usize> = HashMap::new();
     for l in gitmerged.lines() {
         if l.starts_with("<<<<<<<") {
             depth += 1;
-            has_block = true;
         } else if l.starts_with(">>>>>>>") && depth > 0 {
             depth -= 1;
         } else if depth == 0 && significant(l) {
             *outside.entry(l.trim()).or_insert(0) += 1;
         }
-    }
-    if !has_block {
-        return None;
     }
     let (cb, cw) = (line_counts(base.unwrap_or("")), line_counts(cand));
     let get = |m: &HashMap<&str, usize>, l: &str| m.get(l).copied().unwrap_or(0);
@@ -425,11 +469,28 @@ fn automerged(base: Option<&str>, gitmerged: Option<&str>, cand: &str) -> Option
 ///   kept + owed)` times. This keeps an in-block delete-vs-modify (one side
 ///   removes what the other edits) refused whichever side is kept.
 ///
+/// With `whole_file`, a merge git calls clean (no block at all) is read as
+/// one block over the whole file — for a file whose clean git merge is known
+/// bad, where each side's change must still survive in the answer.
+///
 /// `Ok(findings)`; empty = every block's two changes survive.
-fn dropped(base: &str, ours: &str, theirs: &str, cand: &str) -> R<Vec<GateFinding>> {
-    let blocks = diff3_blocks(base, ours, theirs)?;
+fn dropped(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    cand: &str,
+    whole_file: bool,
+) -> R<Vec<GateFinding>> {
+    let mut blocks = diff3_blocks(base, ours, theirs)?;
     if blocks.regions.is_empty() {
-        return Ok(Vec::new());
+        if !whole_file {
+            return Ok(Vec::new());
+        }
+        let lines = |t: &str| t.lines().map(str::to_string).collect::<Vec<_>>();
+        blocks = Diff3 {
+            regions: vec![[lines(ours), lines(base), lines(theirs)]],
+            outside: Vec::new(),
+        };
     }
     let get = |m: &HashMap<&str, usize>, k: &str| m.get(k).copied().unwrap_or(0);
 
@@ -805,8 +866,8 @@ pub struct FileReport {
     pub path: String,
     pub kind: Kind,
     pub status: Status,
-    /// `certificate` | `elem_union` | `gate` | `resolver` | `no-resolver` |
-    /// `not-text`.
+    /// `certificate` | `elem_union` | `present` | `gate` | `resolver` |
+    /// `no-resolver` | `not-text` | `keys`.
     pub rule: &'static str,
     /// One sentence.
     pub reason: String,
@@ -853,7 +914,13 @@ pub fn land_unit(u: &Unit, host: &Host, resolver: Option<&Resolver>) -> R<FileRe
         attempts: 0,
         weave: "not-run",
         sha256: None,
-        landed: Landed::Conflicted(u.gitmerged.clone()),
+        landed: Landed::Conflicted(u.gitmerged.as_deref().map(|g| {
+            if markers(g).is_empty() {
+                whole_file_conflict(u)
+            } else {
+                g.to_string()
+            }
+        })),
     };
 
     // ---- 1. weave, and 2. the certificate on a clean result
@@ -864,7 +931,17 @@ pub fn land_unit(u: &Unit, host: &Host, resolver: Option<&Resolver>) -> R<FileRe
         let fmt = MarkerFormat::default().for_file(&u.path);
         let base = u.base.as_deref().unwrap_or("");
         let merged = entity_merge_fmt(base, ours, theirs, &u.path, &fmt, host);
-        if merged.is_clean() {
+        // weave's labels describe weave's merge; when the tree already holds
+        // a different answer, that answer is the one to judge (step 3).
+        let describes_tree = match &u.present {
+            None => true,
+            Some(Candidate::File(p)) => *p == merged.content,
+            Some(Candidate::Delete) => false,
+        };
+        if merged.is_clean() && !describes_tree {
+            report.weave = "clean";
+            unproven = "the tree's answer is not weave's merge; ".into();
+        } else if merged.is_clean() {
             report.weave = "clean";
             let cert = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 certify(u, &merged.content)
@@ -919,7 +996,34 @@ pub fn land_unit(u: &Unit, host: &Host, resolver: Option<&Resolver>) -> R<FileRe
         }
     }
 
-    // ---- 3. the resolver, behind 4. the gate, with at most one retry
+    // ---- 3. the answer the tree already holds, behind the gate
+    if let Some(present) = &u.present {
+        let v = gate_with(u, present, true);
+        if v.pass() {
+            report.status = Status::Verified;
+            report.rule = "present";
+            report.reason = format!(
+                "{unproven}the merge's own result (the merge driver's, or the result \
+                 revision's) passed the gate; no resolver was asked"
+            );
+            report.landed = match present {
+                Candidate::File(c) => {
+                    report.sha256 = Some(sha256(c));
+                    Landed::File(c.clone())
+                }
+                Candidate::Delete => Landed::Deleted,
+            };
+            return Ok(report);
+        }
+        unproven = format!(
+            "{unproven}the merge's own result failed the gate ({}); ",
+            v.reasons.join(", ")
+        );
+        report.reasons = v.reasons;
+        report.findings = v.findings;
+    }
+
+    // ---- 4. the resolver, behind 5. the gate, with at most one retry
     let Some(resolver) = resolver else {
         report.rule = "no-resolver";
         report.reason = format!("{unproven}no resolver was given (--resolver)");
@@ -1001,6 +1105,25 @@ pub fn land_unit(u: &Unit, host: &Host, resolver: Option<&Resolver>) -> R<FileRe
     Ok(report)
 }
 
+/// One conflict box over the whole file, ours against theirs: what a
+/// refused file git merged line-cleanly is left as, so that it reads as
+/// unresolved and not as git's merge.
+fn whole_file_conflict(u: &Unit) -> String {
+    let side = |t: Option<&str>| {
+        let t = t.unwrap_or("");
+        if t.is_empty() || t.ends_with('\n') {
+            t.to_string()
+        } else {
+            format!("{t}\n")
+        }
+    };
+    format!(
+        "<<<<<<< ours\n{}=======\n{}>>>>>>> theirs\n",
+        side(u.ours.as_deref()),
+        side(u.theirs.as_deref())
+    )
+}
+
 /// The certificate on weave's clean merge: `Ok((allowances that admitted a
 /// both-changed region, whether one needed [`UNION_ALLOWANCES`]))` when every
 /// both-changed region is admitted — or, failing that, when `elem_union`
@@ -1070,6 +1193,18 @@ fn sha256(text: &str) -> String {
 
 // ----------------------------------------------------------------- the plan
 
+/// Where the answer already in the tree is read, for [`plan`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Present {
+    /// The working tree, for every path the index holds at stage 0 (a file
+    /// the merge driver resolved, or git merged) — and, with `unmerged`, for
+    /// a conflicted path too once the file on disk has no conflict-marker
+    /// line left (someone resolved it in place and did not stage it).
+    WorkingTree { unmerged: bool },
+    /// The tree of this revision (a merge commit being re-checked).
+    Rev(String),
+}
+
 /// The merge to land, read out of git.
 pub struct Plan {
     pub base: String,
@@ -1079,7 +1214,9 @@ pub struct Plan {
     /// Files git could not merge that are not text weave can read (binary,
     /// symlink, submodule, unreadable blob): refused before anything runs.
     pub not_text: Vec<FileReport>,
-    /// Files both sides changed that git's line merge merges cleanly.
+    /// Files both sides changed that git's line merge merges cleanly, and
+    /// whose merge — the answer in the tree, else git's — is git's own and
+    /// passes weave's merge check ([`weave_core::verify::verify`]).
     pub not_examined: Vec<String>,
     /// Each conflicted path's index entries at base / ours / theirs, for
     /// restoring a refused file's unmerged stages.
@@ -1089,7 +1226,21 @@ pub struct Plan {
 /// Read the merge `base` × `ours` × `theirs` (each defaulting as `weave check`
 /// does: HEAD, the operation in progress, their merge base) and classify every
 /// file both sides changed.
-pub fn plan(dir: &Path, base: Option<&str>, ours: Option<&str>, theirs: Option<&str>) -> R<Plan> {
+///
+/// A file git's line merge merges cleanly is still examined: when the answer
+/// in the tree (`present`) is git's merge, that merge must pass weave's own
+/// merge check — no line both sides kept lost, nothing stated twice, no
+/// `case` or map key twice ([`weave_core::verify::verify`]); git calling it
+/// clean is not enough (two features each adding `case 3:` to one switch is
+/// line-clean). When it fails, or the tree holds something else, the file is
+/// a unit like any conflicted one.
+pub fn plan(
+    dir: &Path,
+    base: Option<&str>,
+    ours: Option<&str>,
+    theirs: Option<&str>,
+    present: Option<&Present>,
+) -> R<Plan> {
     let (base, ours, theirs) = gitscan::resolve_revs(dir, base, ours, theirs)?;
     let oid = |rev: &str| -> R<String> {
         Ok(gitscan::git(dir, &["rev-parse", "--verify", rev])?
@@ -1113,6 +1264,7 @@ pub fn plan(dir: &Path, base: Option<&str>, ours: Option<&str>, theirs: Option<&
         .collect();
     let [eb, eo, et] = [&base, &ours, &theirs].map(|rev| gitscan::entries_at_rev(dir, rev, &both));
     let (eb, eo, et) = (eb?, eo?, et?);
+    let (present_of, unmerged) = present_answers(dir, present, &both)?;
 
     let mut plan = Plan {
         base,
@@ -1166,13 +1318,28 @@ pub fn plan(dir: &Path, base: Option<&str>, ours: Option<&str>, theirs: Option<&
             _ => None,
         };
         let (base_text, ours_text, theirs_text) = (text(b), text(o), text(t));
+        let present_answer = present_of.get(&path).cloned();
+        let mut unverified_git_merge = false;
         let gitmerged = match (kind, &ours_text, &theirs_text) {
             (Kind::ModifyDelete, _, _) => None,
             (_, Some(o), Some(t)) => {
-                let (clean, merged) = line_merge(base_text.as_deref().unwrap_or(""), o, t)?;
+                let base_t = base_text.as_deref().unwrap_or("");
+                let (clean, merged) = line_merge(base_t, o, t)?;
                 if clean {
-                    plan.not_examined.push(path);
-                    continue;
+                    // A path the index holds unmerged was refused by the
+                    // merge driver: never waved through on git's line merge.
+                    let holds = !unmerged.contains(&path)
+                        && line_clean_holds(&path, base_t, o, t, &merged);
+                    let answer = match &present_answer {
+                        Some(Candidate::File(p)) => Some(p.as_str()),
+                        Some(Candidate::Delete) => None,
+                        None => Some(merged.as_str()),
+                    };
+                    if holds && answer == Some(merged.as_str()) {
+                        plan.not_examined.push(path);
+                        continue;
+                    }
+                    unverified_git_merge = !holds;
                 }
                 Some(merged)
             }
@@ -1186,9 +1353,87 @@ pub fn plan(dir: &Path, base: Option<&str>, ours: Option<&str>, theirs: Option<&
             ours: ours_text,
             theirs: theirs_text,
             gitmerged,
+            present: present_answer,
+            unverified_git_merge,
         });
     }
     Ok(plan)
+}
+
+/// git's clean line merge of a file passes the check weave's own merge must
+/// pass before it may call a merge clean. Files too large or binary for
+/// structure keep git's guarantee, as weave's merge does.
+fn line_clean_holds(path: &str, base: &str, ours: &str, theirs: &str, merged: &str) -> bool {
+    if [base, ours, theirs, merged]
+        .iter()
+        .any(|t| t.len() > weave_core::merge::STRUCTURE_LIMIT_BYTES)
+    {
+        return true;
+    }
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        weave_core::verify::verify(base, ours, theirs, merged, path, &REGISTRY, &[])
+    }));
+    matches!(run, Ok(None))
+}
+
+/// The answer already in the tree for each path, per [`Present`]: a file's
+/// text, or `Delete` when the tree does not have it. A path the working
+/// tree's index holds unmerged has no answer here unless `unmerged` asks for
+/// in-place resolutions — a conflicted file is the resolver's to answer.
+/// Also: the paths the index holds unmerged (working-tree mode only).
+fn present_answers(
+    dir: &Path,
+    present: Option<&Present>,
+    paths: &[String],
+) -> R<(BTreeMap<String, Candidate>, BTreeSet<String>)> {
+    let mut out = BTreeMap::new();
+    let mut unmerged_paths = BTreeSet::new();
+    match present {
+        None => {}
+        Some(Present::Rev(rev)) => {
+            let at = gitscan::entries_at_rev(dir, rev, paths)?;
+            for p in paths {
+                match at.get(p).map(|e| &e.body) {
+                    Some(Body::Text(t)) => {
+                        out.insert(p.clone(), Candidate::File(t.clone()));
+                    }
+                    Some(_) => {}
+                    None => {
+                        out.insert(p.clone(), Candidate::Delete);
+                    }
+                }
+            }
+        }
+        Some(Present::WorkingTree { unmerged: take_unmerged }) => {
+            let unmerged: BTreeSet<String> =
+                gitscan::git(dir, &["diff", "--name-only", "--diff-filter=U", "-z"])?
+                    .split('\0')
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            unmerged_paths = unmerged.clone();
+            for p in paths
+                .iter()
+                .filter(|p| *take_unmerged || !unmerged.contains(*p))
+            {
+                let on_disk = dir.join(p);
+                match std::fs::read(&on_disk) {
+                    Ok(bytes) => {
+                        if let Ok(t) = String::from_utf8(bytes) {
+                            if !unmerged.contains(p) || markers(&t).is_empty() {
+                                out.insert(p.clone(), Candidate::File(t));
+                            }
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        out.insert(p.clone(), Candidate::Delete);
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+    Ok((out, unmerged_paths))
 }
 
 /// git's own line merge of one file, as `git merge` writes it (plain `merge`
@@ -1337,7 +1582,7 @@ pub fn render(plan: &Plan, reports: &[FileReport]) -> String {
     );
     if !plan.not_examined.is_empty() {
         out.push_str(&format!(
-            " ({} more that both sides changed git merged line-cleanly; not examined)",
+            " ({} more that both sides changed git merged line-cleanly, and the merge check passed)",
             plan.not_examined.len()
         ));
     }
@@ -1372,6 +1617,8 @@ mod tests {
             ours: Some(ours.into()),
             theirs: Some(theirs.into()),
             gitmerged: Some(gitmerged.into()),
+            present: None,
+            unverified_git_merge: false,
         }
     }
 
@@ -1406,8 +1653,16 @@ mod tests {
             "keep_this_line_git_merged()\na = 3\n"
         )
         .is_none());
-        // a clean git merge has no blocks: nothing to hold the candidate to
-        assert!(automerged(None, Some("keep_this_line_git_merged()\n"), "").is_none());
+        // a clean git merge (a unit only because the tree holds another
+        // answer, or git's failed the merge check): every line it wrote that
+        // base does not have must survive
+        assert!(automerged(None, Some("keep_this_line_git_merged()\n"), "").is_some());
+        assert!(automerged(
+            Some("keep_this_line_git_merged()\n"),
+            Some("keep_this_line_git_merged()\n"),
+            ""
+        )
+        .is_none());
     }
 
     /// The gate on a real three-way merge of `m.py`.
@@ -1602,6 +1857,70 @@ mod tests {
         ] {
             assert!(certify(&u, &bad).is_err(), "{what}: {:?}", certify(&u, &bad));
         }
+    }
+
+    // Two features each add `case 3:` to one switch. git
+    // merges it line-cleanly, the result does not compile.
+    const SW_BASE: &str = "package p\n\nfunc F(x int) int {\n\tswitch x {\n\tcase 1:\n\t\treturn 10\n\tcase 2:\n\t\treturn 20\n\t}\n\treturn 0\n}\n";
+    const SW_OURS: &str = "package p\n\nfunc F(x int) int {\n\tswitch x {\n\tcase 1:\n\t\treturn 10\n\tcase 3:\n\t\treturn 31\n\tcase 2:\n\t\treturn 20\n\t}\n\treturn 0\n}\n";
+    const SW_THEIRS: &str = "package p\n\nfunc F(x int) int {\n\tswitch x {\n\tcase 1:\n\t\treturn 10\n\tcase 2:\n\t\treturn 20\n\tcase 3:\n\t\treturn 32\n\t}\n\treturn 0\n}\n";
+
+    #[test]
+    fn a_line_clean_duplicate_case_fails_the_merge_check_and_the_gate() {
+        let (clean, merged) = line_merge(SW_BASE, SW_OURS, SW_THEIRS).unwrap();
+        assert!(clean, "git merges it line-cleanly");
+        assert!(!line_clean_holds("p.go", SW_BASE, SW_OURS, SW_THEIRS, &merged));
+        let u = Unit {
+            present: Some(Candidate::File(merged.clone())),
+            unverified_git_merge: true,
+            ..unit("p.go", SW_BASE, SW_OURS, SW_THEIRS, &merged)
+        };
+        let v = gate(&u, &Candidate::File(merged));
+        assert!(
+            v.findings.iter().any(|f| f.class == "DUP" && f.detail.contains("case `3`")),
+            "{v:?}"
+        );
+        let r = land_unit(&u, &Host::default(), None).unwrap();
+        assert_eq!(r.status, Status::Refused, "{r:?}");
+        // left conflicted, with markers, not as git's (compiling-looking) merge
+        match &r.landed {
+            Landed::Conflicted(Some(t)) => assert!(!markers(t).is_empty(), "{t}"),
+            other => panic!("{other:?}"),
+        }
+        // A resolution must state `case 3` once, so it differs from git's
+        // merge; keeping both sides' cases (one renumbered) passes, dropping
+        // one side's case does not.
+        let renumbered = SW_OURS.replace("case 3:\n\t\treturn 31", "case 4:\n\t\treturn 31")
+            .replace("\t}\n\treturn 0", "\tcase 3:\n\t\treturn 32\n\t}\n\treturn 0");
+        assert!(gate(&u, &Candidate::File(renumbered)).pass());
+        let v = gate(&u, &Candidate::File(SW_OURS.into()));
+        assert_eq!(v.reasons, vec!["DROPPED"], "{v:?}");
+    }
+
+    #[test]
+    fn the_answer_in_the_tree_is_judged_before_the_resolver() {
+        // a both-sides edit git conflicts on; the tree already holds a merge
+        // that keeps both changes
+        let base = "def f():\n    return 1\n\n\ndef g():\n    return 2\n";
+        let ours = "def f():\n    return 10\n\n\ndef g():\n    return 2\n";
+        let theirs = "def f():\n    return 1\n\n\ndef g():\n    return 20\n";
+        let (_, gm) = line_merge(base, ours, theirs).unwrap();
+        let both = "def f():\n    return 10\n\n\ndef g():\n    return 20\n";
+        let u = Unit {
+            present: Some(Candidate::File(both.into())),
+            ..unit("m.py", base, ours, theirs, &gm)
+        };
+        let r = land_unit(&u, &Host::default(), None).unwrap();
+        assert_ne!(r.status, Status::Refused, "{r:?}");
+        assert_eq!(r.landed, Landed::File(both.into()));
+        // one side's file as the answer drops the other's change (git merged
+        // this file line-cleanly: the change outside any block must survive)
+        let u = Unit {
+            present: Some(Candidate::File(ours.into())),
+            ..unit("m.py", base, ours, theirs, &gm)
+        };
+        let r = land_unit(&u, &Host::default(), None).unwrap();
+        assert_eq!(r.status, Status::Refused, "{r:?}");
     }
 
     #[test]

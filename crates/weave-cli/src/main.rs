@@ -20,7 +20,12 @@ EXAMPLES
              --certificate land.json    # PROVEN / VERIFIED / REFUSED per file
   git commit                            # refuses while any file is REFUSED
 
-  weave land --ours main --theirs agent/feature --json   # CI: report only";
+  weave land --ours main --theirs agent/feature --json   # CI: report only
+
+  # the whole landing: merge origin/main in, gate every file of the merge,
+  # build and test the merged tree, publish fast-forward only; retried when
+  # main moves, and the new merge is gated and built again
+  weave land --onto origin/main --verify-cmd 'go build ./... && go vet ./...'";
 
 #[derive(Parser)]
 #[command(
@@ -153,10 +158,23 @@ enum Commands {
     ///      that keeps one side of a block drops the other's: DROPPED). One
     ///      retry, with the findings fed back. Pass: VERIFIED. Fail: REFUSED.
     ///
+    /// Before any resolver, a file the merge already answered — one the merge
+    /// driver resolved (stage 0 in the index), or the --result revision's
+    /// file — is judged as it stands: PROVEN when it is weave's certified
+    /// merge, VERIFIED when it passes the gate.
+    ///
     /// PROVEN and VERIFIED files are written and staged. A REFUSED file keeps
     /// its conflict markers and stays unmerged; a resolver's rejected answer
-    /// is never written. Files both sides changed that git merges line-cleanly
-    /// are counted, not examined.
+    /// is never written. A file both sides changed that git merges
+    /// line-cleanly must still pass weave's merge check (nothing lost or
+    /// stated twice, no `case` label or map key twice), or it is a unit too.
+    ///
+    /// --onto <remote>/<branch> runs the whole landing and publishes: fetch,
+    /// merge the tip in (--no-commit), gate EVERY file of that merge, commit,
+    /// gate any other merge on the branch not yet checked, run --verify-cmd
+    /// on the final tree, then update <branch> on <remote> fast-forward only.
+    /// If the branch moved meanwhile, the new tip is merged and everything is
+    /// checked again. Any refusal publishes nothing (exit 1).
     ///
     /// Exit 0: every file PROVEN or VERIFIED. 1: some file REFUSED. 2: the run
     /// failed and nothing was landed.
@@ -188,6 +206,30 @@ enum Commands {
         /// Their side (default: MERGE_HEAD, i.e. the merge in progress)
         #[arg(long)]
         theirs: Option<String>,
+        /// With --base/--ours/--theirs: judge this revision's files as the
+        /// merge's answer (re-check a merge commit as it was committed)
+        #[arg(long, value_name = "REV")]
+        result: Option<String>,
+        /// Land the current branch onto <remote>/<branch> and publish it there
+        /// (see above): nothing is published that has not passed the gate,
+        /// and --verify-cmd, against the exact tip it is published onto
+        #[arg(long, value_name = "REMOTE/BRANCH", conflicts_with_all = ["base", "ours", "theirs", "result", "dry_run"])]
+        onto: Option<String>,
+        /// With --onto: run this (`sh -c`, in the repository root) on the final
+        /// merged tree before publishing; a non-zero exit refuses. At least a
+        /// build is recommended (`go build ./... && go vet ./...`,
+        /// `npm run build`, `cargo check`), better the affected tests
+        #[arg(long, value_name = "CMD", requires = "onto")]
+        verify_cmd: Option<String>,
+        /// Give up on the verify command after this many seconds
+        #[arg(long, default_value_t = 1800, value_name = "SECS")]
+        verify_timeout: u64,
+        /// With --onto: how many times to merge a moved tip and try again
+        #[arg(long, default_value_t = 5, value_name = "N")]
+        attempts: usize,
+        /// With --onto: write every gate certificate into this directory
+        #[arg(long, value_name = "DIR", requires = "onto")]
+        certificate_dir: Option<String>,
     },
     /// Typed entity ops: the write side of the agent contract. Extract the ops
     /// that turn one file into another, and apply them to a file that may have
@@ -326,19 +368,40 @@ fn main() {
             ref base,
             ref ours,
             ref theirs,
-        } => commands::land::run(
-            commands::land::Args {
-                base: base.as_deref(),
-                ours: ours.as_deref(),
-                theirs: theirs.as_deref(),
-                resolver: resolver.as_deref(),
-                resolver_timeout,
-                json,
-                certificate: certificate.as_deref(),
-                dry_run,
-            },
-            &host,
-        ),
+            ref result,
+            ref onto,
+            ref verify_cmd,
+            verify_timeout,
+            attempts,
+            ref certificate_dir,
+        } => match onto {
+            Some(target) => commands::land::run_onto(
+                commands::land::OntoArgs {
+                    target,
+                    resolver: resolver.as_deref(),
+                    resolver_timeout,
+                    verify_cmd: verify_cmd.as_deref(),
+                    verify_timeout,
+                    attempts,
+                    certificate_dir: certificate_dir.as_deref(),
+                },
+                &host,
+            ),
+            None => commands::land::run(
+                commands::land::Args {
+                    base: base.as_deref(),
+                    ours: ours.as_deref(),
+                    theirs: theirs.as_deref(),
+                    resolver: resolver.as_deref(),
+                    resolver_timeout,
+                    json,
+                    certificate: certificate.as_deref(),
+                    dry_run,
+                    result: result.as_deref(),
+                },
+                &host,
+            ),
+        },
         Commands::Patch { ref command } => match command {
             PatchCommands::Extract {
                 ref base_file,

@@ -435,6 +435,26 @@ fn verify_file(
         });
     }
 
+    // A key stated twice in one switch / match / literal where neither side
+    // states it twice: two branches for one `case`, two values for one map
+    // key — the merge's own rule ([`weave_core::verify::duplicate_keys`]).
+    if let (Some(o), Some(t)) = (ours, theirs) {
+        if let Some(u) =
+            weave_core::verify::duplicate_keys(file, o, t, work, &crate::parsers::REGISTRY)
+        {
+            out.push(Finding {
+                class: "DUP",
+                detail: u.detail,
+                suggestion: Some(
+                    "keep one element for the key, combining what both sides need; two \
+                     elements for one key do not compile in some languages and silently \
+                     drop one side's in others"
+                        .to_string(),
+                ),
+            });
+        }
+    }
+
     // Duplicate DEFINITIONS are worth their own finding: two `def f` in one
     // file is a language-level bug, not a stylistic repeat, and the second one
     // silently wins. Which is why the *identity* has to be the language's and
