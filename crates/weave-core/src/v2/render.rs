@@ -219,6 +219,19 @@ fn join_gaps<'t>(texts: impl IntoIterator<Item = &'t str>) -> String {
     out
 }
 
+/// `text` without the whole blank lines it starts with. A last line with no
+/// newline is indentation for what follows, and stays.
+fn drop_leading_blank_lines(text: &str) -> &str {
+    let mut rest = text;
+    while let Some(end) = rest.find('\n') {
+        if !rest[..end].trim().is_empty() {
+            break;
+        }
+        rest = &rest[end + 1..];
+    }
+    rest
+}
+
 /// Append one entity's text, with the separator that says another follows.
 fn push_entity(out: &mut String, text: &str, separator: Option<&str>) {
     match separator {
@@ -323,7 +336,20 @@ pub(crate) fn render(
                 keys.into_iter()
                     .filter_map(|key| interstitials.merged.get(key).map(String::as_str)),
             );
-            out.push_str(&joined);
+            // A blank run states a distance from the declaration before it.
+            // With nothing before it — the neighbour it separated was deleted
+            // and no header precedes — it states a distance from nothing, and
+            // emitting it made the file start with blank lines no version
+            // started with. Re-merging that output against the same side then
+            // stacked the side's run on top of it again: one more blank line
+            // per pass, no fixpoint. Text in the gap (a section comment) is
+            // kept; only the leading blank lines go.
+            let joined = if out.is_empty() {
+                drop_leading_blank_lines(&joined)
+            } else {
+                joined.as_str()
+            };
+            out.push_str(joined);
             if !joined.is_empty() && !joined.ends_with('\n') {
                 out.push('\n');
             }
@@ -364,11 +390,18 @@ pub(crate) fn render(
     // mechanism above — `Interstitials::new` pre-excludes it from
     // `lead_by_entity`/`trailing` because no entity survives on the side
     // that produced it — so folding it into this join is always safe.
+    //
+    // A rolled-forward gap that is only blank lines is the mirror of the
+    // leading case above: it stated the distance to a declaration that no
+    // longer follows, so behind the last survivor it states a distance to
+    // nothing and would leave a blank line at the end no version ended with.
+    // The footer is the file's own statement about its end and stays.
     let tail: Vec<&str> = interstitials
         .trailing
         .iter()
         .filter(|key| spent.insert(key.as_str()))
         .filter_map(|key| interstitials.merged.get(key.as_str()).map(String::as_str))
+        .filter(|text| !text.trim().is_empty())
         .chain(interstitials.merged.get("file_footer").map(String::as_str))
         .chain(interstitials.merged.get("file_only").map(String::as_str))
         .collect();

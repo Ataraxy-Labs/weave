@@ -11,6 +11,11 @@
 //! Exit 1 still writes a usable file: conflicts are *inside* the artifact.
 //! Exit 2 means the artifact must not be trusted at all. Never conflate them.
 //!
+//! Exit 0 is only given to a result weave could verify (`weave_core::verify`):
+//! no markers, no line both sides kept dropped, nothing stated more often than
+//! either side stated it, and it parses when both sides do. A composition that
+//! fails a check is written as a conflict instead — the merge fails closed.
+//!
 //! ## Warnings channel (stderr, machine-parseable)
 //!
 //! "Clean" is not the same as "safe". When the merge resolves cleanly but
@@ -63,7 +68,7 @@ use std::fs;
 use std::path::Path;
 use std::process;
 
-use weave_core::host::{git_line_merge, Host};
+use weave_core::host::{git_line_merge, git_set_attribute, Host};
 use weave_core::merge::is_binary;
 use weave_core::stats::WeaveLifetimeStats;
 use weave_core::validate::{SemanticWarning, WarningKind};
@@ -111,9 +116,20 @@ ENVIRONMENT:
                                  filesystem work beyond the files it was
                                  given.
 
+ATTRIBUTES:
+    weave-set[=<names>]          declare containers of a file to be sets, so
+                                 two branches' insertions at one point of a
+                                 list, statement sequence, match arms, INI
+                                 multi-line value or YAML sequence merge as a
+                                 union instead of conflicting. Bare: every
+                                 container in the file; a value: the
+                                 containers of those names. Read with
+                                 `git check-attr`, only when needed.
+
 EXIT CODES (three states, stable contract):
-    exit 0    clean     — merge fully resolved; result written
+    exit 0    clean     — merge fully resolved AND verified; result written
     exit 1    conflict  — result written WITH conflict markers; needs a human
+                          (including a composition weave could not verify)
     exit 2    error     — no usable result (bad usage, unreadable input, binary)
 
     exit 1 still writes a usable file; exit 2 means the output must not be
@@ -331,6 +347,9 @@ fn run(started: std::time::Instant) -> Result<Verdict, Refusal> {
     let host = Host {
         max_duplicates: env_usize("WEAVE_MAX_DUPLICATES").unwrap_or(Host::default().max_duplicates),
         line_merge: Some(git_line_merge),
+        // The `weave-set` gitattribute: read only when an order-sensitive
+        // container stands between a conflict and a union.
+        set_attribute: Some(git_set_attribute),
     };
     let merged_at = std::time::Instant::now();
     let result = entity_merge_fmt(&base, &ours, &theirs, &file_path, &fmt, &host);
@@ -436,6 +455,14 @@ fn run(started: std::time::Instant) -> Result<Verdict, Refusal> {
             auto_resolved,
             result.stats.confidence()
         );
+    }
+
+    // A file the entity merge refused and a deterministic rule settled says
+    // which rule, so a clean exit is never silent about how it was reached.
+    for a in &result.audit {
+        if let weave_core::ResolutionStrategy::RuleSettled { rules } = &a.resolution {
+            eprintln!("weave: {file_path} settled by rule: {}", rules.join(", "));
+        }
     }
 
     // Print stats to stderr only when verbose or conflicted

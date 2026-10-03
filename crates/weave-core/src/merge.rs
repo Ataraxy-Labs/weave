@@ -16,7 +16,7 @@
 //!      predate v2 and were kept because v2 needed exactly them; each is reached
 //!      from `v2::mod`, `v2::resolve`, `statement` or `container`.
 //!   3. **The line-level route** — [`line_level_fallback`] and what it calls
-//!      (`skip_expansion`, `expand_separators`, `git_merge_file`, `diffy_fallback`).
+//!      (`line_merge_file`, `diffy_fallback`).
 //!      Reached only after v2 returns a typed `Unsupported` verdict, or on the
 //!      size and binary pre-checks above. Nothing on this route produces an
 //!      audit trail, so a fallback merge reports bytes and no per-entity story.
@@ -36,6 +36,17 @@ use serde::Serialize;
 /// Avoids recreating 11 tree-sitter language parsers per merge call.
 pub(crate) static PARSER_REGISTRY: LazyLock<ParserRegistry> =
     LazyLock::new(create_default_registry);
+
+/// The largest file weave reads for structure. Above it a file is merged, and
+/// checked, line by line only — git's guarantees, nothing composed.
+///
+/// Structure costs more than bytes: entity extraction in `sem-core` is
+/// quadratic in the number of same-named siblings (a data file of a hundred
+/// thousand `<item>` elements spins for minutes), so a structural pass over an
+/// unbounded file is a pass that may never finish. The merge and `weave check`
+/// share this one ceiling, so the two never disagree about which files have
+/// structure.
+pub const STRUCTURE_LIMIT_BYTES: usize = 1_000_000;
 
 /// Extensions that PARSE but merge worse than git's own line strategy, so
 /// `weave setup` must not claim them for `merge=weave`. Their entity model
@@ -61,6 +72,14 @@ pub const DECLINED_EXTENSIONS: &[&str] = &[
     ".svelte.spec.js",
     ".svelte.spec.ts",
 ];
+
+/// Extensions no grammar parses that a deterministic rule reads line by line:
+/// INI files, whose keys inside one section merge as a union
+/// (`D3 container insertion union`, see `insertion.rs`). `weave setup` claims
+/// them next to [`supported_merge_extensions`]; a merge of one takes the
+/// line-level route, so what weave adds over git is exactly the rules, and
+/// every answer passes the same gate.
+pub const LINE_RULE_EXTENSIONS: &[&str] = &[".cfg", ".ini"];
 
 /// The file extensions `weave setup` should write `*.<ext> merge=weave` lines
 /// for: every extension the parser registry recognises in this build, minus
@@ -125,6 +144,13 @@ pub enum ResolutionStrategy {
     Renamed {
         from: String,
         to: String,
+    },
+    /// A file the merge had refused, settled because every conflicted region
+    /// fell under a rule whose answer does not depend on intent (agreement,
+    /// subsumption, set union, a layout-only side — `determinate.rs`), and the
+    /// result passed the gate. `rules` names them.
+    RuleSettled {
+        rules: Vec<String>,
     },
 }
 
@@ -270,6 +296,91 @@ pub fn entity_merge_with_registry(
     marker_format: &MarkerFormat,
     host: &Host,
 ) -> MergeResult {
+    let composed = compose(base, ours, theirs, file_path, registry, marker_format, host);
+    if composed.is_clean() {
+        return composed;
+    }
+    settle(composed, base, ours, theirs, file_path, registry, host)
+}
+
+/// A conflicted merge, settled by the deterministic rules if one applies to
+/// every conflicted region (see `determinate.rs`), else returned as it came.
+///
+/// The entity model's verdicts that one side removed what the other kept
+/// changing — modify/delete, two different renames of one declaration — are
+/// questions of intent no line rule can answer, and so is a file whose inputs
+/// already carry conflict markers; those stay conflicts. The others (both
+/// modified, both added one name, a rename against an edit) are about content,
+/// and a rule may settle them. The settled text must pass the gate every
+/// composition passes, and is refused if a declaration one side deleted (or
+/// renamed away) was changed by the other in more than layout.
+fn settle(
+    conflicted: MergeResult,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    file_path: &str,
+    registry: &ParserRegistry,
+    host: &Host,
+) -> MergeResult {
+    let about_content = conflicted.conflicts.iter().all(|c| {
+        !matches!(
+            c.kind,
+            ConflictKind::ModifyDelete { .. } | ConflictKind::RenameRename { .. }
+        )
+    });
+    if !about_content
+        || [base, ours, theirs]
+            .iter()
+            .any(|t| has_conflict_markers(t) || is_binary(t) || t.len() > STRUCTURE_LIMIT_BYTES)
+    {
+        return conflicted;
+    }
+    let Some(settled) = crate::determinate::settle(base, ours, theirs, file_path, registry, host)
+    else {
+        return conflicted;
+    };
+    if crate::determinate::has_modify_delete(base, ours, theirs, file_path, registry)
+        || crate::verify::verify(
+            base,
+            ours,
+            theirs,
+            &settled.content,
+            file_path,
+            registry,
+            &[],
+        )
+        .is_some()
+    {
+        return conflicted;
+    }
+    MergeResult {
+        content: settled.content,
+        conflicts: vec![],
+        // The refused composition's warnings describe text this is not.
+        warnings: vec![],
+        stats: MergeStats::default(),
+        audit: vec![EntityAudit {
+            name: "(file)".to_string(),
+            entity_type: "file".to_string(),
+            resolution: ResolutionStrategy::RuleSettled {
+                rules: settled.rules.iter().map(|r| r.to_string()).collect(),
+            },
+        }],
+    }
+}
+
+/// Everything up to and including the gate: the fast paths, subsumption, the
+/// entity pipeline or the line route, and `fail_closed`.
+fn compose(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    file_path: &str,
+    registry: &ParserRegistry,
+    marker_format: &MarkerFormat,
+    host: &Host,
+) -> MergeResult {
     // The `refused_by:` line's comment prefix is a fact about the file, and
     // this is the one function that has both the file path and the marker
     // format. Deriving it here means every consumer gets a refusal line that is
@@ -368,29 +479,22 @@ pub fn entity_merge_with_registry(
             theirs,
             crate::v2::entity_separator(file_path),
         ) {
-            let (content, stats) = match side {
-                crate::subsumption::Superset::Ours => (
+            let (superset, subsumed) = match side {
+                crate::subsumption::Superset::Ours => (ours, theirs),
+                crate::subsumption::Superset::Theirs => (theirs, ours),
+            };
+            if superset_is_sound(base, superset, subsumed, file_path, registry) {
+                return take_superset(
+                    side,
+                    base,
                     ours,
-                    MergeStats {
-                        entities_ours_only: 1,
-                        ..Default::default()
-                    },
-                ),
-                crate::subsumption::Superset::Theirs => (
                     theirs,
-                    MergeStats {
-                        entities_theirs_only: 1,
-                        ..Default::default()
-                    },
-                ),
-            };
-            return MergeResult {
-                content: content.to_string(),
-                conflicts: vec![],
-                warnings: vec![],
-                stats,
-                audit: vec![],
-            };
+                    file_path,
+                    registry,
+                    marker_format,
+                    host,
+                );
+            }
         }
     }
 
@@ -402,7 +506,10 @@ pub fn entity_merge_with_registry(
     }
 
     // Large file fallback
-    if base.len() > 1_000_000 || ours.len() > 1_000_000 || theirs.len() > 1_000_000 {
+    if [base, ours, theirs]
+        .iter()
+        .any(|t| t.len() > STRUCTURE_LIMIT_BYTES)
+    {
         return line_level_fallback(base, ours, theirs, file_path, host);
     }
 
@@ -415,9 +522,215 @@ pub fn entity_merge_with_registry(
     // that per-entity verdicts would be fiction. Those are properties of the
     // input, not fallbacks from v2 failing.
     // ------------------------------------------------------------------
-    match crate::v2::merge_file(base, ours, theirs, file_path, registry, marker_format, host) {
-        Ok(result) => result,
-        Err(_unsupported) => line_level_fallback(base, ours, theirs, file_path, host),
+    let composed =
+        match crate::v2::merge_file(base, ours, theirs, file_path, registry, marker_format, host) {
+            Ok(result) => result,
+            Err(_unsupported) => line_level_fallback(base, ours, theirs, file_path, host),
+        };
+    fail_closed(
+        composed,
+        base,
+        ours,
+        theirs,
+        file_path,
+        registry,
+        marker_format,
+        host,
+    )
+}
+
+/// The superset side's own file, as the merge — see `subsumption.rs`.
+#[allow(clippy::too_many_arguments)]
+fn take_superset(
+    side: crate::subsumption::Superset,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    file_path: &str,
+    registry: &ParserRegistry,
+    marker_format: &MarkerFormat,
+    host: &Host,
+) -> MergeResult {
+    let (content, stats) = match side {
+        crate::subsumption::Superset::Ours => (
+            ours,
+            MergeStats {
+                entities_ours_only: 1,
+                ..Default::default()
+            },
+        ),
+        crate::subsumption::Superset::Theirs => (
+            theirs,
+            MergeStats {
+                entities_theirs_only: 1,
+                ..Default::default()
+            },
+        ),
+    };
+    let subsumed = MergeResult {
+        content: content.to_string(),
+        conflicts: vec![],
+        warnings: vec![],
+        stats,
+        audit: vec![],
+    };
+    // A superset is a file a developer wrote — but a data file that no
+    // longer loads, where the other side's still does, is not one
+    // anybody can use. That one is checked like a composition.
+    let small = content.len() <= STRUCTURE_LIMIT_BYTES;
+    if small
+        && crate::verify::structured_data(Some(ours), Some(theirs), content, file_path).is_some()
+    {
+        return fail_closed(
+            subsumed,
+            base,
+            ours,
+            theirs,
+            file_path,
+            registry,
+            marker_format,
+            host,
+        );
+    }
+    subsumed
+}
+
+/// The two guards the textual subsumption rule cannot state, asked of the
+/// declarations: the superset must be a file that parses when the subsumed
+/// side's does, and it must carry every deletion the subsumed side made.
+///
+/// The second is the move case at the granularity where it is unambiguous. A
+/// diff reads "moved and edited" as "deleted here, added there", and a
+/// one-line declaration (a JSON key, an assignment) that was moved AND edited
+/// leaves no line behind for the textual guard to count. Its name is still
+/// there: a base declaration the subsumed side removed that the superset still
+/// declares as often as base did was not deleted by the superset, so the
+/// deletion is not carried — that is modify/delete, and it goes to the
+/// pipeline, which conflicts on it.
+fn superset_is_sound(
+    base: &str,
+    superset: &str,
+    subsumed: &str,
+    file_path: &str,
+    registry: &ParserRegistry,
+) -> bool {
+    if [base, superset, subsumed]
+        .iter()
+        .any(|t| t.len() > STRUCTURE_LIMIT_BYTES)
+    {
+        return true;
+    }
+    // Two creations, no base. What the smaller one wrote the larger wrote too,
+    // so the larger reads as "both, and more" — unless the more is another
+    // copy of a block both wrote. With no base there is no telling whether the
+    // larger side pasted the block again or the smaller side removed the
+    // repetition (four member declarations stated twice in one class): the two
+    // creations agree that the block exists and disagree about how often, and
+    // that is theirs to settle.
+    if base.trim().is_empty() && crate::verify::block_restated(subsumed, superset).is_some() {
+        return false;
+    }
+    let parse = |text: &str| {
+        let (entities, tree) = registry
+            .extract_entities_with_tree(file_path, text)
+            .unwrap_or_default();
+        let broken = tree.map(|t| t.root_node().has_error());
+        let mut names: HashMap<(String, String), usize> = HashMap::new();
+        // A fallback `chunk` is named by its line range, not declared.
+        for e in entities
+            .iter()
+            .filter(|e| e.parent_id.is_none() && e.entity_type != "chunk")
+        {
+            *names
+                .entry((e.entity_type.clone(), e.name.clone()))
+                .or_insert(0) += 1;
+        }
+        (names, broken)
+    };
+    let (b, _) = parse(base);
+    let (x, x_broken) = parse(superset);
+    let (y, y_broken) = parse(subsumed);
+    if x_broken == Some(true) && y_broken == Some(false) {
+        return false;
+    }
+    let count =
+        |m: &HashMap<(String, String), usize>, k: &(String, String)| m.get(k).copied().unwrap_or(0);
+    b.iter()
+        .all(|(k, n)| !(count(&y, k) < *n && count(&x, k) >= *n))
+}
+
+/// The last word on a composed merge: a clean answer that fails
+/// [`crate::verify::verify`] is not returned as clean.
+///
+/// Everything above this returned either one side's own file (the fast paths,
+/// which compose nothing and are not checked) or a composition. A composition
+/// is a claim that the two sides' edits were independent, and this is where
+/// the claim is tested against the three inputs. When it fails, the merge
+/// falls back to exactly what git would have done — the line-level merge —
+/// and, if even that comes back clean, checks it the same way: a clean answer
+/// weave cannot verify is written as one conflict box over the whole file.
+///
+/// The refusal travels as the conflict's `entity_type` (`unverified merge`)
+/// and its name (which check, and the evidence), so the driver's stderr line
+/// and `weave explain` both say why.
+fn fail_closed(
+    composed: MergeResult,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    file_path: &str,
+    registry: &ParserRegistry,
+    marker_format: &MarkerFormat,
+    host: &Host,
+) -> MergeResult {
+    if !composed.is_clean() {
+        return composed;
+    }
+    let renames: Vec<(String, String)> = composed
+        .audit
+        .iter()
+        .filter_map(|a| match &a.resolution {
+            ResolutionStrategy::Renamed { from, to } if !from.is_empty() => {
+                Some((from.clone(), to.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let verify = |merged: &str, renames: &[(String, String)]| {
+        crate::verify::verify(base, ours, theirs, merged, file_path, registry, renames)
+    };
+    let Some(refusal) = verify(&composed.content, &renames) else {
+        return composed;
+    };
+
+    let mut stats = composed.stats.clone();
+    stats.mark_fallback();
+    let line = line_merge_file(base, ours, theirs, stats.clone(), host);
+    if line.is_clean() && verify(&line.content, &[]).is_none() {
+        // Git's own answer, and it verifies: weave is never worse than git.
+        return line;
+    }
+    let conflict = EntityConflict {
+        entity_name: refusal.to_string(),
+        entity_type: "unverified merge".to_string(),
+        kind: ConflictKind::BothModified,
+        complexity: classify_conflict(Some(base), Some(ours), Some(theirs)),
+        ours_content: Some(ours.to_string()),
+        theirs_content: Some(theirs.to_string()),
+        base_content: Some(base.to_string()),
+    };
+    let content = if line.is_clean() {
+        conflict.to_conflict_markers(marker_format, "fail_closed")
+    } else {
+        line.content
+    };
+    stats.entities_conflicted = stats.entities_conflicted.max(1);
+    MergeResult {
+        content,
+        conflicts: vec![conflict],
+        warnings: composed.warnings,
+        stats,
+        audit: composed.audit,
     }
 }
 
@@ -620,6 +933,7 @@ pub(crate) fn merge_interstitials(
     theirs_regions: &[FileRegion],
     marker_format: &MarkerFormat,
     kept_imports: &[String],
+    file_path: &str,
 ) -> (HashMap<String, String>, Vec<EntityConflict>) {
     let base_map: HashMap<&str, &str> = base_regions
         .iter()
@@ -728,7 +1042,15 @@ pub(crate) fn merge_interstitials(
                 let (result, order_conflict) =
                     merge_imports_commutatively(base_content, ours_content, theirs_content);
                 order_conflicted = order_conflict;
-                if !order_conflict {
+                if !order_conflict
+                    && import_union_licensed(
+                        file_path,
+                        base_content,
+                        ours_content,
+                        theirs_content,
+                        &result,
+                    )
+                {
                     ladder.push(result);
                 }
             }
@@ -805,6 +1127,43 @@ pub(crate) fn merge_interstitials(
     }
 
     (merged, interstitial_conflicts)
+}
+
+/// May the import union answer this region?
+///
+/// The union treats an import region as a SET of import items, which is only
+/// the region's meaning when that is all either side changed in it: pure
+/// additions and removals of distinct items. Two things break that, and each
+/// sends the region down the ladder to the line merge instead:
+///
+/// * a side changed a line that is not an import — a license header, a
+///   comment, a `try:` guard. The union has no position for it, so it would
+///   land wherever the rebuild happens to put it (a header after the imports).
+/// * the union binds a name, or states a `package`, more often than either
+///   side does. Then both sides changed the SAME item — pointed one import at
+///   two modules, turned it into two different lines — and keeping both is two
+///   declarations of one name.
+fn import_union_licensed(
+    file_path: &str,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    union: &str,
+) -> bool {
+    let prose = |text: &str| {
+        let mut other: Vec<String> = parse_import_statements(text)
+            .1
+            .into_iter()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        other.sort();
+        other
+    };
+    let base_other = prose(base);
+    base_other == prose(ours)
+        && base_other == prose(theirs)
+        && crate::verify::region_binds_twice(file_path, ours, theirs, union).is_none()
 }
 
 /// Put back every `kept` import line that `base` has and `merged` lost, at the
@@ -1872,117 +2231,25 @@ fn import_prefix_affinity(a: &str, b: &str) -> usize {
         .count()
 }
 
-/// Fallback to line-level 3-way merge when entity extraction isn't possible.
+/// The line-level route, for a file weave does not merge at entity
+/// granularity: git's own merge, answered exactly as git would answer it.
 ///
-/// Inserts newlines around syntactic separators ({, }, ;) so that changes in
-/// different code blocks align independently before line-level merge, reducing
-/// spurious conflicts.
-///
-/// Separator expansion is skipped for data formats (JSON, YAML, TOML, lock
-/// files) where `{`, `}`, `;` are structural content rather than code
-/// separators. Expanding them destroys alignment and produces far more
-/// conflicts.
+/// This route used to try a second reading first — split every line at `{`,
+/// `}` and `;` and merge the pieces — and take it whenever it came back clean
+/// where git's did not. That composes two edits to ONE line whenever a
+/// separator falls between them, which is the token fusion the entity path
+/// refuses; on a file with no grammar there is even less to justify it. A
+/// file weave cannot model gets git's verdict, not a finer guess.
 pub(crate) fn line_level_fallback(
     base: &str,
     ours: &str,
     theirs: &str,
-    file_path: &str,
+    _file_path: &str,
     host: &Host,
 ) -> MergeResult {
     let mut stats = MergeStats::default();
     stats.mark_fallback();
-
-    // Skip separator expansion for data formats where {/}/; are content, not
-    // separators — and for any input that already carries the marker byte, the
-    // one case where the expansion would not be invertible.
-    let skip = skip_expansion(file_path) || !expansion_safe(base, ours, theirs);
-
-    if skip {
-        // Use git merge-file for data formats so we match git's output exactly.
-        // diffy::merge uses a different diff algorithm that can produce more
-        // conflict markers on structured data like lock files.
-        return line_merge_file(base, ours, theirs, stats, host);
-    }
-
-    // Try separator expansion + diffy first, then compare against git merge-file.
-    // Use whichever produces fewer conflict markers so we're never worse than git.
-    let base_expanded = expand_separators(base);
-    let ours_expanded = expand_separators(ours);
-    let theirs_expanded = expand_separators(theirs);
-
-    let expanded_result = match diffy::merge(&base_expanded, &ours_expanded, &theirs_expanded) {
-        Ok(merged) => {
-            let content = collapse_separators(&merged);
-            Some(MergeResult {
-                content,
-                conflicts: vec![],
-                warnings: vec![],
-                stats: stats.clone(),
-                audit: vec![],
-            })
-        }
-        Err(_) => {
-            // Separator expansion conflicted, try plain diffy
-            match diffy::merge(base, ours, theirs) {
-                Ok(merged) => Some(MergeResult {
-                    content: merged,
-                    conflicts: vec![],
-                    warnings: vec![],
-                    stats: stats.clone(),
-                    audit: vec![],
-                }),
-                Err(conflicted) => {
-                    let mut s = stats.clone();
-                    s.entities_conflicted = 1;
-                    Some(MergeResult {
-                        content: conflicted,
-                        conflicts: vec![EntityConflict {
-                            entity_name: "(file)".to_string(),
-                            entity_type: "file".to_string(),
-                            kind: ConflictKind::BothModified,
-                            complexity: classify_conflict(Some(base), Some(ours), Some(theirs)),
-                            ours_content: Some(ours.to_string()),
-                            theirs_content: Some(theirs.to_string()),
-                            base_content: Some(base.to_string()),
-                        }],
-                        warnings: vec![],
-                        stats: s,
-                        audit: vec![],
-                    })
-                }
-            }
-        }
-    };
-
-    // Get the line-level merge as our floor
-    let git_result = line_merge_file(base, ours, theirs, stats, host);
-
-    // Compare: use expanded result only if it has fewer or equal markers
-    match expanded_result {
-        Some(expanded) if expanded.conflicts.is_empty() && !git_result.conflicts.is_empty() => {
-            // Separator expansion resolved cleanly, git did not: use it
-            expanded
-        }
-        Some(expanded) if !expanded.conflicts.is_empty() && !git_result.conflicts.is_empty() => {
-            // Both conflicted: use whichever has fewer markers
-            let expanded_markers = expanded
-                .content
-                .lines()
-                .filter(|l| l.starts_with("<<<<<<<"))
-                .count();
-            let git_markers = git_result
-                .content
-                .lines()
-                .filter(|l| l.starts_with("<<<<<<<"))
-                .count();
-            if expanded_markers <= git_markers {
-                expanded
-            } else {
-                git_result
-            }
-        }
-        _ => git_result,
-    }
+    line_merge_file(base, ours, theirs, stats, host)
 }
 
 /// The line-level merge, taken through whatever route the caller granted.
@@ -2591,158 +2858,6 @@ pub(crate) fn has_conflict_markers(content: &str) -> bool {
     content.contains("<<<<<<<") && content.contains(">>>>>>>")
 }
 
-/// Returns true for data/config file formats where separator expansion
-/// (`{`, `}`, `;`) is counterproductive because those chars are structural
-/// content rather than code block separators.
-///
-/// Reached only on the line-level fallback route — the one a file takes after
-/// the typed `Unsupported` verdict — so it is asked only of files weave has
-/// already declined to merge at entity granularity.
-///
-/// Note: template files like .svelte/.vue are NOT included here because their
-/// embedded `<script>` sections contain real code where separator expansion helps.
-fn skip_expansion(file_path: &str) -> bool {
-    let path_lower = file_path.to_lowercase();
-    let extensions = [
-        // Data/config formats
-        ".json",
-        ".yaml",
-        ".yml",
-        ".toml",
-        ".lock",
-        ".xml",
-        ".csv",
-        ".tsv",
-        ".ini",
-        ".cfg",
-        ".conf",
-        ".properties",
-        ".env",
-        // Markup/document formats
-        ".md",
-        ".markdown",
-        ".txt",
-        ".rst",
-        ".svg",
-        ".html",
-        ".htm",
-    ];
-    extensions.iter().any(|ext| path_lower.ends_with(ext))
-}
-
-/// The byte that marks a line break the expansion invented.
-///
-/// U+0001 (SOH) is a C0 control character: no mainstream programming-language
-/// grammar admits it outside a string literal, and `expansion_safe` refuses the
-/// whole transform on any input that contains one, so a marker in the expanded
-/// text can only be one this function wrote.
-const EXPANSION_MARK: u8 = 0x01;
-
-/// Can this triple be expanded and collapsed without ambiguity?
-///
-/// Exactly one precondition: none of the three versions already contains the
-/// marker byte. Then `collapse_separators ∘ expand_separators = id`, and every
-/// marker the merge sees is the expander's own.
-fn expansion_safe(base: &str, ours: &str, theirs: &str) -> bool {
-    let has_mark = |s: &str| s.as_bytes().contains(&EXPANSION_MARK);
-    !has_mark(base) && !has_mark(ours) && !has_mark(theirs)
-}
-
-/// Expand syntactic separators into separate lines for finer merge alignment.
-/// Isolating separators lets line-based merge see block boundaries as
-/// independent change units.
-/// Uses byte-level iteration since separators ({, }, ;) and string delimiters
-/// (", ', `) are all ASCII.
-///
-/// **Every line break this inserts is marked.** The expansion is a lens, not a
-/// reformat: the merge happens in the expanded world and the answer is read
-/// back in the original one, so the transform has to be exactly invertible. It
-/// was not. `collapse_separators` used to guess which separator-only lines it
-/// had created, and its one join branch was unreachable (`result` always ends
-/// with `\n` at the top of the loop), so collapse was a no-op and any file that
-/// took this path came back with every `{`, `}` and `;` on a line of its own
-/// and a blank line after each one — text every version agreed on, destroyed by
-/// a merge that reported success, and a real regression in files where a
-/// separator sits at a line boundary the merge collapses. Marking the
-/// inserted breaks makes the inverse a deletion of marked bytes rather than a
-/// guess.
-fn expand_separators(content: &str) -> String {
-    let bytes = content.as_bytes();
-    let mut result = Vec::with_capacity(content.len() * 3);
-    let mut in_string = false;
-    let mut escape_next = false;
-    let mut string_char = b'"';
-
-    for &b in bytes {
-        if escape_next {
-            result.push(b);
-            escape_next = false;
-            continue;
-        }
-        if b == b'\\' && in_string {
-            result.push(b);
-            escape_next = true;
-            continue;
-        }
-        if !in_string && (b == b'"' || b == b'\'' || b == b'`') {
-            in_string = true;
-            string_char = b;
-            result.push(b);
-            continue;
-        }
-        if in_string && b == string_char {
-            in_string = false;
-            result.push(b);
-            continue;
-        }
-
-        if !in_string && (b == b'{' || b == b'}' || b == b';') {
-            if result.last() != Some(&b'\n') && !result.is_empty() {
-                result.push(EXPANSION_MARK);
-                result.push(b'\n');
-            }
-            result.push(b);
-            result.push(EXPANSION_MARK);
-            result.push(b'\n');
-        } else {
-            result.push(b);
-        }
-    }
-
-    // Safe: we only inserted ASCII bytes into valid UTF-8 content
-    unsafe { String::from_utf8_unchecked(result) }
-}
-
-/// Collapse separator expansion back to original formatting: the exact inverse
-/// of [`expand_separators`] under [`expansion_safe`].
-///
-/// A marked line break is one the expander invented, so undoing the expansion
-/// is deleting every `MARK NL` pair — and nothing else. Text the merge carried
-/// through from any version keeps its own bytes, including its blank lines and
-/// its trailing newline, because this function never writes a byte of its own.
-/// A bare marker with no newline after it can only come from a merge that split
-/// the pair; dropping it keeps the output free of control characters.
-fn collapse_separators(merged: &str) -> String {
-    let bytes = merged.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == EXPANSION_MARK {
-            // MARK NL is one inserted break; a lone MARK is debris.
-            if bytes.get(i + 1) == Some(&b'\n') {
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-        result.push(bytes[i]);
-        i += 1;
-    }
-    // Safe: deleting whole ASCII bytes from valid UTF-8 leaves valid UTF-8.
-    unsafe { String::from_utf8_unchecked(result) }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2916,76 +3031,19 @@ export function agentB() {
         assert!(result.stats.used_fallback);
     }
 
-    #[test]
-    fn test_expand_separators() {
-        let code = "function foo() { return 1; }";
-        let expanded = expand_separators(code);
-        // Separators are alone on their line, each break carrying its mark.
-        let seen: Vec<&str> = expanded.lines().map(str::trim_end).collect();
-        assert!(
-            seen.iter().any(|l| l.trim_end_matches('\u{1}') == "{"),
-            "opening brace should stand alone: {expanded:?}"
-        );
-        assert!(
-            seen.iter().any(|l| l.trim_end_matches('\u{1}') == ";"),
-            "semicolon should stand alone: {expanded:?}"
-        );
-        assert!(
-            seen.iter().any(|l| l.trim_end_matches('\u{1}') == "}"),
-            "closing brace should stand alone: {expanded:?}"
-        );
-    }
-
-    #[test]
-    fn test_expand_separators_preserves_strings() {
-        let code = r#"let x = "hello { world };";"#;
-        let expanded = expand_separators(code);
-        // Separators inside strings should NOT be expanded
-        assert!(
-            expanded.contains("\"hello { world };\""),
-            "Separators in strings should be preserved: {}",
-            expanded
-        );
-    }
-
-    /// Round-tripping the transform. Everything the fallback path claims rests
-    /// on this: the
-    /// merge is computed in the expanded world and read back in the original
-    /// one, so if the transform is not exactly invertible the merge ships a
-    /// reformat nobody asked for. It used to not be — collapse was a no-op.
-    #[test]
-    fn separator_expansion_is_invertible() {
-        for code in [
-            "function foo() { return 1; }",
-            "use crate::*;\nuse std::fs;\n",
-            "buildscript {\n    repositories {\n        jcenter()\n    }\n}\n\nrepositories {\n}\n",
-            "class A {\n\tint x = 1;\n\n\tvoid f() {\n\t\tg();\n\t}\n}\n",
-            r#"let x = "hello { world };";"#,
-            "no separators here at all\n",
-            "",
-            "trailing blank lines\n\n\n",
-            "\n\nleading blank lines\nx = 1;\n",
-        ] {
-            assert_eq!(
-                collapse_separators(&expand_separators(code)),
-                code,
-                "collapse ∘ expand must be the identity on {code:?}"
-            );
-        }
-    }
-
     /// A reduced real-world case: one side reorders two `use` lines, the other
     /// appends a third. No entity model reaches a bare `use` list, so this is
     /// the fallback path, and it used to come back with every `;` on a line of
     /// its own — three lines all three versions agreed on, gone from a merge
-    /// that exited clean.
+    /// that exited clean. The edits are adjacent, so the line merge now calls
+    /// it a conflict, as git does; every line still survives as a line.
     #[test]
     fn reordered_use_statements_keep_their_lines() {
         let base = "use crate::*;\nuse std::fs;\n";
         let ours = "use std::fs;\nuse crate::*;\n";
         let theirs = "use crate::*;\nuse std::fs;\nuse itertools::Itertools;\n";
         let out = line_level_fallback(base, ours, theirs, "x.rs", &Host::default());
-        assert!(out.is_clean(), "should still resolve: {:?}", out.content);
+        assert!(!out.is_clean(), "adjacent edits: {:?}", out.content);
         for line in ["use std::fs;", "use crate::*;", "use itertools::Itertools;"] {
             assert!(
                 out.content.lines().any(|l| l.trim_end() == line),

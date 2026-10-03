@@ -448,6 +448,7 @@ pub(crate) fn merge_file(
         &theirs_regions,
         marker_format,
         &kept_imports,
+        file_path,
     );
     let placement = plan::plan(
         &matching.arena,

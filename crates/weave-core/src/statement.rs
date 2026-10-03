@@ -50,20 +50,16 @@
 //! measure and the depth counter is the well-founded one.
 //!
 //! Below the bottom level, and below a statement that is not a block, there is
-//! one more partition and then there is diff3. Two disjoint edits to a single
-//! LINE used to stay a conflict here, because composing them needs a partition
-//! into TOKENS and that partition's failure mode is new — a syntactically valid
-//! sentence neither side wrote. [`crate::expression`] is
-//! that partition, and it is reached from exactly one arm of this module: the
-//! `(Edited, Edited)` cell, after `formatting_tie`, after diff3, after the block
-//! recursion, immediately before the marker. It answers `None` for everything it
-//! is not sure of, so the arm it sits in still writes the same marker it always
-//! did unless a composition is licensed outright.
+//! diff3 and then a marker. Two edits to a single LINE are a conflict: composing
+//! them needs a partition into tokens, whose failure mode is a syntactically
+//! valid sentence neither side wrote.
 //!
-//! That one addition is what makes [`fabricates_lines`] take an allowlist. A
-//! token composition is a line no version wrote — that is what composing means —
-//! so the backstop is told exactly which lines were composed and admits those
-//! and nothing else.
+//! And the fold's own answer is only ever taken when it is CONFLICTED
+//! ([`boxes_only`]). A clean fold would be two edits to one body composed below
+//! line granularity, in a sequence whose order is the program — weave fails
+//! closed on that. What the fold still earns its keep for is the box: the
+//! conflict it raises covers the statements in dispute rather than the whole
+//! body.
 
 use std::collections::HashMap;
 
@@ -981,13 +977,16 @@ fn label(text: &str) -> String {
 /// `None` costs the caller the whole-entity conflict it would have raised
 /// anyway, which is why every uncertainty in here answers `None` rather than
 /// guessing.
+///
+/// The answer is always CONFLICTED ([`boxes_only`]): the fold narrows a
+/// conflict to the statements both sides touched, and never declares one gone.
 pub(crate) fn statement_merge(
     base: &str,
     ours: &str,
     theirs: &str,
     fmt: &ScopeMarkers<'_>,
 ) -> Option<InnerMergeResult> {
-    statement_merge_inner(
+    boxes_only(statement_merge_inner(
         base,
         ours,
         theirs,
@@ -995,8 +994,22 @@ pub(crate) fn statement_merge(
         0,
         License::Refused,
         &mut Vec::new(),
-        &mut Vec::new(),
-    )
+    ))
+}
+
+/// The fold may place conflict boxes; it may not call a body clean.
+///
+/// Every caller reaches the fold after diff3 has refused the body, so a CLEAN
+/// fold is two edits to one body composed at a granularity finer than lines:
+/// statements from both sides inserted into one sequence, one side's rewrite
+/// laid over the other's. Statement order is program order, and which
+/// interleaving either author meant is not in the input — the shapes this
+/// produced were a function with two `return`s and a `const` declared twice.
+/// So a clean fold is refused and the caller raises the conflict it was going
+/// to raise; a conflicted fold is kept, because narrowing the box to the
+/// statements in dispute changes the bytes of a conflict and never its verdict.
+fn boxes_only(fold: Option<InnerMergeResult>) -> Option<InnerMergeResult> {
+    fold.filter(|r| r.has_conflicts)
 }
 
 /// How much authority the fold has over two blocks inserted into the same gap.
@@ -1035,16 +1048,9 @@ pub(crate) fn statement_merge_with(
     license: License,
     evidence: &mut Vec<LicensedGap>,
 ) -> Option<InnerMergeResult> {
-    statement_merge_inner(
-        base,
-        ours,
-        theirs,
-        fmt,
-        0,
-        license,
-        evidence,
-        &mut Vec::new(),
-    )
+    boxes_only(statement_merge_inner(
+        base, ours, theirs, fmt, 0, license, evidence,
+    ))
 }
 
 /// The fold, with disjoint-write composition available to the same-gap arm. Returns the
@@ -1058,7 +1064,7 @@ pub(crate) fn statement_merge_licensed(
     fmt: &ScopeMarkers<'_>,
 ) -> Option<(InnerMergeResult, Vec<LicensedGap>)> {
     let mut evidence = Vec::new();
-    let r = statement_merge_inner(
+    let r = boxes_only(statement_merge_inner(
         base,
         ours,
         theirs,
@@ -1066,8 +1072,7 @@ pub(crate) fn statement_merge_licensed(
         0,
         License::Footprint,
         &mut evidence,
-        &mut Vec::new(),
-    )?;
+    ))?;
     Some((r, evidence))
 }
 
@@ -1091,9 +1096,6 @@ fn statement_merge_inner(
     depth: u8,
     license: License,
     evidence: &mut Vec<LicensedGap>,
-    // Lines the expression fold composed, at this level and below. The
-    // no-fabrication backstop licenses exactly these — see `fabricates_lines`.
-    composed: &mut Vec<String>,
 ) -> Option<InnerMergeResult> {
     let b = partition(base)?;
     let o = partition(ours)?;
@@ -1293,23 +1295,17 @@ fn statement_merge_inner(
                                 depth + 1,
                                 license,
                                 evidence,
-                                composed,
                             )
                             .filter(|r| !r.has_conflicts)
                             .map(|r| r.content)
                         })
-                        // The last zoom. Both sides edited this one statement,
-                        // diff3 refused it, and it is not a block the fold can
-                        // separate — so the statement is tiled into TOKENS and
-                        // the two token edits are composed if, and only if, a
-                        // base token neither side touched separates them.
-                        // Reached from here and nowhere else, so the verdict
-                        // it can change is CONFLICT → clean and nothing else.
-                        .or_else(|| {
-                            let c = crate::expression::expression_merge(&bp.text, po, pt)?;
-                            composed.extend(c.composed_lines);
-                            Some(c.text)
-                        })
+                        // Both sides edited this one statement and diff3 refused
+                        // it. There used to be one more zoom here — tile the
+                        // statement into TOKENS and compose the two token edits.
+                        // That writes a line neither side wrote, and whether it
+                        // is the program either author meant is exactly what
+                        // this merge cannot know, so two edits to one line are
+                        // a conflict.
                         .or_else(|| {
                             has_conflict = true;
                             Some(scoped_conflict_marker(
@@ -1395,8 +1391,7 @@ fn statement_merge_inner(
     //     predicate, unchanged, and the one weave is measured on.
     // (2) Nothing may be present that no version wrote. A fold cannot fabricate
     //     a line, so a fabricated line means the fold is not what ran.
-    if drops_unanimous_lines(base, ours, theirs, &out)
-        || fabricates_lines(base, ours, theirs, &out, composed)
+    if drops_unanimous_lines(base, ours, theirs, &out) || fabricates_lines(base, ours, theirs, &out)
     {
         return None;
     }
@@ -1407,31 +1402,18 @@ fn statement_merge_inner(
     })
 }
 
-/// Does `out` contain a non-blank line no version wrote and nothing licensed?
+/// Does `out` contain a non-blank line no version wrote?
 ///
 /// Conflict markers are the one thing this merge is allowed to invent, so they
 /// and their contents are exempt — everything outside them must be somebody's
 /// own bytes.
-///
-/// `licensed` is the exception the expression fold pays for. A token
-/// composition is, by definition, a line that no version wrote — that is what
-/// composing means — so a backstop that only knows the three inputs would veto
-/// every one of them, and a backstop widened to "anything the fold felt like"
-/// would stop being a backstop. The middle is this: `expression::expression_merge`
-/// reports the exact lines it created, they are the only new lines admitted,
-/// and every other new line still fails. A line that appears in the output
-/// which the fold cannot account for is still evidence that the fold is not
-/// what ran.
-fn fabricates_lines(base: &str, ours: &str, theirs: &str, out: &str, licensed: &[String]) -> bool {
+fn fabricates_lines(base: &str, ours: &str, theirs: &str, out: &str) -> bool {
     use std::collections::HashSet;
     let mut known: HashSet<&str> = HashSet::new();
     for src in [base, ours, theirs] {
         for l in src.lines() {
             known.insert(l.trim_end());
         }
-    }
-    for l in licensed {
-        known.insert(l.as_str());
     }
     out.lines().any(|l| {
         let t = l.trim_end();
@@ -1457,6 +1439,34 @@ fn fabricates_lines(base: &str, ours: &str, theirs: &str, out: &str, licensed: &
 mod tests {
     use super::*;
     use crate::conflict::MarkerFormat;
+
+    /// The fold's own answer, before [`boxes_only`]. The nested-block arm still
+    /// consumes clean folds, so their mechanics are still tested here; what the
+    /// entry points hand a caller is tested separately.
+    fn fold(base: &str, ours: &str, theirs: &str) -> Option<InnerMergeResult> {
+        statement_merge_inner(
+            base,
+            ours,
+            theirs,
+            &ScopeMarkers::bare(&MarkerFormat::default()),
+            0,
+            License::Refused,
+            &mut Vec::new(),
+        )
+    }
+
+    /// Fail closed: a body both sides edited is never CLEAN out of the fold's
+    /// entry points, even when the fold composed it without a box.
+    #[test]
+    fn a_clean_fold_is_not_a_merge() {
+        let base = "fn f() {\n    let a = 1;\n    let b = 2;\n}\n";
+        let ours = "fn f() {\n    let a = 11;\n    let b = 2;\n}\n";
+        let theirs = "fn f() {\n    let a = 1;\n    let b = 22;\n}\n";
+        assert!(fold(base, ours, theirs).is_some_and(|r| !r.has_conflicts));
+        let fmt = MarkerFormat::default();
+        assert!(statement_merge(base, ours, theirs, &ScopeMarkers::bare(&fmt)).is_none());
+        assert!(statement_merge_licensed(base, ours, theirs, &ScopeMarkers::bare(&fmt)).is_none());
+    }
 
     const SAMPLES: &[&str] = &[
         // python
@@ -1513,13 +1523,7 @@ mod tests {
         let base = "fn f() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n";
         let ours = "fn f() {\n    let a = 11;\n    let b = 2;\n    let c = 3;\n}\n";
         let theirs = "fn f() {\n    let a = 1;\n    let b = 2;\n    let c = 33;\n}\n";
-        let r = statement_merge(
-            base,
-            ours,
-            theirs,
-            &ScopeMarkers::bare(&MarkerFormat::default()),
-        )
-        .expect("merges");
+        let r = fold(base, ours, theirs).expect("merges");
         assert!(!r.has_conflicts);
         assert_eq!(
             r.content,
@@ -1533,13 +1537,7 @@ mod tests {
         // ours moves a() to the end; theirs edits b()
         let ours = "fn f() {\n    b();\n    c();\n    a();\n}\n";
         let theirs = "fn f() {\n    a();\n    b(1);\n    c();\n}\n";
-        let r = statement_merge(
-            base,
-            ours,
-            theirs,
-            &ScopeMarkers::bare(&MarkerFormat::default()),
-        )
-        .expect("merges");
+        let r = fold(base, ours, theirs).expect("merges");
         assert!(!r.has_conflicts, "{}", r.content);
         assert_eq!(r.content, "fn f() {\n    b(1);\n    c();\n    a();\n}\n");
     }
@@ -1600,13 +1598,7 @@ mod tests {
         let base = "fn f() {\n    a();\n    z();\n    q();\n}\n";
         let ours = "fn f() {\n    a();\n    m();\n    z();\n    q();\n}\n";
         let theirs = "fn f() {\n    a();\n    z();\n    n();\n    q();\n}\n";
-        let r = statement_merge(
-            base,
-            ours,
-            theirs,
-            &ScopeMarkers::bare(&MarkerFormat::default()),
-        )
-        .expect("merges");
+        let r = fold(base, ours, theirs).expect("merges");
         assert!(!r.has_conflicts, "{}", r.content);
         assert_eq!(
             r.content,

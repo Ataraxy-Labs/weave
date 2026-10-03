@@ -41,6 +41,13 @@
 //!                            (RED corner: TS rename-steal, red_l5b_*)
 //!   L6  Determinism:         same inputs ⇒ identical result, repeatedly           GREEN
 //!   L7  Totality:            no panic on arbitrary input triples                  GREEN
+//!   L5c Completeness under reorder: modify/delete and modify/modify conflict
+//!                            whatever order the editing side wrote its
+//!                            declarations                                         GREEN
+//!   L2c Strict absorption:   merge(b,o,merge(b,o,t)) = merge(b,o,t) byte for byte,
+//!                            first entity deletable, a side may delete all        GREEN
+//!   L4b Subsumption:         a's edit contains b's ⇒ merge(b,a,b') = a            GREEN
+//!                            (boundary: a side with zero declarations left)
 //!   L8  Linearity:           a clean merge defines each name at most once         GREEN (py/json)
 //!                            RED for TS (rename inference steals one side of a
 //!                            both-added pair and emits the name twice, red_l8_*)
@@ -1220,4 +1227,287 @@ fn control_generators_are_not_degenerate() {
         saw_convergent_add > 5,
         "general generator: convergent-add coverage floor not met ({saw_convergent_add}/200)"
     );
+}
+
+// ===========================================================================
+// L5c, L2c, L4b — the laws the generators above could not reach
+// ===========================================================================
+//
+// `apply` keeps base order, and `disjoint_triple_strategy` never lets a side
+// touch entity 0. Both bugs below lived exactly there: a side that MOVES an
+// entity it edits, and a deletion of the entity a gap used to follow. These
+// strategies lift both restrictions.
+
+/// A general triple in which ours also reorders what it kept.
+fn reordered_triple_strategy() -> impl Strategy<Value = (Module, Module, Module)> {
+    general_triple_strategy().prop_flat_map(|(base, ours, theirs)| {
+        let entities = ours.entities.clone();
+        (
+            Just(base),
+            Just(entities).prop_shuffle(),
+            Just(ours.lang),
+            Just(theirs),
+        )
+            .prop_map(|(base, entities, lang, theirs)| (base, Module { lang, entities }, theirs))
+    })
+}
+
+/// Base entities both sides changed incompatibly: modify vs delete, or two
+/// different modifications. Every one of them must conflict.
+fn must_conflict(base: &Module, ours: &Module, theirs: &Module) -> Vec<String> {
+    let of = |m: &Module| -> BTreeMap<String, u32> {
+        m.entities
+            .iter()
+            .map(|e| (e.name.clone(), e.sentinel))
+            .collect()
+    };
+    let (o, t) = (of(ours), of(theirs));
+    base.entities
+        .iter()
+        .filter(|e| {
+            let (ov, tv) = (o.get(&e.name), t.get(&e.name));
+            let o_changed = ov != Some(&e.sentinel);
+            let t_changed = tv != Some(&e.sentinel);
+            o_changed && t_changed && ov != tv
+        })
+        .map(|e| e.name.clone())
+        .collect()
+}
+
+/// A disjoint triple in which ANY entity may be owned — the first one too —
+/// and a side may delete everything it owns.
+fn free_disjoint_triple_strategy(
+    lang: impl Strategy<Value = Lang>,
+) -> impl Strategy<Value = (Module, Module, Module)> {
+    base_strategy(lang).prop_flat_map(|base| {
+        let n = base.entities.len();
+        let op = prop_oneof![Just(Op::Modify), Just(Op::Delete)];
+        (
+            Just(base),
+            proptest::collection::vec(0u8..3, n),
+            proptest::collection::vec(op, n),
+            0usize..=2,
+            0usize..=2,
+        )
+            .prop_map(|(base, owners, ops, ao, at)| {
+                let mk = |who: u8, side: SideTag, prefix: &str, count: usize| Plan {
+                    ops: owners
+                        .iter()
+                        .zip(ops.iter())
+                        .map(|(w, op)| if *w == who { *op } else { Op::Keep })
+                        .collect(),
+                    adds: (0..count)
+                        .map(|j| (format!("{}{}", prefix, j), side.add_base() + 100 * j as u32))
+                        .collect(),
+                };
+                let ours = apply(&base, SideTag::Ours, &mk(1, SideTag::Ours, "ox", ao));
+                let theirs = apply(&base, SideTag::Theirs, &mk(2, SideTag::Theirs, "tx", at));
+                (base, ours, theirs)
+            })
+    })
+}
+
+/// (base, a, b) where a's edit contains b's: every entity b touched, a touched
+/// identically, and a may do more (modify or delete what b kept, add more).
+fn subsumption_triple_strategy() -> impl Strategy<Value = (Module, Module, Module)> {
+    base_strategy(any_lang()).prop_flat_map(|base| {
+        let n = base.entities.len();
+        let b_op = prop_oneof![3 => Just(Op::Keep), 2 => Just(Op::Modify), 1 => Just(Op::Delete)];
+        let extra = prop_oneof![3 => Just(Op::Keep), 1 => Just(Op::Modify), 1 => Just(Op::Delete)];
+        (
+            Just(base),
+            proptest::collection::vec(b_op, n),
+            proptest::collection::vec(extra, n),
+            0usize..=1,
+            0usize..=2,
+        )
+            .prop_filter_map(
+                "a must do more than b",
+                |(base, b_ops, extra, b_adds, a_adds)| {
+                    // b's modifications are written under the theirs sentinel
+                    // on BOTH sides, so a carries them byte for byte.
+                    let shared: Vec<(String, u32)> = (0..b_adds)
+                        .map(|j| (format!("tx{}", j), 50000 + 100 * j as u32))
+                        .collect();
+                    let b_plan = Plan {
+                        ops: b_ops.clone(),
+                        adds: shared.clone(),
+                    };
+                    let b = apply(&base, SideTag::Theirs, &b_plan);
+                    let mut entities = Vec::new();
+                    for (i, e) in base.entities.iter().enumerate() {
+                        match (b_ops[i], extra[i]) {
+                            (Op::Delete, _) | (Op::Keep, Op::Delete) => {}
+                            (Op::Modify, _) => entities.push(Entity {
+                                name: e.name.clone(),
+                                sentinel: 30000 + 100 * i as u32,
+                            }),
+                            (Op::Keep, Op::Modify) => entities.push(Entity {
+                                name: e.name.clone(),
+                                sentinel: 20000 + 100 * i as u32,
+                            }),
+                            (Op::Keep, Op::Keep) => entities.push(e.clone()),
+                        }
+                    }
+                    entities.extend(
+                        shared
+                            .into_iter()
+                            .map(|(name, sentinel)| Entity { name, sentinel }),
+                    );
+                    entities.extend((0..a_adds).map(|j| Entity {
+                        name: format!("ox{}", j),
+                        sentinel: 40000 + 100 * j as u32,
+                    }));
+                    let a = Module {
+                        lang: base.lang,
+                        entities,
+                    };
+                    // A side with no declarations left is one region, not a
+                    // header and a footer (`extract_regions`' `file_only`), so
+                    // its container's braces do not line up with the other
+                    // side's; the composition is refused by `fail_closed` and
+                    // conflicts. A false conflict, not a loss — the boundary is
+                    // kept out of this law and noted in the notes file.
+                    if a == b || b == base || a.entities.is_empty() || b.entities.is_empty() {
+                        return None;
+                    }
+                    Some((base, a, b))
+                },
+            )
+    })
+}
+
+proptest! {
+    // These filter on a clash / a clean merge; the reject budget is raised
+    // for the same reason as L8's.
+    #![proptest_config(ProptestConfig {
+        cases: 96,
+        max_global_rejects: 65536,
+        ..ProptestConfig::default()
+    })]
+
+    /// L5c: a side that moves the entity it edits has still edited it. An
+    /// incompatible change by the other side must conflict whatever order
+    /// the editing side put its declarations in.
+    #[test]
+    fn l5c_incompatible_edits_conflict_under_reorder(
+        (base, ours, theirs) in reordered_triple_strategy()
+    ) {
+        let clash = must_conflict(&base, &ours, &theirs);
+        prop_assume!(!clash.is_empty());
+        let r = merge_m(&base, &ours, &theirs);
+        prop_assert!(!r.is_clean(),
+            "{:?} changed incompatibly on both sides, yet the merge is clean\n\
+             base:\n{}\nours:\n{}\ntheirs:\n{}\nout:\n{}",
+            clash, render(&base), render(&ours), render(&theirs), r.content);
+        let r = merge_m(&base, &theirs, &ours);
+        prop_assert!(!r.is_clean(), "side-swapped merge of {:?} is clean", clash);
+    }
+
+    /// L2c: strict absorption, byte for byte, on the whole disjoint domain —
+    /// the first entity deletable, a side allowed to delete everything.
+    #[test]
+    fn l2c_absorption_is_a_byte_fixpoint(
+        (base, ours, theirs) in free_disjoint_triple_strategy(any_lang())
+    ) {
+        let b = render(&base);
+        let o = render(&ours);
+        let m = entity_merge(&b, &o, &render(&theirs), base.lang.path());
+        prop_assume!(m.is_clean());
+        let again = entity_merge(&b, &o, &m.content, base.lang.path());
+        prop_assert!(again.is_clean());
+        prop_assert_eq!(&again.content, &m.content,
+            "merge(b, o, merge(b, o, t)) must be byte-identical to merge(b, o, t)");
+    }
+
+    /// L4b: subsumption. When a's edit contains b's, the merge is a.
+    #[test]
+    fn l4b_the_side_that_carries_both_edits_is_the_merge(
+        (base, a, b) in subsumption_triple_strategy()
+    ) {
+        let r = merge_m(&base, &a, &b);
+        prop_assert!(r.is_clean(), "subsumed edit conflicted\nbase:\n{}\na:\n{}\nb:\n{}\nout:\n{}",
+            render(&base), render(&a), render(&b), r.content);
+        prop_assert_eq!(&r.content, &render(&a));
+    }
+}
+
+/// The reduced witness the property harness found: ours moves `e0` below
+/// `e2` and changes its body; theirs deletes `e0`. Line-wise ours "deleted"
+/// `e0` at the top as well, and the subsumption rule read that as carrying
+/// theirs' deletion — the merge came back clean with ours' `e0`, and theirs'
+/// deletion was gone without a word. It is a modify/delete.
+#[test]
+fn law_reordered_edit_against_a_delete_conflicts() {
+    let base = "export function e0(): number {\n  return 10000;\n}\n\nexport function e2(): number {\n  return 10200;\n}\n";
+    let ours = "export function e2(): number {\n  return 10200;\n}\n\nexport function e0(): number {\n  return 20048;\n}\n";
+    let theirs = "export function e2(): number {\n  return 10200;\n}\n";
+    for (o, t) in [(ours, theirs), (theirs, ours)] {
+        let r = entity_merge(base, o, t, "m.ts");
+        assert!(
+            !r.is_clean(),
+            "modify/delete under a reorder merged clean:\n{}",
+            r.content
+        );
+        assert!(visible(&r, 20048));
+    }
+    // The one-line form: a JSON key moved AND edited leaves no line behind
+    // for a line count to find. Its name is still there.
+    let base = "{\n  \"e0\": 10000,\n  \"e1\": 10100,\n  \"e2\": 10200\n}\n";
+    let ours = "{\n  \"e0\": 10000,\n  \"e2\": 10200,\n  \"e1\": 20100\n}\n";
+    let theirs = "{\n  \"e0\": 10000,\n  \"e2\": 10200\n}\n";
+    for (o, t) in [(ours, theirs), (theirs, ours)] {
+        let r = entity_merge(base, o, t, "m.json");
+        assert!(
+            !r.is_clean(),
+            "JSON modify/delete under a reorder merged clean:\n{}",
+            r.content
+        );
+        assert!(visible(&r, 20100));
+    }
+}
+
+/// The reduced witness for the leading gap: theirs deletes the file's only
+/// entity, ours keeps it and adds one after it. The gap ours wrote between
+/// the two was emitted in front of the survivor with nothing before it, so
+/// the file began with a blank line — and every re-merge against ours added
+/// its gap again. The re-merge must be a fixpoint, and the first one already
+/// the file without a leading blank line.
+#[test]
+fn law_a_gap_whose_predecessor_was_deleted_does_not_lead_the_file() {
+    let cases = [
+        (
+            "m.py",
+            "def e5():\n    return 10500\n",
+            "def e5():\n    return 10500\n\n\ndef ox9():\n    return 40900\n",
+            "def ox9():\n    return 40900\n",
+        ),
+        (
+            "m.ts",
+            "export function e5(): number {\n  return 10500;\n}\n",
+            "export function e5(): number {\n  return 10500;\n}\n\nexport function ox9(): number {\n  return 40900;\n}\n",
+            "export function ox9(): number {\n  return 40900;\n}\n",
+        ),
+    ];
+    for (path, base, ours, want) in cases {
+        let mut m = String::new();
+        for pass in 0..4 {
+            let r = entity_merge(base, ours, &m, path);
+            assert!(r.is_clean(), "{path} pass {pass}");
+            assert_eq!(r.content, want, "{path} pass {pass}");
+            m = r.content;
+        }
+    }
+}
+
+/// The trailing mirror: a gap that led a declaration one side deleted must not
+/// be left behind the last survivor as a blank line at the end of the file.
+#[test]
+fn law_a_gap_whose_successor_was_deleted_does_not_end_the_file() {
+    let base = "export function e3(): number {\n  return 10300;\n}\n\nexport function e4(): number {\n  return 10400;\n}\n\nexport function e5(): number {\n  return 10500;\n}\n";
+    let ours = "export function e3(): number {\n  return 10300;\n}\n\nexport function ox1(): number {\n  return 40100;\n}\n";
+    let theirs = "export function e3(): number {\n  return 10300;\n}\n\nexport function e5(): number {\n  return 10500;\n}\n";
+    let r = entity_merge(base, ours, theirs, "m.ts");
+    assert!(r.is_clean());
+    assert_eq!(r.content, ours);
 }

@@ -40,7 +40,7 @@ weave setup                 # this repo now merges through weave; git merge/reba
 git merge <branch>          # real conflicts land as markers with a `refused_by:` line stating why
 weave explain <file>        # per-hunk detail for one conflicted file, read off the actual git stages
 #  ...edit to resolve...
-weave check                 # verify the working tree against the three merge stages; exits 1 on findings
+weave check                 # verify the working tree against the three merge stages; exits 1 on findings, 2 if it could not verify
 ```
 
 See [Setup](#setup) for `--global`/`--local` variants, [CLI Commands](#cli-commands) for the rest of the
@@ -194,6 +194,10 @@ definition conflicts, and nothing is dropped) in
 (`crates/weave-core/tests/setup_extension_coverage.rs`) fails the build if a
 newly added grammar is ever left unclaimed and undeclined.
 
+INI files (`*.ini`, `*.cfg`) have no grammar but are claimed too
+(`weave_core::LINE_RULE_EXTENSIONS`): they take Git's line merge, plus the
+rule that unites keys two sides added to one section.
+
 Vue, Svelte, ERB and Haskell are parsed but deliberately **not** claimed:
 weave declines exactly these four (`weave_core::DECLINED_EXTENSIONS`), and
 nothing else. Their entity model treats a whole `<script>` block, template,
@@ -263,6 +267,45 @@ git config --global merge.weave.name "Entity-level semantic merge"
 git config --global merge.weave.driver "weave-driver %O %A %B %L %P"
 # then add `*.ts merge=weave` (etc.) to ~/.config/git/attributes
 ```
+
+### Declaring a container a set (`weave-set`)
+
+When two branches each add an entry at the same point of one container,
+weave unites them only if the container's order carries no meaning: a
+Python dict or JS/TS object literal with constant keys, `__all__`, an
+`import`/`export` name list, the keys of one INI section, TOML/JSON/YAML
+keys. The union never depends on which side is "ours", and in a Python,
+JS/TS or INI container it is merged by key, so a fleet of branches that
+each add one entry lands on one tree whatever order they merge in (an entry
+under its own comment keeps its run together instead).
+
+A list, a statement sequence, match/switch arms, an INI multi-line value or
+a YAML sequence is ordered in general (the first matching arm wins, a
+parametrize list names test ids by position), so two insertions at one point
+stay a conflict. So do the entries two branches add to one section of a
+changelog: two differently worded bullets can describe one change, and
+telling them apart is not a set's job. If you know one of yours is really a
+set, say so with the `weave-set` gitattribute:
+
+```gitattributes
+setup.cfg              weave-set=console_scripts
+tests/test_*.py        weave-set=parametrize
+src/cli.py             weave-set=build_parser
+.pre-commit-hooks.yaml weave-set
+CHANGELOG.md           weave-set=Unreleased
+```
+
+A bare `weave-set` makes every container in the file a set; a value is a
+comma-separated list of container names: the variable a literal is assigned
+to, the key it is the value of, the function it is an argument of
+(`parametrize`), the function whose body or match arms it is, the INI key of
+a multi-line value, the YAML/JSON/TOML key of an array, the title of a
+changelog section or of a heading above it (brackets off, or its first word:
+`## [Unreleased]` is `Unreleased`, `## 1.2.0 - 2026-01-01` is `1.2.0`). The driver reads the
+attribute with `git check-attr` only when such a container is what stands
+between a conflict and a union. Every union is still checked: an entry
+edited, deleted or moved beside the insertion, one key with two values, or
+an answer that does not parse stays a conflict.
 
 ## Jujutsu (jj)
 

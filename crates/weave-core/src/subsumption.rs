@@ -32,6 +32,7 @@
 //! whose only edit is blank lines produces no hunks and the rule never fires on
 //! it — that edit is still an edit and still belongs to the pipeline.
 
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 /// Which side's file carries both edits.
@@ -44,9 +45,9 @@ pub(crate) enum Superset {
 /// One unit of change against base, with zero context: the base lines it
 /// replaces, and the lines it writes in their place.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Edit {
-    old: Range<usize>,
-    ins: Vec<String>,
+pub(crate) struct Edit {
+    pub(crate) old: Range<usize>,
+    pub(crate) ins: Vec<String>,
 }
 
 /// The comparison key for a line: trailing space removed, blank lines dropped,
@@ -76,7 +77,7 @@ fn key_lines<'t>(text: &'t str, separator: Option<&str>) -> Vec<&'t str> {
 ///
 /// diffy renders a patch; with a context length of zero every hunk is exactly
 /// one edit, and the hunk's `old_range` is exactly the base lines it replaces.
-fn edits(base: &str, side: &str) -> Vec<Edit> {
+pub(crate) fn edits(base: &str, side: &str) -> Vec<Edit> {
     let patch = diffy::DiffOptions::new()
         .set_context_len(0)
         .create_patch(base, side);
@@ -132,6 +133,54 @@ fn carries(inner: &Edit, outer: &Edit) -> bool {
     is_subsequence(&inner.ins, &outer.ins)
 }
 
+/// How often each line is stated, compared trimmed.
+fn tally(text: &str) -> HashMap<&str, usize> {
+    let mut out = HashMap::new();
+    for l in text.lines() {
+        *out.entry(l.trim()).or_insert(0) += 1;
+    }
+    out
+}
+
+/// `inner` deleted a base line that the other side did NOT delete, only
+/// moved: the inner side states it less often than base did, the other side
+/// still as often.
+///
+/// A diff reads a move as a deletion at the old place plus an insertion at the
+/// new one, and a deletion is carried by a deletion. So a side that moved a
+/// declaration down the file (and edited it on the way) appeared to carry the
+/// other side's deletion of that declaration, and the rule handed back the file
+/// in which it still stood — modify/delete decided silently for the edit. The
+/// line still being there as often as base had it is what tells a move from a
+/// deletion. When BOTH sides still state the line as often as base, the inner
+/// side moved it too, and there is no deletion to carry. Short lines (`}`,
+/// `end`) repeat everywhere and say nothing about identity, so only lines
+/// longer than three characters count.
+fn moved_by(
+    inner: &Edit,
+    base_lines: &[&str],
+    base: &HashMap<&str, usize>,
+    inner_side: &HashMap<&str, usize>,
+    outer: &HashMap<&str, usize>,
+) -> bool {
+    if inner.old.is_empty() {
+        return false;
+    }
+    // diffy numbers a non-empty range from 1.
+    let deleted = base_lines
+        .get(inner.old.start - 1..inner.old.end - 1)
+        .unwrap_or(&[]);
+    let rewritten: HashSet<&str> = inner.ins.iter().map(|l| l.trim()).collect();
+    deleted.iter().any(|l| {
+        let l = l.trim();
+        let n = base.get(l).copied().unwrap_or(0);
+        l.len() > 3
+            && !rewritten.contains(l)
+            && inner_side.get(l).copied().unwrap_or(0) < n
+            && outer.get(l).copied().unwrap_or(0) >= n
+    })
+}
+
 /// The side whose file already carries both edits, if there is one.
 ///
 /// `None` when neither side subsumes the other — including when the two edits
@@ -157,13 +206,44 @@ pub(crate) fn subsuming_side(
     if eo.is_empty() || et.is_empty() {
         return None;
     }
-    let o_in_t = eo.iter().all(|h| et.iter().any(|hh| carries(h, hh)));
-    let t_in_o = et.iter().all(|h| eo.iter().any(|hh| carries(h, hh)));
+    let base_lines: Vec<&str> = b.lines().collect();
+    let (nb, no, nt) = (tally(&b), tally(&o), tally(&t));
+    let o_in_t = eo
+        .iter()
+        .all(|h| !moved_by(h, &base_lines, &nb, &no, &nt) && et.iter().any(|hh| carries(h, hh)));
+    let t_in_o = et
+        .iter()
+        .all(|h| !moved_by(h, &base_lines, &nb, &nt, &no) && eo.iter().any(|hh| carries(h, hh)));
     match (o_in_t, t_in_o) {
         (true, true) => None, // the same edit twice: nothing to choose
         (true, false) => Some(Superset::Theirs),
         (false, true) => Some(Superset::Ours),
         (false, false) => None,
+    }
+}
+
+/// The side whose edits carry the other's when every line counts, blank lines
+/// and spacing included: the answer for two sides whose files differ only in
+/// layout.
+///
+/// "Either is the answer" is true of two sides that each laid out the same
+/// change differently. It is not true when one side's layout at the place they
+/// differ is base's own: then that side made no layout edit there and the
+/// other did, and a one-sided edit is carried, layout or not. Read with every
+/// line as content, one side's hunks then carry the other's — a deletion of
+/// the line both removed and of the blank line after it carries the deletion
+/// of the line alone — and that side's file is the merge, exactly.
+pub(crate) fn exact_carrier(base: &str, ours: &str, theirs: &str) -> Option<Superset> {
+    let (eo, et) = (edits(base, ours), edits(base, theirs));
+    if eo.is_empty() || et.is_empty() {
+        return None;
+    }
+    let o_in_t = eo.iter().all(|h| et.iter().any(|hh| carries(h, hh)));
+    let t_in_o = et.iter().all(|h| eo.iter().any(|hh| carries(h, hh)));
+    match (o_in_t, t_in_o) {
+        (true, false) => Some(Superset::Theirs),
+        (false, true) => Some(Superset::Ours),
+        _ => None,
     }
 }
 
@@ -261,6 +341,26 @@ mod tests {
         let ours = "a\r\nb\r\nc\r\n";
         let theirs = "a\nb\n";
         assert_eq!(ours_side(base, ours, theirs), None);
+    }
+
+    #[test]
+    fn a_move_is_not_a_deletion_the_mover_carries() {
+        // theirs deletes `first`; ours moves it below `second` and edits it.
+        // Line-wise ours "deleted" `first` at the top too, but it still states
+        // the declaration: that is a modify/delete, not subsumption.
+        let base = "fn first() {\n  one();\n}\nfn second() {\n  two();\n}\n";
+        let ours = "fn second() {\n  two();\n}\nfn first() {\n  uno();\n}\n";
+        let theirs = "fn second() {\n  two();\n}\n";
+        assert_eq!(ours_side(base, ours, theirs), None);
+        assert_eq!(ours_side(base, theirs, ours), None);
+    }
+
+    #[test]
+    fn a_real_deletion_of_long_lines_still_subsumes() {
+        let base = "alpha();\nbravo();\ncharlie();\ndelta();\n";
+        let ours = "alpha();\ncharlie();\ndelta();\n";
+        let theirs = "alpha();\ndelta();\n";
+        assert_eq!(ours_side(base, ours, theirs), Some(Superset::Theirs));
     }
 
     #[test]

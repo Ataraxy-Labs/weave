@@ -1639,17 +1639,14 @@ fn java_large_class_one_conflict() {
 }
 
 #[test]
-fn ts_class_member_edits_inside_one_method_compose() {
-    // Both sides edit `getUser` and nothing else. This used to be a conflict:
-    // the merge scoped down to the member and stopped there, so two edits
-    // landing in the same method body were handed back as a box.
-    //
-    // They now compose, and the expectation below says so. Ours renames the
-    // call `find` -> `findOne`; theirs adds a cache lookup and rewrites the
-    // return to `cached || this.db.find(id)`. The two edits touch the same
-    // return statement but different parts of it, and the composition —
-    // `return cached || this.db.findOne(id);` — is the only program either
-    // side could have meant. Neither side's edit is dropped.
+fn ts_class_member_edits_inside_one_method_conflict_on_that_method() {
+    // Both sides edit `getUser` and nothing else. Ours renames the call
+    // `find` -> `findOne`; theirs adds a cache lookup and rewrites the return
+    // to `cached || this.db.find(id)`. The two edits touch the same return
+    // statement, and composing them token by token writes a line neither side
+    // wrote. For a while that composition was taken; weave now fails closed
+    // on two edits to one line, so this is a conflict — scoped to the method,
+    // with the methods nobody touched intact.
     let base = r#"export class UserService {
     getUser(id: string): User {
         return this.db.find(id);
@@ -1694,18 +1691,12 @@ fn ts_class_member_edits_inside_one_method_compose() {
     eprintln!("--- ts class member edits compose ---");
     eprintln!("content:\n{}", result.content);
 
-    assert!(result.is_clean(), "getUser's two edits should compose");
+    assert!(!result.is_clean(), "two edits to one return line conflict");
     assert!(
-        result
-            .content
-            .contains("const cached = this.cache.get(id);"),
-        "theirs' cache lookup should survive"
-    );
-    assert!(
-        result
+        !result
             .content
             .contains("return cached || this.db.findOne(id);"),
-        "both edits should be present in the merged return statement"
+        "no line neither side wrote"
     );
     // The methods nobody touched come through untouched.
     for method in &["createUser", "deleteUser"] {
@@ -1718,12 +1709,13 @@ fn ts_class_member_edits_inside_one_method_compose() {
 }
 
 #[test]
-fn python_class_member_edits_inside_one_method_compose() {
+fn python_class_member_edits_inside_one_method_conflict() {
     // The Python reading of the case above, and a simpler one: theirs only
-    // ADDS lines to `read` (the cache lookup) and leaves the final return
-    // alone, while ours edits that return `find` -> `find_one`. The two edits
-    // are disjoint statements in one body, so the merge composes them instead
-    // of conflicting on the method. It used to conflict.
+    // ADDS lines to `read` (the cache lookup) right above the final return,
+    // while ours edits that return `find` -> `find_one`. The edits touch
+    // adjacent lines of one body, where git conflicts too; whether theirs'
+    // early return belongs before ours' rewritten one is statement order,
+    // which is the program. Weave fails closed: a conflict.
     let base = r#"class Service:
     def create(self, data):
         return self.db.insert(data)
@@ -1761,14 +1753,14 @@ fn python_class_member_edits_inside_one_method_compose() {
     eprintln!("--- python class member edits compose ---");
     eprintln!("content:\n{}", result.content);
 
-    assert!(result.is_clean(), "read's two edits should compose");
     assert!(
-        result.content.contains("cached = self.cache.get(id)"),
-        "theirs' cache lookup should survive"
+        !result.is_clean(),
+        "edits to adjacent lines of `read` conflict"
     );
     assert!(
-        result.content.contains("return self.db.find_one(id)"),
-        "ours' rename should survive"
+        result.content.contains("cached = self.cache.get(id)")
+            && result.content.contains("return self.db.find_one(id)"),
+        "both sides' edits are in the box"
     );
     // The methods nobody touched come through untouched.
     for method in &["def create", "def delete"] {

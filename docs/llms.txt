@@ -55,7 +55,8 @@ Full benchmark suite: 11ms. Individual merges: 65-374us.
 - `weave check` — with no arguments, verifies the WORKING TREE (the file as edited) against
   the three merge stages: leftover markers, unanimous-line loss, duplicated lines/definitions,
   dangling references. One verdict sentence per file, never a bare empty result. Exit 0 clean,
-  exit 1 findings. With `--base/--ours/--theirs` it instead checks two revisions for cross-file
+  exit 1 findings, exit 2 nothing verified (git failed, or the run passed `--timeout`, default
+  300 s). With `--base/--ours/--theirs` it instead checks two revisions for cross-file
   binding breakage (a rename in one file orphaning a caller in another) and emits JSON findings.
 - `weave patch extract/apply` — typed entity ops: extract the ops that turn one file into
   another, apply them three-way to a target that may have drifted from the base.

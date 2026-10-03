@@ -97,7 +97,10 @@ export function f(): number { return 1 }
     let merged = run_driver(BASE, ours, THEIRS_FOLDED);
     assert_import_blocks_well_formed(&merged);
     for needle in ["type Foo", "type a", "type b", "type c", "import { z }"] {
-        assert!(merged.contains(needle), "{needle:?} missing from:\n{merged}");
+        assert!(
+            merged.contains(needle),
+            "{needle:?} missing from:\n{merged}"
+        );
     }
 }
 
@@ -119,6 +122,9 @@ export function f(): number { return 1 }
     let merged = run_driver(BASE, ours, THEIRS_FOLDED);
     assert_import_blocks_well_formed(&merged);
     for needle in ["type Foo", "type a", "type b", "type c", "type d"] {
-        assert!(merged.contains(needle), "{needle:?} missing from:\n{merged}");
+        assert!(
+            merged.contains(needle),
+            "{needle:?} missing from:\n{merged}"
+        );
     }
 }

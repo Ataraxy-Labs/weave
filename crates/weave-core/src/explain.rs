@@ -215,7 +215,13 @@ pub fn explain(
             .iter()
             .find(|a| a.name == name && a.entity_type == entity_type)
             .and_then(|a| a.resolution.guard())
-            .unwrap_or("merge_ladder_exhausted")
+            // A composition the merge could not verify is refused after the
+            // ladder, by the fail-closed check, not by a rung of it.
+            .unwrap_or(if entity_type == "unverified merge" {
+                "fail_closed"
+            } else {
+                "merge_ladder_exhausted"
+            })
     };
     let conflicts = result
         .conflicts

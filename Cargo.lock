@@ -3663,8 +3663,11 @@ dependencies = [
  "sem-core",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "thiserror",
+ "toml",
+ "tree-sitter",
 ]
 
 [[package]]

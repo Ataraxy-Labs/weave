@@ -16,10 +16,14 @@
 //!   callers with no git at all.
 //!
 //! Exit 0 = nothing found, exit 1 = findings — in every mode, so a script does
-//! not have to know which mode it asked for.
+//! not have to know which mode it asked for. Exit 2 = nothing could be
+//! verified: git failed, or the run outlived `--timeout`. A check that hangs
+//! is a check whose silence reads as approval, so it may not: past the limit
+//! it says so and stops.
 
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 use weave_cli::{gitscan, repo_scope, worktree};
 
@@ -33,9 +37,37 @@ pub(crate) struct Args<'a> {
     pub ours_dir: Option<&'a str>,
     pub theirs_dir: Option<&'a str>,
     pub json: bool,
+    /// Give up past this; zero means never.
+    pub timeout: Duration,
 }
 
+/// Exit code for "could not verify" — distinct from 1, which means findings.
+const UNVERIFIED: i32 = 2;
+
 pub(crate) fn run(args: Args<'_>) -> R<()> {
+    if !args.timeout.is_zero() {
+        let limit = args.timeout;
+        // The last line of defence, and the only one that covers a compute
+        // spin: no pipe deadline can interrupt a parse that never returns.
+        std::thread::spawn(move || {
+            std::thread::sleep(limit);
+            eprintln!(
+                "weave check: did not finish within {}s and stopped. NOTHING WAS VERIFIED — \
+                 this is not a clean bill of health. Re-run with a larger --timeout, or \
+                 report the merge that caused it.",
+                limit.as_secs()
+            );
+            std::process::exit(UNVERIFIED);
+        });
+    }
+    if let Err(e) = verify(args) {
+        eprintln!("weave check: could not verify: {e}. NOTHING WAS VERIFIED.");
+        std::process::exit(UNVERIFIED);
+    }
+    Ok(())
+}
+
+fn verify(args: Args<'_>) -> R<()> {
     let dir_mode = args.base_dir.is_some() || args.ours_dir.is_some() || args.theirs_dir.is_some();
     let rev_mode = args.base.is_some() || args.ours.is_some() || args.theirs.is_some();
     if !dir_mode && !rev_mode {
@@ -100,15 +132,31 @@ fn working_tree(json: bool) -> R<()> {
         );
         return Ok(());
     };
-    let verdicts = worktree::check(
+    let mut verdicts = worktree::check(
         &scope.base,
         &scope.ours,
         &scope.theirs,
         &scope.work,
         &scope.subjects,
     );
+    verdicts.extend(
+        scope
+            .unreadable
+            .iter()
+            .map(|(file, why)| worktree::Verdict::unread(file, why)),
+    );
+    verdicts.extend(scope.irregular.iter().map(|file| {
+        worktree::Verdict::noted(
+            file,
+            "a symlink or submodule in a merge stage — not source, so git's guarantees stand",
+        )
+    }));
+    verdicts.sort_by(|a, b| a.file.cmp(&b.file));
     let report = worktree::Report {
-        scope: scope.scope,
+        scope: match worktree::oversize_note(&scope.work) {
+            Some(note) => format!("{}; {note}", scope.scope),
+            None => scope.scope,
+        },
         verdicts,
     };
     if json {
@@ -126,7 +174,7 @@ fn working_tree(json: bool) -> R<()> {
                 // Advisories are non-blocking: they ride beside the verdict and
                 // never move `ok` or the exit code.
                 "advisories": v.advisories.iter().map(|a| serde_json::json!({
-                    "class": "COOCCUPANCY",
+                    "class": a.class,
                     "entity": a.entity,
                     "entity_type": a.entity_type,
                     "detail": a.detail,

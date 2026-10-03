@@ -114,10 +114,12 @@ fn a_new_use_keeps_the_import_even_when_the_block_is_one_sided() {
 #[test]
 fn an_unused_import_deleted_by_one_side_stays_deleted() {
     // Theirs edits something unrelated and adds no use of `Widget`, so ours'
-    // deletion is uncontested: merge(b, x, y) must still take it.
-    let theirs = BASE.replace("const spacer3 = 3", "const spacer3 = 30");
+    // deletion is uncontested: merge(b, x, y) must still take it. (Theirs'
+    // edit sits two lines clear of ours' edit to the same body: edits to
+    // ADJACENT lines of one body are a conflict, as they are for git.)
+    let theirs = BASE.replace("const spacer = 1\n", "const spacer = 10\n");
     let ours = ours();
-    let expected = ours.replace("const spacer3 = 3", "const spacer3 = 30");
+    let expected = ours.replace("const spacer = 1\n", "const spacer = 10\n");
     for (left, right) in [(&ours, &theirs), (&theirs, &ours)] {
         let result = entity_merge(BASE, left, right, "flow.ts");
         assert!(result.is_clean(), "{:?}", result.conflicts);

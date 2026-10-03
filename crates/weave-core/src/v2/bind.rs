@@ -194,6 +194,14 @@ fn sibling_co_change(
 /// The no-loss backstops are unchanged and still inside the fold: a licensed
 /// composition that drops a unanimous line or fabricates one is refused there,
 /// before this pass ever sees it.
+///
+/// **Currently inert.** Both doors lead to the statement fold, and the fold's
+/// entry points now hand back only conflicted answers
+/// (`statement::boxes_only`): weave fails closed on composing two edits to one
+/// body below line granularity, and a footprint is lexical evidence that
+/// cannot see side effects. So every attempt here comes back conflicted and
+/// is skipped. The pass is left in place, with its evidence channel, for the
+/// day a licence is shown sound on real merges.
 fn footprint_license(
     arena: &Arena,
     triples: &[Triple],

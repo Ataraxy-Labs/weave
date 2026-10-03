@@ -64,6 +64,108 @@ pub struct Host {
 
     /// The line-level merge this run may use, if the caller granted one.
     pub line_merge: Option<LineMerge>,
+
+    /// Where this run may read a file's `weave-set` attribute, if the caller
+    /// granted it: the opt-in that lets an order-sensitive container (a list,
+    /// a statement sequence, match arms) be merged as a set. See
+    /// [`SetScope`] and `crate::insertion`. Consulted only when such a
+    /// container is the one thing between a conflict and a union.
+    pub set_attribute: Option<AttributeReader>,
+}
+
+/// Reads one gitattribute of a repository path: `Some(value)` when it is set
+/// (`"set"` for a bare attribute), `None` when it is unset or unspecified.
+pub type AttributeReader = fn(&str) -> Option<String>;
+
+/// Which of a file's containers its owner declared to be sets.
+///
+/// Declared with the `weave-set` gitattribute (`.gitattributes`, or
+/// `.git/info/attributes`):
+///
+/// ```text
+/// setup.cfg            weave-set=console_scripts
+/// tests/test_*.py      weave-set=parametrize
+/// .pre-commit-hooks.yaml weave-set
+/// ```
+///
+/// A bare `weave-set` makes every container in the file a set; a value is a
+/// comma-separated list of container names (gitattribute values cannot hold
+/// whitespace). A container's name is what it is bound to or called by: the
+/// variable it is assigned to, the key it is the value of, the function it
+/// is an argument of (`parametrize`, `pytest.mark.parametrize`), the
+/// function whose body it is (a statement sequence or match arms), the INI
+/// key whose multi-line value it is, the YAML/JSON/TOML key of an array.
+/// `-weave-set` or no attribute: no container is a set by declaration, and
+/// only the containers whose semantics are order-free by the language merge
+/// as a union.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetScope {
+    /// Nothing declared.
+    Off,
+    /// Every container in the file.
+    All,
+    /// The containers of these names.
+    Named(Vec<String>),
+}
+
+impl SetScope {
+    /// The scope an attribute value declares.
+    pub fn from_attribute(value: Option<&str>) -> SetScope {
+        match value.map(str::trim) {
+            None | Some("" | "unset" | "unspecified" | "false") => SetScope::Off,
+            Some("set" | "true" | "all") => SetScope::All,
+            Some(v) => {
+                let names: Vec<String> = v
+                    .split(',')
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .collect();
+                if names.is_empty() {
+                    SetScope::Off
+                } else {
+                    SetScope::Named(names)
+                }
+            }
+        }
+    }
+
+    /// The scope `host` grants for `path`: `Off` when nothing was granted.
+    pub fn read(host: &Host, path: &str) -> SetScope {
+        match host.set_attribute {
+            Some(read) => SetScope::from_attribute(read(path).as_deref()),
+            None => SetScope::Off,
+        }
+    }
+
+    /// Does the declaration cover a container known by `names`?
+    pub fn admits(&self, names: &[String]) -> bool {
+        match self {
+            SetScope::Off => false,
+            SetScope::All => true,
+            SetScope::Named(declared) => names.iter().any(|n| declared.contains(n)),
+        }
+    }
+}
+
+/// `git check-attr weave-set -- <path>`, run in the current directory (git
+/// runs a merge driver at the top of the work tree). Any failure — no git,
+/// not a repository, a path outside it — reads as "not declared", which is
+/// the fail-closed answer.
+pub fn git_set_attribute(path: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["check-attr", "-z", "weave-set", "--", path])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // -z: <path> NUL <attribute> NUL <value> NUL
+    let text = String::from_utf8(output.stdout).ok()?;
+    let value = text.split('\0').nth(2)?.to_string();
+    match value.as_str() {
+        "unspecified" | "unset" | "" => None,
+        _ => Some(value),
+    }
 }
 
 impl Default for Host {
@@ -73,6 +175,7 @@ impl Default for Host {
         Host {
             max_duplicates: 10,
             line_merge: None,
+            set_attribute: None,
         }
     }
 }
@@ -171,7 +274,21 @@ mod tests {
     fn the_default_host_grants_nothing() {
         let host = Host::default();
         assert!(host.line_merge.is_none());
+        assert!(host.set_attribute.is_none());
         assert_eq!(host.max_duplicates, 10);
+        assert_eq!(SetScope::read(&host, "setup.cfg"), SetScope::Off);
+    }
+
+    #[test]
+    fn the_set_attribute_reads_as_a_scope() {
+        assert_eq!(SetScope::from_attribute(None), SetScope::Off);
+        assert_eq!(SetScope::from_attribute(Some("unset")), SetScope::Off);
+        assert_eq!(SetScope::from_attribute(Some("set")), SetScope::All);
+        let named = SetScope::from_attribute(Some("console_scripts,parametrize"));
+        assert!(named.admits(&["parametrize".to_string()]));
+        assert!(!named.admits(&["HANDLERS".to_string()]));
+        assert!(!named.admits(&[]));
+        assert!(SetScope::All.admits(&[]));
     }
 
     #[test]

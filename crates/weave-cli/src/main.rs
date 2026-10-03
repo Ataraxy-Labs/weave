@@ -87,7 +87,8 @@ enum Commands {
     /// stated it, references that no longer resolve — and prints one verdict
     /// line per file. With --base/--ours/--theirs (or --*-dir) it runs the
     /// cross-file binding pass between two revisions instead and emits
-    /// weave-findings JSON. Exits 1 when there are findings.
+    /// weave-findings JSON. Exits 1 when there are findings, and 2 when it
+    /// could not verify at all — git failed, or the run passed --timeout.
     Check {
         /// Output as JSON (working-tree mode)
         #[arg(long)]
@@ -110,6 +111,10 @@ enum Commands {
         /// No-git mode: directory holding their tree
         #[arg(long)]
         theirs_dir: Option<String>,
+        /// Give up after this many seconds with exit code 2 and a message,
+        /// rather than run on. 0 means no limit.
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
     },
     /// Typed entity ops: the write side of the agent contract. Extract the ops
     /// that turn one file into another, and apply them to a file that may have
@@ -199,6 +204,7 @@ fn main() {
     // that merges is handed this; none of them can widen it.
     let host = weave_core::host::Host {
         line_merge: Some(weave_core::host::git_line_merge),
+        set_attribute: Some(weave_core::host::git_set_attribute),
         ..Default::default()
     };
 
@@ -227,6 +233,7 @@ fn main() {
             ref base_dir,
             ref ours_dir,
             ref theirs_dir,
+            timeout,
         } => commands::check::run(commands::check::Args {
             base: base.as_deref(),
             ours: ours.as_deref(),
@@ -235,6 +242,7 @@ fn main() {
             ours_dir: ours_dir.as_deref(),
             theirs_dir: theirs_dir.as_deref(),
             json,
+            timeout: std::time::Duration::from_secs(timeout),
         }),
         Commands::Patch { ref command } => match command {
             PatchCommands::Extract {

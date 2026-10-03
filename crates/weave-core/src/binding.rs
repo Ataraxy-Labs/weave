@@ -49,6 +49,29 @@ pub(crate) fn is_ident_char_c(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '$'
 }
 
+/// Every maximal identifier in `content`, split exactly where
+/// [`has_call_reference`] and friends draw a word boundary.
+///
+/// A name that is not in this set cannot be called, declared or used in
+/// `content`, so asking the set first turns "every vanished name × every file
+/// × every line" into one pass per file.
+pub fn identifiers(content: &str) -> std::collections::HashSet<&str> {
+    content
+        .split(|c: char| !is_ident_char_c(c))
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Could `content` mention `name` at all? Exact for an identifier via
+/// [`identifiers`]; a substring test for anything else (`operator+`, `a::b`).
+pub fn may_mention(ids: &std::collections::HashSet<&str>, content: &str, name: &str) -> bool {
+    if name.chars().all(is_ident_char_c) {
+        ids.contains(name)
+    } else {
+        content.contains(name)
+    }
+}
+
 /// Visibility / modifier keywords that can precede a definer keyword.
 const MODIFIERS: [&str; 11] = [
     "export ",
@@ -641,6 +664,110 @@ pub fn has_value_reference(content: &str, name: &str) -> bool {
     })
 }
 
+/// Does `content` MENTION `name` as a reference: at a word boundary, in any
+/// expression or type position, outside import statements, comments and
+/// string-looking text, and not on a line that defines it?
+///
+/// Wider than [`has_value_reference`] by every position a name is read in
+/// without a `.`, `(` or `<` after it: an argument `f(name)`, a type argument
+/// `List<Name>`, an operand `a + name`, a return `return name;`. Narrower in
+/// the positions where the word is not a reference to a file-scope binding
+/// at all:
+///
+/// * after `.`, `::` or `->` — a member, resolved in its receiver;
+/// * before a single `:` — a key, a named argument, a label, or a parameter
+///   with its type (`name: T`) — or before a single `=` or `=>` — a named
+///   argument, an assignment target, an arrow parameter. Those introduce the
+///   word, or name a slot; they do not read the binding.
+pub fn has_mention(content: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let first_char_len = name.chars().next().map_or(1, char::len_utf8);
+    content.lines().any(|line| {
+        if is_trivia_line(line) || !import_bindings(line).is_empty() {
+            return false;
+        }
+        let t = line.trim_start();
+        // Import, re-export and package statements bind or name; they read
+        // nothing of this file's.
+        let statement = ["import ", "from ", "use ", "using ", "package "]
+            .iter()
+            .any(|kw| t.starts_with(kw))
+            || (t.starts_with("export ") && t.contains(['"', '\'']));
+        if statement {
+            return false;
+        }
+        if is_definition_line(line, name) {
+            return false;
+        }
+        let code = &without_comments(line);
+        let mut from = 0usize;
+        while let Some(rel) = code[from..].find(name) {
+            let i = from + rel;
+            let lead = &code[..i];
+            let before = lead.chars().next_back();
+            let member = lead.ends_with('.') || lead.ends_with("::") || lead.ends_with("->");
+            let before_ok = !member && before.is_none_or(|c| !is_ident_char_c(c) && c != '$');
+            let quotes = lead
+                .chars()
+                .filter(|c| matches!(c, '"' | '\'' | '`'))
+                .count();
+            let rest = &code[i + name.len()..];
+            let boundary = rest.chars().next().is_none_or(|c| !is_ident_char_c(c));
+            let next = rest.trim_start();
+            let slot = (next.starts_with(':') && !next.starts_with("::"))
+                || (next.starts_with('=') && !next.starts_with("=="));
+            if before_ok && boundary && !slot && quotes % 2 == 0 {
+                return true;
+            }
+            from = i + first_char_len;
+            if from >= code.len() {
+                break;
+            }
+        }
+        false
+    })
+}
+
+/// `line` with its comments blanked out: a `/* … */` span (JSX writes its
+/// comments as `{/* … */}`) and a trailing `//` comment. Text inside a string
+/// is left alone, so a URL's `//` is not a comment.
+fn without_comments(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+                out.push(c);
+            }
+            None if c == '/' && chars.peek() == Some(&'/') => break,
+            None if c == '/' && chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = ' ';
+                for d in chars.by_ref() {
+                    if prev == '*' && d == '/' {
+                        break;
+                    }
+                    prev = d;
+                }
+                out.push(' ');
+            }
+            None => {
+                if matches!(c, '"' | '\'' | '`') {
+                    quote = Some(c);
+                }
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
 /// Import lines one side deleted that the merge must keep because the OTHER
 /// side's new code depends on them.
 ///
@@ -728,6 +855,30 @@ mod tests {
             "Widget"
         ));
         assert!(!has_value_reference("  // Widget.first()\n", "Widget"));
+    }
+
+    #[test]
+    fn a_mention_is_any_reference_position() {
+        // Reads of the binding, in every position.
+        assert!(has_mention("    openBox(wordsBox);\n", "wordsBox"));
+        assert!(has_mention("  public List<Receipt> all() {\n", "Receipt"));
+        assert!(has_mention("  return a + wordsBox\n", "wordsBox"));
+        assert!(has_mention("  Store::open(wordsBox)\n", "Store"));
+        // Not a read of a file-scope binding: a member, a key, a named
+        // argument, an assignment target, a comment, a string, an import.
+        assert!(!has_mention("  box.wordsBox()\n", "wordsBox"));
+        assert!(!has_mention("  Store::wordsBox\n", "wordsBox"));
+        assert!(!has_mention("  open(wordsBox: 1)\n", "wordsBox"));
+        assert!(!has_mention("  f(wordsBox=1)\n", "wordsBox"));
+        assert!(!has_mention("  wordsBox = 2\n", "wordsBox"));
+        assert!(!has_mention("  go() // wordsBox\n", "wordsBox"));
+        assert!(!has_mention("        {/* Heap wordsBox */}\n", "wordsBox"));
+        assert!(has_mention("  go(/* a */ wordsBox)\n", "wordsBox"));
+        assert!(has_mention("  fetch(\"http://x\", wordsBox)\n", "wordsBox"));
+        assert!(!has_mention("  log(\"wordsBox\")\n", "wordsBox"));
+        assert!(!has_mention("import a.b.Receipt;\n", "Receipt"));
+        assert!(!has_mention("class Receipt {\n", "Receipt"));
+        assert!(has_mention("  x == wordsBox\n", "wordsBox"));
     }
 
     #[test]

@@ -15,10 +15,15 @@ use colored::Colorize;
 /// parse but merge worse than git (`.hs`, `.vue`, `.svelte`, `.erb`) are
 /// subtracted at the source, in `weave_core::DECLINED_EXTENSIONS`.
 fn supported_patterns() -> Vec<String> {
-    weave_core::supported_merge_extensions()
-        .into_iter()
-        .map(|ext| format!("*{}", ext))
-        .collect()
+    let mut exts = weave_core::supported_merge_extensions();
+    exts.extend(
+        weave_core::LINE_RULE_EXTENSIONS
+            .iter()
+            .map(|e| e.to_string()),
+    );
+    exts.sort_unstable();
+    exts.dedup();
+    exts.into_iter().map(|ext| format!("*{}", ext)).collect()
 }
 
 pub(crate) fn run(
@@ -357,6 +362,15 @@ mod tests {
                 patterns.contains(&format!("*{ext}")),
                 "setup must write `*{ext} merge=weave`"
             );
+        }
+    }
+
+    #[test]
+    fn the_line_rule_extensions_are_claimed() {
+        // INI files have no grammar, but a deterministic rule reads them.
+        let patterns = supported_patterns();
+        for ext in weave_core::LINE_RULE_EXTENSIONS {
+            assert!(patterns.contains(&format!("*{ext}")), "{ext}");
         }
     }
 

@@ -7,6 +7,124 @@ Versions are shared across every crate in the workspace and the npm package,
 so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 `weave-github` and `@ataraxy-labs/weave` all move together.
 
+## Unreleased
+
+### Changed — the merge driver fails closed
+
+When weave cannot justify a composition, it now reports a conflict instead of
+a clean merge. A clean exit (0) means the result passed every check below; a
+merge that fails one falls back to git's own line merge, and to a single
+conflict box if even that comes back clean but unverifiable.
+
+- **Checked before a merge is called clean** (`weave_core::verify`): no conflict
+  marker in the output; every line both sides kept is present and no line is
+  stated more often than applying both sides' edits states it (a deleted import
+  no longer comes back); no name, member or `package` declared more often than
+  either side declares it (no duplicate imports, no `const` redeclaring an
+  import, no second `package` line, no doubled enum entry); no name used that an
+  input imported or declared at file scope and the result no longer binds —
+  read in any reference position (a bare argument, a type argument), with
+  imports read per language (Java, Kotlin, Go, Rust, C#, Dart as well as
+  JavaScript and Python), and `weave check`'s `DANGLING` applies the same rule
+  to a resolution; the result parses whenever
+  both sides do; in prose (Markdown, reStructuredText, text, LaTeX) two sides
+  rewriting the same passage differently is a conflict, not a section-by-section
+  interleave. A JSON, TOML or YAML result must still load whenever either side
+  does, and may not state a key at one table path more often than either side
+  does — including when one side's file is taken whole because it already
+  carries the other side's edit. The refusal is named on the conflict
+  (`unverified merge`).
+- **Two edits to one body compose only at line granularity**, as in git: the
+  statement fold no longer answers clean, and the token-level expression fold is
+  gone. Two edits to one line, or to adjacent lines of one function, conflict.
+- **The import-region union** applies only when both sides changed nothing but
+  import lines in the region and the union binds no name twice.
+- **The line-level route is git's merge.** It no longer splits lines at `{ } ;`
+  to merge the pieces when git's merge conflicts.
+
+Expect fewer clean merges than 0.5.4 and no clean merge that is wrong in the
+ways above.
+
+### New — conflicts whose answer does not depend on intent
+
+A merge is right for every intent exactly where the two edits commute. When the
+entity merge refuses a file, weave now tries the rules below on each region
+git's line merge left in conflict; if every region falls under one, the file is
+settled, checked by the same gate as any composition, and the driver says which
+rule (`weave: <file> settled by rule: …`). Otherwise it stays conflicted.
+
+- **Agreement / subsumption (D0, D1)** — both sides wrote the same lines, or one
+  side's change to the region contains the other's. Blank lines are layout;
+  alignment is global; a line the smaller edit deleted that the larger side
+  still states was moved, not deleted; a deletion is carried only by a deletion
+  (one side removing a statement the other rewrote stays a conflict); never
+  into a side whose file does not parse when the other's does.
+- **Set union (D3)** — regions made only of import lines, or of the lines of an
+  ignore / requirements / `go.sum` file, merge as a set. An import's name list
+  from one module merges name by name (a replaced import is a replacement); no
+  local name may be bound by two different import lines; an item both sides
+  changed differently, or a side stating one item twice, stays a conflict.
+- **Layout-only side (D6)** and **layout-equal creations (D4)** — a side whose
+  change is layout only (whitespace, line breaks, a byte-order mark — comments
+  are content; judged on the syntax tree where there is a grammar) yields the
+  other side's text, for the whole file or one region in its context.
+- Never settled: modify/delete, two renames of one declaration, inputs that
+  already carry markers, and any file where one side deleted a declaration the
+  other changed in more than layout. Choices between equivalent texts do not
+  depend on which side is called ours.
+
+### Fixed
+
+- A side that moved a declaration it edited could silently win against the
+  other side's deletion of it: the subsumption rule read the move as the same
+  deletion. It is a modify/delete conflict again (line and declaration guards).
+- Re-merging an output against the same side grew the file by a blank line per
+  pass when the side's gap had lost its neighbour; a blank run with nothing
+  before it (or after it, rolled past the last declaration) is no longer
+  emitted, so re-merge is a fixpoint.
+- The merge gate no longer counts the no-grammar fallback's line-range
+  `chunk`s as declarations.
+- `weave check` could hang forever reading merge stages through
+  `git cat-file --batch` on merges that touched many files (a two-pipe
+  deadlock). Requests are now written on their own thread.
+- `weave check` sat idle for hours in a partial (blobless) clone: `cat-file`
+  fetched each missing blob in its own network round trip. Stages are now read
+  with lazy fetching off and missing blobs fetched in one batch; a blob that
+  still cannot be read makes that one file `UNREAD` instead of ending the whole
+  check with no verdicts. The old read also mistook a non-local blob for a file
+  the revision did not have.
+- `weave check` spun for minutes on large merges: files over 1 MB (the merge's
+  own structure ceiling, now `weave_core::merge::STRUCTURE_LIMIT_BYTES`) are no
+  longer parsed for structure — sem-core's entity-id disambiguation is
+  quadratic in same-named siblings — and the repo-wide dangling pass parses each
+  file once instead of once per subject.
+- `weave check` never waits on git without a deadline, and `--timeout`
+  (default 300 s) ends any run that outlives it with NOTHING WAS VERIFIED and
+  exit 2. Any error also exits 2; exit 1 keeps meaning findings.
+- `weave check` prints a verdict line for every file the merge touched,
+  including a file a side deleted as asked and a symlink or submodule.
+- `weave check` during a rebase or cherry-pick uses the replayed commit's parent
+  as the base (#157).
+- `weave check` judges a modify/delete by what each resolution can lose, under
+  its own class `MODDEL` (it was reported as `MARKERS`, and every deletion was a
+  finding while every keep passed). Deleting the file is a finding only if a
+  surviving file still calls a name only it defined, or the modifier's edit is
+  neither layout-only (whitespace; comments count) nor already in the file the
+  deleter moved the content to. When that successor exists and the edit
+  re-applies to it cleanly, the finding carries the ported edit as a patch.
+  Keeping the file is a finding only if the successor now defines the same
+  names (a moved file kept twice); a kept file calling a name the deleter
+  removed is `DANGLING`, as before. Every other modify/delete resolution is
+  `review (MODDEL)` — an advisory, exit 0: whether the file should exist is the
+  authors' call. A missing file that is not a modify/delete is `MISSING`.
+  The move-plus-edit port lives here rather than in the driver because git
+  never gives a merge driver a modify/delete, nor two paths at once; it is
+  offered, not applied — `weave check` does not write the working tree.
+- `weave check` reads a file git relocated into a renamed directory
+  (`CONFLICT (file location)`) against the side that added it, at the path it
+  was added at. It was checked against no stages at all — every line it states
+  twice was a `DUP` — and the path it was added at was reported missing.
+
 ## 0.5.4
 
 ### Fixed
