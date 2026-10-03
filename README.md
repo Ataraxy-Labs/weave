@@ -40,7 +40,7 @@
 
 1. **Merge.** weave merges by function and by entry, not by line. Two agents who add different entries to the same list, table, map or `switch` both keep their entry.
 2. **Gate.** Every file of the merge must pass fixed, built-in rules: nothing either side wrote is dropped, nothing either side changed is undone, no key or `case` label is stated twice, and the file still parses. The gate is deterministic code, the same on every run, with no AI in it.
-3. **Verify.** Your command runs on the merged tree (`--verify-cmd 'cargo test'`), or `--check sem` runs `sem check`.
+3. **Verify.** Your command runs on the merged tree (`--verify-cmd 'cargo test'`), and/or `--check sem` runs `sem check`: the project's own compiler, type checker, linter and tests, rechecking only what the merge can affect when that gives the same answer. Any verdict but pass refuses.
 4. **Publish.** Only if the gate and the verify step both pass, fast-forward only. If main moved meanwhile, the new main is merged in and all four steps run again.
 
 What is fixed and what is yours: the gate's rules are fixed and cannot be turned off. What runs in the verify step is configurable.
@@ -515,7 +515,7 @@ Seven commands. Each `--help` line says which question the command answers, and 
 | Command | The question it answers |
 |---|---|
 | `weave setup [--global] [--local] [--off]` | Make `git merge` use weave here (`--global`: every repo; `--off`: stop) |
-| `weave land [--resolver <cmd>] [--onto <remote>/<branch>] [--verify-cmd <cmd> \| --check sem] [--queue]` | Can this merge land? Merge, gate every file (PROVEN / VERIFIED / REFUSED), verify, publish; see [above](#landing-an-agents-merge-weave-land). `--queue` is experimental |
+| `weave land [--resolver <cmd>] [--onto <remote>/<branch>] [--verify-cmd <cmd>] [--check sem] [--queue]` | Can this merge land? Merge, gate every file (PROVEN / VERIFIED / REFUSED), verify, publish; see [above](#landing-an-agents-merge-weave-land). `--queue` is experimental |
 | `weave explain <file> [--summary] [--json]` | Why did this file conflict? `--summary`: a structured summary of the weave markers in any file |
 | `weave check [--json]` | Is my conflict resolution right? Lost lines, duplicates, leftover markers, dangling names |
 | `weave preview <branch> [--file <path>]` | What would merging this branch look like? Nothing is written |

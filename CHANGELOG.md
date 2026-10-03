@@ -23,9 +23,13 @@ nothing extra in `--json` mode or when stdout is not a terminal.
 
 ### Added — `weave land --check sem`
 
-With `--onto` or `--queue`, `--check sem` verifies the merged tree with
-`sem check` instead of a `--verify-cmd`: any verdict but pass (exit 0)
-refuses, so a tree sem cannot decide is not published.
+With `--onto` or `--queue`, `--check sem` (or `[land] check = sem` in
+`.weave/config`) runs `sem check --base <tip> --json` on the exact tree to be
+published, after `--verify-cmd` if both are given. Exit 0 lands; a failure, a
+tree sem could not decide, unreadable output or no `sem` at all refuses and
+publishes nothing. The sem check certificate is recorded with the gate
+certificates and in the queue ticket's result. `--check none` turns a
+configured default off for one run.
 
 ### Added — `weave land --queue` (experimental)
 
