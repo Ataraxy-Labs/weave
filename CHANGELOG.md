@@ -9,6 +9,19 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+### Added — `weave land --queue` (experimental)
+
+Many agents, one origin, one branch: `weave land --queue` submits HEAD to a
+landing queue kept as append-only commit chains under `refs/weave/<branch>/`
+in the shared remote and blocks until the candidate is landed or refused.
+One lander at a time (a leased lock, `--lease-ttl`) merges each candidate onto
+the tip in submission order, runs the gate and `--verify-cmd`, and
+fast-forwards the branch, so no push can race another. Every ticket gets
+exactly one result; a merge refusal leaves the merge in progress locally to
+resolve in place. Only ref creations and fast-forwards are pushed, so origins
+that deny non-fast-forwards and deletes work unchanged. The protocol may
+change.
+
 ### Fixed — a merge may not state a `case` label or a map key twice
 
 Two features that each added `case 3:` (different bodies) to one Go switch

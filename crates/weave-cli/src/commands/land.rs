@@ -76,6 +76,46 @@ pub(crate) fn run_onto(args: OntoArgs<'_>, host: &Host) -> R<()> {
     }
 }
 
+/// `weave land --queue`. Exit 0: landed. 1: refused (or still queued). 2:
+/// the run failed.
+pub(crate) fn run_queue(
+    args: OntoArgs<'_>,
+    lease_ttl: u64,
+    queue_timeout: u64,
+    host: &Host,
+) -> R<()> {
+    let run = || -> R<weave_cli::queue::QueueOutcome> {
+        let (remote, branch) = weave_cli::onto::split_target(args.target)?;
+        let q = weave_cli::queue::QueueOptions {
+            onto: weave_cli::onto::Options {
+                remote,
+                branch,
+                resolver: args.resolver.map(|command| Resolver {
+                    command: command.to_string(),
+                    timeout: Duration::from_secs(args.resolver_timeout),
+                }),
+                verify_cmd: args.verify_cmd.map(str::to_string),
+                verify_timeout: Duration::from_secs(args.verify_timeout),
+                attempts: args.attempts,
+                certificate_dir: args.certificate_dir.map(std::path::PathBuf::from),
+            },
+            lease_ttl: Duration::from_secs(lease_ttl.max(1)),
+            wait_timeout: Duration::from_secs(queue_timeout),
+            poll: Duration::from_millis(400),
+        };
+        let mut out = std::io::stdout();
+        weave_cli::queue::submit(Path::new("."), &q, host, &mut out)
+    };
+    match run() {
+        Ok(weave_cli::queue::QueueOutcome::Landed(_)) => std::process::exit(0),
+        Ok(weave_cli::queue::QueueOutcome::Refused(_)) => std::process::exit(1),
+        Err(e) => {
+            eprintln!("weave land --queue: {e}. Nothing was published by this run.");
+            std::process::exit(2);
+        }
+    }
+}
+
 /// `Ok(any file refused)`.
 fn land(args: Args<'_>, host: &Host) -> R<bool> {
     let dir = Path::new(".");

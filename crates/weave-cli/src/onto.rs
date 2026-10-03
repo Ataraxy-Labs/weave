@@ -122,8 +122,6 @@ pub fn land_onto(dir: &Path, opts: &Options, host: &Host, out: &mut dyn Write) -
     let top = PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"])?);
     let dir = top.as_path();
     let gd = PathBuf::from(git(dir, &["rev-parse", "--absolute-git-dir"])?);
-    let checked = Ledger(gd.join("weave-land-verified"));
-    let verify_ok = Ledger(gd.join("weave-land-verify-ok"));
     let target = format!("{}/{}", opts.remote, opts.branch);
 
     if gd.join("rebase-merge").exists() || gd.join("rebase-apply").exists() {
@@ -175,73 +173,9 @@ pub fn land_onto(dir: &Path, opts: &Options, host: &Host, out: &mut dyn Write) -
             return Err(format!("git fetch {target} failed: {}", err.trim()).into());
         }
         let tip = rev(dir, "FETCH_HEAD")?;
-        if git(dir, &["rev-list", &format!("{tip}..HEAD")])?.is_empty() {
-            writeln!(
-                out,
-                "land: nothing to land: your branch has no commits that are not already on {target}."
-            )?;
-            return Ok(Outcome::Refused("nothing to land"));
-        }
-
-        // 2. the merge with the tip, gated before it is committed
-        if !git_ok(dir, &["merge-base", "--is-ancestor", &tip, "HEAD"]) {
-            let short = &tip[..tip.len().min(12)];
-            if let Err(why) = start_merge(dir, &gd, &target, &tip, out)? {
-                return Ok(Outcome::Refused(why));
-            }
-            let conflicted = git(dir, &["diff", "--name-only", "--diff-filter=U"])?;
-            if conflicted.is_empty() {
-                writeln!(out, "land: merged {target} ({short}); checking the merge …")?;
-            } else {
-                writeln!(
-                    out,
-                    "land: merging {target} ({short}) conflicts in:\n{}",
-                    indent(&conflicted)
-                )?;
-            }
-            match gate_merge_in_progress(dir, opts, host, out, &tip, true)? {
-                Gated::Committed => {}
-                Gated::Refused(_) => return Ok(Outcome::Refused("merge refused")),
-                Gated::Aborted => {
-                    writeln!(
-                        out,
-                        "land: land's own merge could not be committed and was aborted; merging \
-                         again (attempt {attempt})."
-                    )?;
-                    continue;
-                }
-            }
-        }
-
-        // 3. every other merge on the branch not yet checked
-        if !gate_branch_merges(dir, opts, host, out, &checked, &tip)? {
-            return Ok(Outcome::Refused("a merge on the branch was refused"));
-        }
-
-        // 4. the verify command on the exact tree to be published
-        if let Some(cmd) = &opts.verify_cmd {
-            let tree = rev(dir, "HEAD^{tree}")?;
-            let key = format!("{tree} {}", hex(&Sha256::digest(cmd.as_bytes())));
-            if !verify_ok.has(&key) {
-                writeln!(
-                    out,
-                    "land: running the verify command on the merged tree: {cmd}"
-                )?;
-                match run_verify(dir, cmd, &tip, opts.verify_timeout)? {
-                    Ok(()) => verify_ok.add(&key)?,
-                    Err(report) => {
-                        writeln!(out, "{report}")?;
-                        writeln!(
-                            out,
-                            "\nland: REFUSED. The verify command failed on the merged tree \
-                             (your branch + {target}); nothing was published. Fix the failure \
-                             (it may come from combining your change with what is on {target}), \
-                             commit the fix, then run land again."
-                        )?;
-                        return Ok(Outcome::Refused("verify command failed"));
-                    }
-                }
-            }
+        match prepare(dir, opts, host, out, &tip, &[])? {
+            Prep::Ready(_) => {}
+            Prep::Refused(r) => return Ok(Outcome::Refused(r.reason)),
         }
 
         // 5. publish, fast-forward only
@@ -281,6 +215,200 @@ pub fn land_onto(dir: &Path, opts: &Options, host: &Host, out: &mut dyn Write) -
     }
     writeln!(out, "land: {target} kept moving; run land again.")?;
     Ok(Outcome::Refused("target kept moving"))
+}
+
+/// A tree ready to publish, or why not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prep {
+    /// HEAD is this commit: gated against the tip, verified; publish it.
+    Ready(String),
+    /// Nothing may be published. The report was written to `out`.
+    Refused(Refusal),
+}
+
+/// Why [`prepare`] refused, in a form another process can act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// Short machine reason: "nothing to land", "merge refused",
+    /// "a merge on the branch was refused", "verify command failed".
+    pub reason: &'static str,
+    /// The files the gate refused (empty for a verify failure).
+    pub files: Vec<String>,
+    /// `path:first-last` line ranges of the conflict blocks left in those
+    /// files, where there are markers.
+    pub regions: Vec<String>,
+}
+
+impl Refusal {
+    fn bare(reason: &'static str) -> Refusal {
+        Refusal {
+            reason,
+            files: Vec::new(),
+            regions: Vec::new(),
+        }
+    }
+}
+
+/// Steps 2–4 of the loop against one fetched `tip`, on the branch checked out
+/// in `dir`: merge `tip` in and gate every file of the merge, gate every other
+/// unchecked merge on the branch, run the verify command on the final tree.
+/// `Ready(HEAD)` when all of it passed — the caller publishes HEAD with a
+/// lease on `tip`. `env` is extra environment for the verify command.
+///
+/// A merge refusal leaves the merge in progress in `dir`, the refused files
+/// conflicted, so the person can resolve them in place.
+pub fn prepare(
+    dir: &Path,
+    opts: &Options,
+    host: &Host,
+    out: &mut dyn Write,
+    tip: &str,
+    env: &[(&str, &str)],
+) -> R<Prep> {
+    let gd = PathBuf::from(git(dir, &["rev-parse", "--absolute-git-dir"])?);
+    let checked = Ledger(gd.join("weave-land-verified"));
+    let verify_ok = Ledger(gd.join("weave-land-verify-ok"));
+    let target = format!("{}/{}", opts.remote, opts.branch);
+
+    if git(dir, &["rev-list", &format!("{tip}..HEAD")])?.is_empty() {
+        writeln!(
+            out,
+            "land: nothing to land: your branch has no commits that are not already on {target}."
+        )?;
+        return Ok(Prep::Refused(Refusal::bare("nothing to land")));
+    }
+
+    // 2. the merge with the tip, gated before it is committed. land's own
+    // merge whose commit failed is aborted cleanly; it is merged again once.
+    if !git_ok(dir, &["merge-base", "--is-ancestor", tip, "HEAD"]) {
+        let short = &tip[..tip.len().min(12)];
+        let mut committed = false;
+        for _ in 0..2 {
+            if let Err(why) = start_merge(dir, &gd, &target, tip, out)? {
+                return Ok(Prep::Refused(Refusal::bare(why)));
+            }
+            let conflicted = git(dir, &["diff", "--name-only", "--diff-filter=U"])?;
+            if conflicted.is_empty() {
+                writeln!(out, "land: merged {target} ({short}); checking the merge …")?;
+            } else {
+                writeln!(
+                    out,
+                    "land: merging {target} ({short}) conflicts in:\n{}",
+                    indent(&conflicted)
+                )?;
+            }
+            match gate_merge_in_progress(dir, opts, host, out, tip, true)? {
+                Gated::Committed => {
+                    committed = true;
+                    break;
+                }
+                Gated::Refused(refused) => {
+                    let regions = conflict_regions(dir, &refused);
+                    if !regions.is_empty() {
+                        writeln!(
+                            out,
+                            "land: conflict regions:\n{}",
+                            indent(&regions.join("\n"))
+                        )?;
+                    }
+                    return Ok(Prep::Refused(Refusal {
+                        reason: "merge refused",
+                        files: refused,
+                        regions,
+                    }));
+                }
+                Gated::Aborted => {
+                    writeln!(
+                        out,
+                        "land: land's own merge could not be committed and was aborted; merging \
+                         again."
+                    )?;
+                }
+            }
+        }
+        if !committed {
+            writeln!(
+                out,
+                "\nland: REFUSED. land's own merge could not be committed twice; nothing was \
+                 published. Run land again once no other git command is running here."
+            )?;
+            return Ok(Prep::Refused(Refusal::bare("merge could not be committed")));
+        }
+    }
+    // 3. every other merge on the branch not yet checked
+    let refused = gate_branch_merges(dir, opts, host, out, &checked, tip)?;
+    if !refused.is_empty() {
+        return Ok(Prep::Refused(Refusal {
+            reason: "a merge on the branch was refused",
+            files: refused,
+            regions: Vec::new(),
+        }));
+    }
+
+    // 4. the verify command on the exact tree to be published
+    if let Some(cmd) = &opts.verify_cmd {
+        let tree = rev(dir, "HEAD^{tree}")?;
+        let key = format!("{tree} {}", hex(&Sha256::digest(cmd.as_bytes())));
+        if !verify_ok.has(&key) {
+            writeln!(
+                out,
+                "land: running the verify command on the merged tree: {cmd}"
+            )?;
+            match run_verify(dir, cmd, tip, opts.verify_timeout, env)? {
+                Ok(()) => verify_ok.add(&key)?,
+                Err(report) => {
+                    writeln!(out, "{report}")?;
+                    writeln!(
+                        out,
+                        "\nland: REFUSED. The verify command failed on the merged tree \
+                         (your branch + {target}); nothing was published. Fix the failure \
+                         (it may come from combining your change with what is on {target}), \
+                         commit the fix, then run land again."
+                    )?;
+                    return Ok(Prep::Refused(Refusal::bare("verify command failed")));
+                }
+            }
+        }
+    }
+    Ok(Prep::Ready(rev(dir, "HEAD")?))
+}
+
+/// `path:first-last` (1-based) for every conflict block still in `files`.
+pub fn conflict_regions(dir: &Path, files: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for f in files {
+        let Ok(text) = std::fs::read_to_string(dir.join(f)) else {
+            continue;
+        };
+        let mut open = None;
+        for (i, line) in text.lines().enumerate() {
+            if line.starts_with("<<<<<<<") {
+                open = Some(i + 1);
+            } else if line.starts_with(">>>>>>>") {
+                if let Some(a) = open.take() {
+                    out.push(format!("{f}:{a}-{}", i + 1));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The merge in progress in `dir`: the person's in-place resolution, judged
+/// with the working-tree gate and the both-sides invariant and committed when
+/// it passes — or land's own unfinished merge, aborted (never judged as a
+/// resolution). `true`: go on (committed, or aborted cleanly).
+pub fn check_resolution(dir: &Path, opts: &Options, host: &Host, out: &mut dyn Write) -> R<bool> {
+    let gd = PathBuf::from(git(dir, &["rev-parse", "--absolute-git-dir"])?);
+    if let Some(why) = mergestate::clear_stale_lock(&gd, out)? {
+        writeln!(
+            out,
+            "land: REFUSED. {why}. Nothing was published. Wait for that process to finish, then \
+             run land again."
+        )?;
+        return Ok(false);
+    }
+    Ok(resume_merge_in_progress(dir, &gd, opts, host, out)?.is_none())
 }
 
 fn indent(lines: &str) -> String {
@@ -530,6 +658,7 @@ fn gate_merge_in_progress(
     if !refused.is_empty() || !still_unmerged.is_empty() {
         let mut names: BTreeSet<String> = refused.iter().map(|s| s.to_string()).collect();
         names.extend(still_unmerged.lines().map(str::to_string));
+        let names: Vec<String> = names.into_iter().collect();
         writeln!(
             out,
             "\nland: REFUSED. These files are not merged in a way weave can prove or verify:\n{}\n\
@@ -538,7 +667,7 @@ fn gate_merge_in_progress(
              again. land checks your resolution and commits the merge for you. (Or abort the \
              merge with `git merge --abort`, change your own commits so they no longer collide — \
              a different case value or key, say — commit, and run land again.)",
-            indent(&names.iter().cloned().collect::<Vec<_>>().join("\n"))
+            indent(&names.join("\n"))
         )?;
         if own {
             mergestate::write_record(&gd, "refused", &pre, theirs)?;
@@ -694,7 +823,7 @@ fn gate_branch_merges(
     out: &mut dyn Write,
     checked: &Ledger,
     tip: &str,
-) -> R<bool> {
+) -> R<Vec<String>> {
     let merges = git(dir, &["rev-list", "--merges", &format!("{tip}..HEAD")])?;
     let gd = PathBuf::from(git(dir, &["rev-parse", "--absolute-git-dir"])?);
     let preserved = Ledger(gd.join("weave-land-preserved"));
@@ -728,7 +857,7 @@ fn gate_branch_merges(
                         preserve::render(&lost, "your branch", &target),
                         &parents[1][..parents[1].len().min(12)]
                     )?;
-                    return Ok(false);
+                    return Ok(lost.into_iter().map(|v| v.path).collect());
                 }
             }
             preserved.add(m)?;
@@ -744,7 +873,7 @@ fn gate_branch_merges(
                 "land: REFUSED. {m} is a merge of {} parents; land checks two-parent merges only.",
                 parents.len()
             )?;
-            return Ok(false);
+            return Ok(vec![m.to_string()]);
         }
         let base = git(dir, &["merge-base", parents[0], parents[1]])?;
         let plan = land::plan(
@@ -798,22 +927,35 @@ fn gate_branch_merges(
                  the tests, then run land again.",
                 &m[..m.len().min(12)]
             )?;
-            return Ok(false);
+            return Ok(reports
+                .iter()
+                .filter(|r| r.status == Status::Refused)
+                .map(|r| r.path.clone())
+                .collect());
         }
         checked.add(m)?;
     }
-    Ok(true)
+    Ok(Vec::new())
 }
 
 /// Run the verify command in the repository root on a clean checkout of
 /// HEAD. `Ok(Err(report))` when it fails or leaves tracked files changed.
-fn run_verify(dir: &Path, cmd: &str, tip: &str, limit: Duration) -> R<Result<(), String>> {
+fn run_verify(
+    dir: &Path,
+    cmd: &str,
+    tip: &str,
+    limit: Duration,
+    env: &[(&str, &str)],
+) -> R<Result<(), String>> {
     let mut c = Command::new("sh");
     c.arg("-c")
         .arg(cmd)
         .current_dir(dir)
         .env("WEAVE_LAND_ONTO", tip)
         .env("WEAVE_LAND_HEAD", rev(dir, "HEAD")?);
+    for (k, v) in env {
+        c.env(k, v);
+    }
     let run = gitscan::run_bounded(c, "the verify command", None, limit);
     let (status, stdout, stderr) = match run {
         Ok(r) => r,

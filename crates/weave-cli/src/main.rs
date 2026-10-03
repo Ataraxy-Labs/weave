@@ -25,7 +25,11 @@ EXAMPLES
   # the whole landing: merge origin/main in, gate every file of the merge,
   # build and test the merged tree, publish fast-forward only; retried when
   # main moves, and the new merge is gated and built again
-  weave land --onto origin/main --verify-cmd 'go build ./... && go vet ./...'";
+  weave land --onto origin/main --verify-cmd 'go build ./... && go vet ./...'
+
+  # many agents, one main: queue HEAD and block until it lands or is refused;
+  # candidates land one at a time in order, so no push races another
+  weave land --queue --verify-cmd 'go build ./... && go vet ./...'";
 
 #[derive(Parser)]
 #[command(
@@ -179,6 +183,7 @@ enum Commands {
     /// Exit 0: every file PROVEN or VERIFIED. 1: some file REFUSED. 2: the run
     /// failed and nothing was landed.
     #[command(after_long_help = LAND_EXAMPLES)]
+    #[command(group = clap::ArgGroup::new("publish").args(["onto", "queue"]).multiple(true))]
     Land {
         /// Resolver command, run with `sh -c` once per attempt (see above)
         #[arg(long, value_name = "CMD")]
@@ -219,7 +224,7 @@ enum Commands {
         /// merged tree before publishing; a non-zero exit refuses. At least a
         /// build is recommended (`go build ./... && go vet ./...`,
         /// `npm run build`, `cargo check`), better the affected tests
-        #[arg(long, value_name = "CMD", requires = "onto")]
+        #[arg(long, value_name = "CMD", requires = "publish")]
         verify_cmd: Option<String>,
         /// Give up on the verify command after this many seconds
         #[arg(long, default_value_t = 1800, value_name = "SECS")]
@@ -228,8 +233,22 @@ enum Commands {
         #[arg(long, default_value_t = 5, value_name = "N")]
         attempts: usize,
         /// With --onto: write every gate certificate into this directory
-        #[arg(long, value_name = "DIR", requires = "onto")]
+        #[arg(long, value_name = "DIR", requires = "publish")]
         certificate_dir: Option<String>,
+        /// Experimental. Land through the landing queue kept in the remote (refs/weave/*):
+        /// submit HEAD and block until it is landed or refused. Candidates
+        /// land one at a time in submission order (merge onto the tip, gate,
+        /// --verify-cmd, fast-forward), so no push can race another. A merge
+        /// refusal leaves the merge in progress here to resolve in place.
+        /// Target: --onto, default origin/main
+        #[arg(long, conflicts_with_all = ["base", "ours", "theirs", "result", "dry_run"])]
+        queue: bool,
+        /// With --queue: a lander silent this long is dead; take over its lock
+        #[arg(long, default_value_t = 30, value_name = "SECS")]
+        lease_ttl: u64,
+        /// With --queue: stop waiting after this long (the ticket stays queued)
+        #[arg(long, default_value_t = 7200, value_name = "SECS")]
+        queue_timeout: u64,
     },
     /// Typed entity ops: the write side of the agent contract. Extract the ops
     /// that turn one file into another, and apply them to a file that may have
@@ -374,7 +393,24 @@ fn main() {
             verify_timeout,
             attempts,
             ref certificate_dir,
+            queue,
+            lease_ttl,
+            queue_timeout,
         } => match onto {
+            _ if queue => commands::land::run_queue(
+                commands::land::OntoArgs {
+                    target: onto.as_deref().unwrap_or("origin/main"),
+                    resolver: resolver.as_deref(),
+                    resolver_timeout,
+                    verify_cmd: verify_cmd.as_deref(),
+                    verify_timeout,
+                    attempts,
+                    certificate_dir: certificate_dir.as_deref(),
+                },
+                lease_ttl,
+                queue_timeout,
+                &host,
+            ),
             Some(target) => commands::land::run_onto(
                 commands::land::OntoArgs {
                     target,

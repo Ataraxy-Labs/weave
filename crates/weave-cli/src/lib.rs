@@ -13,6 +13,7 @@ pub mod onto;
 pub(crate) mod parsers;
 pub mod patch;
 pub mod preserve;
+pub mod queue;
 pub mod repo_scope;
 pub mod wire;
 pub mod worktree;
