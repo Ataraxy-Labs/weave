@@ -155,29 +155,29 @@ enum Commands {
     /// could not verify at all — git failed, or the run passed --timeout.
     #[command(display_order = 4)]
     Check {
-        /// Output as JSON (working-tree mode)
+        /// Output as JSON (working-tree mode). Example: weave check --json
         #[arg(long)]
         json: bool,
-        /// Merge base revision (default: merge-base of --ours and --theirs)
+        /// Merge base revision (default: merge-base of --ours and --theirs). Example: --base main~3
         #[arg(long)]
         base: Option<String>,
-        /// Our side (default: HEAD)
+        /// Our side (default: HEAD). Example: --ours main
         #[arg(long)]
         ours: Option<String>,
-        /// Their side (default: MERGE_HEAD, i.e. the merge in progress)
+        /// Their side (default: MERGE_HEAD, i.e. the merge in progress). Example: --theirs agent/feature
         #[arg(long)]
         theirs: Option<String>,
-        /// No-git mode: directory holding the base tree
+        /// No-git mode: directory holding the base tree. Example: --base-dir /tmp/base
         #[arg(long)]
         base_dir: Option<String>,
-        /// No-git mode: directory holding our tree
+        /// No-git mode: directory holding our tree. Example: --ours-dir /tmp/ours
         #[arg(long)]
         ours_dir: Option<String>,
-        /// No-git mode: directory holding their tree
+        /// No-git mode: directory holding their tree. Example: --theirs-dir /tmp/theirs
         #[arg(long)]
         theirs_dir: Option<String>,
         /// Give up after this many seconds with exit code 2 and a message,
-        /// rather than run on. 0 means no limit.
+        /// rather than run on. 0 means no limit. Example: --timeout 60
         #[arg(long, default_value_t = 300)]
         timeout: u64,
     },
@@ -233,39 +233,39 @@ enum Commands {
     #[command(after_long_help = LAND_EXAMPLES, display_order = 2)]
     #[command(group = clap::ArgGroup::new("publish").args(["onto", "queue"]).multiple(true))]
     Land {
-        /// Resolver command, run with `sh -c` once per attempt (see above)
+        /// Resolver command, run with `sh -c` once per attempt (see above). Example: --resolver 'python3 scripts/resolve.py'
         #[arg(long, value_name = "CMD")]
         resolver: Option<String>,
-        /// Give up on one resolver call after this many seconds
+        /// Give up on one resolver call after this many seconds. Example: --resolver-timeout 300
         #[arg(long, default_value_t = 900, value_name = "SECS")]
         resolver_timeout: u64,
-        /// Print the report as JSON (the same document --certificate writes)
+        /// Print the report as JSON (the same document --certificate writes). Example: weave land --json
         #[arg(long)]
         json: bool,
         /// Write the review certificate (JSON: every file's status, rule,
-        /// reason and findings, with the merge's three commits) to this file
+        /// reason and findings, with the merge's three commits) to this file. Example: --certificate land.json
         #[arg(long, value_name = "FILE")]
         certificate: Option<String>,
-        /// Decide and report, but write nothing to the working tree or index
+        /// Decide and report, but write nothing to the working tree or index. Example: weave land --dry-run
         #[arg(long)]
         dry_run: bool,
         /// Merge base revision (default: merge-base of --ours and --theirs).
-        /// Any of --base/--ours/--theirs implies --dry-run.
+        /// Any of --base/--ours/--theirs implies --dry-run. Example: --base main~3
         #[arg(long)]
         base: Option<String>,
-        /// Our side (default: HEAD)
+        /// Our side (default: HEAD). Example: --ours main
         #[arg(long)]
         ours: Option<String>,
-        /// Their side (default: MERGE_HEAD, i.e. the merge in progress)
+        /// Their side (default: MERGE_HEAD, i.e. the merge in progress). Example: --theirs agent/feature
         #[arg(long)]
         theirs: Option<String>,
         /// With --base/--ours/--theirs: judge this revision's files as the
-        /// merge's answer (re-check a merge commit as it was committed)
+        /// merge's answer (re-check a merge commit as it was committed). Example: --result HEAD
         #[arg(long, value_name = "REV")]
         result: Option<String>,
         /// Land the current branch onto <remote>/<branch> and publish it there
         /// (see above): nothing is published that has not passed the gate,
-        /// and --verify-cmd, against the exact tip it is published onto
+        /// and --verify-cmd, against the exact tip it is published onto. Example: weave land --onto origin/main
         #[arg(long, value_name = "REMOTE/BRANCH", conflicts_with_all = ["base", "ours", "theirs", "result", "dry_run"])]
         onto: Option<String>,
         /// With --onto: run this (`sh -c`, in the repository root) on the final
@@ -279,13 +279,13 @@ enum Commands {
         /// checkers; any verdict but pass refuses). Example: weave land --onto origin/main --check sem
         #[arg(long, value_name = "CHECKER", value_parser = ["sem"], requires = "publish", conflicts_with = "verify_cmd")]
         check: Option<String>,
-        /// Give up on the verify command after this many seconds
+        /// Give up on the verify command after this many seconds. Example: --verify-timeout 600
         #[arg(long, default_value_t = 1800, value_name = "SECS")]
         verify_timeout: u64,
-        /// With --onto: how many times to merge a moved tip and try again
+        /// With --onto: how many times to merge a moved tip and try again. Example: --attempts 10
         #[arg(long, default_value_t = 5, value_name = "N")]
         attempts: usize,
-        /// With --onto: write every gate certificate into this directory
+        /// With --onto: write every gate certificate into this directory. Example: --certificate-dir certs/
         #[arg(long, value_name = "DIR", requires = "publish")]
         certificate_dir: Option<String>,
         /// Experimental. Land through the landing queue kept in the remote (refs/weave/*):
@@ -293,13 +293,13 @@ enum Commands {
         /// land one at a time in submission order (merge onto the tip, gate,
         /// --verify-cmd, fast-forward), so no push can race another. A merge
         /// refusal leaves the merge in progress here to resolve in place.
-        /// Target: --onto, default origin/main
+        /// Target: --onto, default origin/main. Example: weave land --queue --check sem
         #[arg(long, conflicts_with_all = ["base", "ours", "theirs", "result", "dry_run"])]
         queue: bool,
-        /// With --queue: a lander silent this long is dead; take over its lock
+        /// With --queue: a lander silent this long is dead; take over its lock. Example: --lease-ttl 60
         #[arg(long, default_value_t = 30, value_name = "SECS")]
         lease_ttl: u64,
-        /// With --queue: stop waiting after this long (the ticket stays queued)
+        /// With --queue: stop waiting after this long (the ticket stays queued). Example: --queue-timeout 3600
         #[arg(long, default_value_t = 7200, value_name = "SECS")]
         queue_timeout: u64,
     },
@@ -341,13 +341,13 @@ enum Commands {
         /// committed. Example: weave stats --repo ../project --limit 200
         #[arg(long, value_name = "PATH", conflicts_with = "bench")]
         repo: Option<String>,
-        /// With --repo: max merge commits to scan
+        /// With --repo: max merge commits to scan. Example: weave stats --repo ../project --limit 200
         #[arg(long, default_value_t = 500, requires = "repo")]
         limit: usize,
-        /// With --repo: show a line diff for each weave vs human mismatch
+        /// With --repo: show a line diff for each weave vs human mismatch. Example: weave stats --repo ../project --show-diff
         #[arg(long, requires = "repo")]
         show_diff: bool,
-        /// With --repo: save interesting cases to this directory
+        /// With --repo: save interesting cases to this directory. Example: weave stats --repo ../project --save cases/
         #[arg(long, value_name = "DIR", requires = "repo")]
         save: Option<String>,
     },
@@ -419,34 +419,34 @@ enum ExperimentalCommands {
 enum PatchCommands {
     /// Emit the typed ops that turn <base-file> into <changed-file>
     Extract {
-        /// The file the ops are computed against
+        /// The file the ops are computed against. Example: weave patch extract old.ts new.ts
         base_file: String,
-        /// The file the ops should reproduce
+        /// The file the ops should reproduce. Example: weave patch extract old.ts new.ts
         changed_file: String,
-        /// Path used to select the parser (default: the changed file's own path)
+        /// Path used to select the parser (default: the changed file's own path). Example: --path src/app.ts
         #[arg(long)]
         path: Option<String>,
         /// Inline the base snapshot, making the ops self-contained so `apply`
-        /// can do a real three-way merge against a drifted target
+        /// can do a real three-way merge against a drifted target. Example: weave patch extract old.ts new.ts --embed-base
         #[arg(long)]
         embed_base: bool,
-        /// Write the ops here instead of stdout
+        /// Write the ops here instead of stdout. Example: -o ops.json
         #[arg(short, long)]
         output: Option<String>,
     },
     /// Apply typed ops to a target file, three-way against the ops' base
     Apply {
-        /// The ops document produced by `weave patch extract`
+        /// The ops document produced by `weave patch extract`. Example: weave patch apply ops.json src/app.ts
         ops_file: String,
-        /// The file to apply them to; it may have drifted from the base
+        /// The file to apply them to; it may have drifted from the base. Example: weave patch apply ops.json src/app.ts
         target_file: String,
-        /// The base the ops were extracted from, when not embedded in them
+        /// The base the ops were extracted from, when not embedded in them. Example: --base old.ts
         #[arg(long)]
         base: Option<String>,
-        /// Write the result here instead of stdout
+        /// Write the result here instead of stdout. Example: -o merged.ts
         #[arg(short, long)]
         output: Option<String>,
-        /// Rewrite the target file in place
+        /// Rewrite the target file in place. Example: weave patch apply ops.json src/app.ts --in-place
         #[arg(long)]
         in_place: bool,
     },
