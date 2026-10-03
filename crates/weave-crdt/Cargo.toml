@@ -23,7 +23,7 @@ weave-crdt = { path = ".", features = ["test-helpers"] }
 tempfile = "3"
 
 [dependencies]
-automerge = "0.11"
+automerge = "0.12"
 sem-core = { version = "0.25", default-features = false, features = ["git", "parallel", "grammar-all", "mmap"] }
 weave-core = { path = "../weave-core", version = "0.5.4" }
 serde = { version = "1", features = ["derive"] }
