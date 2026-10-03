@@ -41,6 +41,7 @@ git merge <branch>          # real conflicts land as markers with a `refused_by:
 weave explain <file>        # per-hunk detail for one conflicted file, read off the actual git stages
 #  ...edit to resolve...
 weave check                 # verify the working tree against the three merge stages; exits 1 on findings, 2 if it could not verify
+weave land --resolver <cmd> # or: land it, each conflicted file labelled PROVEN / VERIFIED / REFUSED
 ```
 
 See [Setup](#setup) for `--global`/`--local` variants, [CLI Commands](#cli-commands) for the rest of the
@@ -346,6 +347,69 @@ weave preview feature-branch
 After a real conflict, `weave explain <file>` and `weave check` are the
 next two commands; see [Quickstart](#quickstart).
 
+## Landing an agent's merge: `weave land`
+
+`weave land` runs where `git merge` stopped and gives every file git could not merge
+(content, add/add and modify/delete conflicts) one of three labels:
+
+| Status | Meaning |
+|---|---|
+| **PROVEN** | weave merged the file cleanly **and** an independent merge certificate (`crates/weave-certify`, which shares no merge code with weave) shows the result is the three-way selection of base, ours and theirs. Where both sides changed one region, only the rules `imp_used` (import lines, each one a side added still used by the merged file), `subsume_ins` and `nest` can admit it. |
+| **VERIFIED** | A resolver of your choice wrote the file, and its answer passed the exact gate below. |
+| **REFUSED** | Neither. The file keeps its conflict markers and stays unmerged, so `git commit` refuses. A rejected answer is never written. |
+
+```bash
+git merge agent/feature
+weave land --resolver 'WEAVE_LAND_MODEL="<any model CLI>" python3 scripts/weave-land-resolver.py' \
+           --certificate land.json
+git commit                   # only once nothing is REFUSED
+```
+
+**The resolver** is any command, run with `sh -c`. It gets one JSON object on stdin: `path`,
+`kind`, `base`, `ours`, `theirs`, `conflicted` (git's merge with markers), `attempt`, `previous`
+and `findings`, with `null` for an absent side. It prints the complete resolved file, or one line:
+`DELETE` or `KEEP` (modify/delete only), or `CANNOT[: reason]`. Nothing is tied to a model vendor.
+`scripts/weave-land-resolver.py` is an example that prompts whatever CLI `WEAVE_LAND_MODEL` names.
+
+**The gate** checks each answer against the file's three stages:
+
+- no conflict-marker line that neither side has;
+- it parses when both sides parse;
+- `weave check` finds nothing: lost or duplicated lines, dangling names, duplicate data keys, a
+  data file that no longer loads, modify/delete. A duplicate or dangling name that ours or theirs
+  already has doesn't count against the answer. A file weave has no grammar for gets the line
+  rules alone.
+- every line git merged automatically outside the conflict blocks is still there;
+- inside each conflict block, both sides' changes survive: every token (identifier, number,
+  operator) one side added there is still there, and nothing one side deleted there is back. An
+  answer that keeps one side of a block verbatim is refused unless that side already holds the
+  other's change; identical changes and one side subsuming the other pass, and a block where one
+  side deletes what the other edits is refused whichever side is kept. Tokens, not lines, so
+  re-wrapping or folding two edits of one line into one line passes.
+
+A failed answer gets one retry, with the findings fed back. It passes (VERIFIED) or it is
+refused, with the findings.
+
+In a pre-registered blind audit (n = 200 accepted files per arm), a cheap model resolving agent-PR
+conflicts on its own had 22.0% of its accepted merges judged wrong. Behind this pipeline the
+figure was 9.5%. That gate did not have the both-sides rule (the last bullet), which was added
+after a one-sided answer was seen passing it.
+
+The labels cover files git's line merge conflicts on. Files both sides changed that git merges
+cleanly are counted as not examined. Each file is checked on its own three stages, so an effect
+across files (a caller in a file neither side touched) is outside the gate. Renames are not
+followed.
+
+| Flag | |
+|---|---|
+| `--resolver <cmd>` | The resolver. Without one, every unproven file is REFUSED. |
+| `--json` | Print the report as JSON (`schema: "weave-land/1"`). |
+| `--certificate <file>` | Write the same JSON as the review certificate for the merge commit. It records the three commits and each file's status, rule, reason, findings and landed sha256. |
+| `--dry-run` | Decide and report, but write nothing. |
+| `--base/--ours/--theirs <rev>` | Read a merge between revisions instead of the one in progress. Implies `--dry-run`; useful in CI. |
+
+Exit codes: `0` every file PROVEN or VERIFIED, `1` some file REFUSED, `2` the run failed.
+
 ## CLI Commands
 
 Beyond `setup`/`explain`/`check`/`preview` above, the `weave` binary has commands for the
@@ -360,6 +424,7 @@ for the full flag list; the table below is what each one is for.
 | `weave apply <file>...` | Materialize entity edits held in the CRDT back onto the working files |
 | `weave patch extract <base-file> <changed-file>` | Emit the typed ops that turn `base-file` into `changed-file` |
 | `weave patch apply <ops-file> <target-file>` | Apply those ops to a target file, three-way against the ops' base, in case the target has drifted since the ops were extracted |
+| `weave land [--resolver <cmd>]` | Land a merge, labelling each conflicted file PROVEN, VERIFIED or REFUSED; see [above](#landing-an-agents-merge-weave-land) |
 | `weave summary <file>` | Parse a file's weave conflict markers into a structured (optionally JSON) summary |
 | `weave stats` | Lifetime merge counters, if you've opted in with `WEAVE_STATS=1` (off by default) |
 | `weave bench` | Run the 31-scenario synthetic benchmark against weave, Mergiraf, and git |

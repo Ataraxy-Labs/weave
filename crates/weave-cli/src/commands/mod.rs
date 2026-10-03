@@ -4,6 +4,7 @@ pub(crate) mod bench_repo;
 pub(crate) mod check;
 pub(crate) mod claim;
 pub(crate) mod explain;
+pub(crate) mod land;
 pub(crate) mod patch;
 pub(crate) mod preview;
 pub(crate) mod release;

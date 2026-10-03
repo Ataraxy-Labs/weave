@@ -38,11 +38,35 @@ const GIT_DEADLINE: Duration = Duration::from_secs(120);
 /// * the deadline: past it the child is killed and the answer is an error
 ///   that names the command, never a wait.
 fn bounded(dir: &Path, args: &[&str], input: Option<Vec<u8>>, limit: Duration) -> R<Vec<u8>> {
-    let mut child = Command::new("git")
-        .args(args)
+    let mut cmd = Command::new("git");
+    cmd.args(args)
         .current_dir(dir)
         .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let (status, stdout, stderr) =
+        run_bounded(cmd, &format!("git {}", args.join(" ")), input, limit)?;
+    if !status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&stderr).trim()
+        )
+        .into());
+    }
+    Ok(stdout)
+}
+
+/// Run `cmd`, feeding it `input`, and wait at most `limit` for it — any
+/// program, not only git (`weave land` runs its resolver through this). The
+/// exit status is the caller's to judge; only a spawn failure or the deadline
+/// is an error here. `what` names the command in that error.
+pub(crate) fn run_bounded(
+    mut cmd: Command,
+    what: &str,
+    input: Option<Vec<u8>>,
+    limit: Duration,
+) -> R<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
+    let mut child = cmd
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -50,9 +74,10 @@ fn bounded(dir: &Path, args: &[&str], input: Option<Vec<u8>>, limit: Duration) -
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|e| format!("could not run {what}: {e}"))?;
     if let (Some(bytes), Some(mut stdin)) = (input, child.stdin.take()) {
-        // A write error is git having exited early; its status says why.
+        // A write error is the child having exited early; its status says why.
         std::thread::spawn(move || {
             let _ = stdin.write_all(&bytes);
         });
@@ -84,8 +109,7 @@ fn bounded(dir: &Path, args: &[&str], input: Option<Vec<u8>>, limit: Duration) -
     let deadline = Instant::now() + limit;
     let too_slow = || -> Box<dyn std::error::Error> {
         format!(
-            "git {} did not finish within {}s — weave check stopped waiting rather than hang",
-            args.join(" "),
+            "{what} did not finish within {}s — weave stopped waiting rather than hang",
             limit.as_secs()
         )
         .into()
@@ -101,24 +125,21 @@ fn bounded(dir: &Path, args: &[&str], input: Option<Vec<u8>>, limit: Duration) -
         }
         std::thread::sleep(Duration::from_millis(5));
     };
-    // A grandchild can outlive git and hold a pipe open; the deadline covers
-    // that wait too.
+    // A grandchild can outlive the child and hold a pipe open; the deadline
+    // covers that wait too.
     let remaining = || deadline.saturating_duration_since(Instant::now());
     let stdout = out.recv_timeout(remaining()).map_err(|_| too_slow())?;
     let stderr = err.recv_timeout(remaining()).map_err(|_| too_slow())?;
-    if !status.success() {
-        return Err(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&stderr).trim()
-        )
-        .into());
-    }
-    Ok(stdout)
+    Ok((status, stdout, stderr))
 }
 
-fn git(dir: &Path, args: &[&str]) -> R<String> {
-    let out = bounded(dir, args, None, GIT_DEADLINE)?;
+pub(crate) fn git(dir: &Path, args: &[&str]) -> R<String> {
+    git_input(dir, args, None)
+}
+
+/// [`git`], feeding `input` on stdin.
+pub(crate) fn git_input(dir: &Path, args: &[&str], input: Option<Vec<u8>>) -> R<String> {
+    let out = bounded(dir, args, input, GIT_DEADLINE)?;
     Ok(String::from_utf8_lossy(&out).to_string())
 }
 
@@ -154,8 +175,56 @@ pub struct Stage {
 /// not there is reported per path in [`Stage::unreadable`].
 fn read_paths_at_rev(dir: &Path, rev: &str, paths: &[String]) -> R<Stage> {
     let mut stage = Stage::default();
+    for (path, entry) in entries_at_rev(dir, rev, paths)? {
+        match entry.body {
+            Body::Text(text) => {
+                stage.tree.insert(path, text);
+            }
+            // Not UTF-8: a binary file, which no check here reads anyway.
+            Body::Binary => {}
+            Body::Irregular => {
+                stage.irregular.insert(path);
+            }
+            Body::Unreadable(why) => {
+                stage.unreadable.insert(path, why);
+            }
+        }
+    }
+    Ok(stage)
+}
+
+/// What one rev holds at one path: the index entry (`mode`, `oid`) and what
+/// its bytes are.
+#[derive(Debug, Clone)]
+pub(crate) struct Entry {
+    pub mode: String,
+    pub oid: String,
+    pub body: Body,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Body {
+    /// A regular file whose bytes are UTF-8.
+    Text(String),
+    /// A regular file whose bytes are not UTF-8.
+    Binary,
+    /// A symlink or a submodule.
+    Irregular,
+    /// A regular file whose blob could not be read, and why.
+    Unreadable(String),
+}
+
+/// The entries at `<rev>:<path>` for a bounded set of paths; a path the rev
+/// does not have is simply absent from the map. The bytes are read the way
+/// [`read_paths_at_rev`] documents.
+pub(crate) fn entries_at_rev(
+    dir: &Path,
+    rev: &str,
+    paths: &[String],
+) -> R<BTreeMap<String, Entry>> {
+    let mut out = BTreeMap::new();
     if paths.is_empty() {
-        return Ok(stage);
+        return Ok(out);
     }
     let wanted: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
     // `<mode> SP <type> SP <oid> TAB <path> NUL`
@@ -165,7 +234,7 @@ fn read_paths_at_rev(dir: &Path, rev: &str, paths: &[String]) -> R<Stage> {
         None,
         GIT_DEADLINE,
     )?;
-    let mut blobs: Vec<(String, String)> = Vec::new(); // (path, oid)
+    let mut blobs: Vec<(String, String, String)> = Vec::new(); // (path, mode, oid)
     for entry in listing.split(|&b| b == 0).filter(|e| !e.is_empty()) {
         let entry = String::from_utf8_lossy(entry);
         let Some((meta, path)) = entry.split_once('\t') else {
@@ -177,13 +246,20 @@ fn read_paths_at_rev(dir: &Path, rev: &str, paths: &[String]) -> R<Stage> {
         let mut meta = meta.split(' ');
         let (mode, oid) = (meta.next().unwrap_or(""), meta.nth(1).unwrap_or(""));
         if mode == "100644" || mode == "100755" {
-            blobs.push((path.to_string(), oid.to_string()));
+            blobs.push((path.to_string(), mode.to_string(), oid.to_string()));
         } else {
-            stage.irregular.insert(path.to_string());
+            out.insert(
+                path.to_string(),
+                Entry {
+                    mode: mode.to_string(),
+                    oid: oid.to_string(),
+                    body: Body::Irregular,
+                },
+            );
         }
     }
 
-    let oids: Vec<&str> = blobs.iter().map(|(_, oid)| oid.as_str()).collect();
+    let oids: Vec<&str> = blobs.iter().map(|(_, _, oid)| oid.as_str()).collect();
     let mut found = cat_blobs(dir, &oids)?;
     let missing: Vec<&str> = oids
         .iter()
@@ -197,21 +273,15 @@ fn read_paths_at_rev(dir: &Path, rev: &str, paths: &[String]) -> R<Stage> {
             Err(e) => why_missing = e.to_string(),
         }
     }
-    for (path, oid) in blobs {
-        match found.get(&oid) {
-            Some(Some(text)) => {
-                stage.tree.insert(path, text.clone());
-            }
-            // Not UTF-8: a binary file, which no check here reads anyway.
-            Some(None) => {}
-            None => {
-                stage
-                    .unreadable
-                    .insert(path, format!("{rev}: {why_missing}"));
-            }
-        }
+    for (path, mode, oid) in blobs {
+        let body = match found.get(&oid) {
+            Some(Some(text)) => Body::Text(text.clone()),
+            Some(None) => Body::Binary,
+            None => Body::Unreadable(format!("{rev}: {why_missing}")),
+        };
+        out.insert(path, Entry { mode, oid, body });
     }
-    Ok(stage)
+    Ok(out)
 }
 
 /// `oid -> Some(text)` for every blob the object store has (`None` when it is

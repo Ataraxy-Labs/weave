@@ -211,3 +211,153 @@ fn no_base_add_add_needs_agreement() {
     let r = run(None, a, a, a);
     assert!(r.hard.is_empty() && r.both.is_empty());
 }
+
+// ------------------------------------------------------------------ imp_used
+
+fn run_at(path: &str, o: &str, a: &str, b: &str, m: &str) -> Report {
+    let reg = create_default_registry();
+    let d = |t: &str| decompose(&reg, path, t);
+    check(path, Some(&d(o)), Some(&d(a)), Some(&d(b)), &d(m))
+}
+
+fn verdict_at(r: &Report, key: &str, allowance: &str) -> &'static str {
+    let (_, v) = r.both.iter().find(|(k, _)| k == key).unwrap_or_else(|| panic!("no both-changed {key}: {:?}", r.both));
+    v.iter().find(|(n, _)| *n == allowance).unwrap().1
+}
+
+// A test file migrated two ways at once. Theirs keeps the old attribute names and
+// adds alias imports for them; ours drops a namespace import and rewrites the
+// class body (another region) to new attributes. The merge keeps theirs' aliases
+// and ours' body: the aliases are dead. imp_strict admits the header; imp_used
+// must not.
+const CS_BASE: &str = "using OldFramework;\nusing Shop.Core;\n\nnamespace Shop.Tests;\n\n[Fixture]\npublic class CartTests\n{\n    [Check]\n    public void empty_cart_has_no_total()\n    {\n        Assert.Equal(0, new Cart().Total);\n    }\n}\n";
+
+fn cs_theirs() -> String {
+    CS_BASE.replace(
+        "using OldFramework;\n",
+        "using OldFramework;\nusing FixtureAttribute = Other.Runner.ClassAttribute;\nusing CheckAttribute = Other.Runner.MethodAttribute;\n",
+    )
+}
+
+#[test]
+fn imp_used_rejects_alias_imports_orphaned_by_a_body_rewrite() {
+    let theirs = cs_theirs();
+    let body_new = "[Serializable]\npublic class CartTests\n{\n    [Fact]\n    public void empty_cart_has_no_total()\n    {\n        new Cart().Total.ShouldBe(0);\n    }\n}\n";
+    let ours = format!("using Shop.Core;\n\nnamespace Shop.Tests;\n\n{body_new}");
+    let merged = format!(
+        "using FixtureAttribute = Other.Runner.ClassAttribute;\nusing CheckAttribute = Other.Runner.MethodAttribute;\nusing Shop.Core;\n\nnamespace Shop.Tests;\n\n{body_new}"
+    );
+    let r = run_at("t.cs", CS_BASE, &ours, &theirs, &merged);
+    assert!(r.hard.is_empty(), "{:?}", r.hard);
+    assert_eq!(verdict_at(&r, "^", "imp_strict"), "admit", "the strict import rule admits it");
+    assert_eq!(verdict_at(&r, "^", "imp_used"), "conflict");
+    assert!(r.certified(&["imp_strict", "subsume_ins", "nest"]));
+    assert!(!r.certified(&["imp_used", "subsume_ins", "nest"]));
+}
+
+#[test]
+fn imp_used_admits_aliases_still_used_through_the_attribute_stem() {
+    // control: ours changes only a method body, so [Fixture]/[Check] survive in M
+    let theirs = cs_theirs();
+    let ours = CS_BASE.replace("using OldFramework;\n", "").replace("Assert.Equal(0, new Cart().Total);", "Assert.Equal(0m, new Cart().Total);");
+    let merged = theirs.replace("using OldFramework;\n", "").replace("Assert.Equal(0, new Cart().Total);", "Assert.Equal(0m, new Cart().Total);");
+    let r = run_at("t.cs", CS_BASE, &ours, &theirs, &merged);
+    assert!(r.hard.is_empty(), "{:?}", r.hard);
+    assert_eq!(verdict_at(&r, "^", "imp_strict"), "admit");
+    assert_eq!(verdict_at(&r, "^", "imp_used"), "admit");
+    assert!(r.certified(&["imp_used", "subsume_ins", "nest"]));
+}
+
+#[test]
+fn imp_used_declines_imports_that_bind_no_name() {
+    // an added namespace `using` binds nothing it can check: decline, not admit
+    let theirs = CS_BASE.replace("using Shop.Core;\n", "using Shop.Core;\nusing Other.Runner;\n");
+    let ours = CS_BASE.replace("using OldFramework;\n", "");
+    let merged = theirs.replace("using OldFramework;\n", "");
+    let r = run_at("t.cs", CS_BASE, &ours, &theirs, &merged);
+    assert_eq!(verdict_at(&r, "^", "imp_strict"), "admit");
+    assert_eq!(verdict_at(&r, "^", "imp_used"), "decline");
+}
+
+const RS_BASE: &str = "use a::X;\nuse a::Y;\n\nfn f() -> u32 {\n    X + Y\n}\n\nfn g() -> u32 {\n    2\n}\n";
+
+#[test]
+fn imp_used_rust_names_used_unused_and_hidden_in_comments_or_strings() {
+    let ours = RS_BASE.replace("use a::Y;\n", "use a::Y;\nuse b::P;\n");
+    let theirs = RS_BASE.replace("use a::X;\n", "use a::X;\nuse c::Q;\n");
+    let with = |body: &str| format!("use a::X;\nuse c::Q;\nuse a::Y;\nuse b::P;\n\nfn f() -> u32 {{\n    X + Y\n}}\n\nfn g() -> u32 {{\n    {body}\n}}\n");
+    // the header's added lines P and Q: used in g's body on both sides
+    let ours_u = ours.replace("    2\n", "    P::k()\n");
+    let theirs_u = theirs.replace("fn f() -> u32 {\n    X + Y\n}", "fn f() -> u32 {\n    X + Y + Q\n}");
+    let m = with("P::k()").replace("X + Y\n", "X + Y + Q\n");
+    let r = run_at("x.rs", RS_BASE, &ours_u, &theirs_u, &m);
+    assert!(r.hard.is_empty(), "{:?}", r.hard);
+    assert_eq!(verdict_at(&r, "^", "imp_strict"), "admit");
+    assert_eq!(verdict_at(&r, "^", "imp_used"), "admit");
+    // P never referenced: imp_strict admits, imp_used rejects
+    let r = run_at("x.rs", RS_BASE, &ours, &theirs_u, &with("2").replace("X + Y\n", "X + Y + Q\n"));
+    assert_eq!(verdict_at(&r, "^", "imp_strict"), "admit");
+    assert_eq!(verdict_at(&r, "^", "imp_used"), "conflict");
+    // P only in a comment or a string: still unused
+    for hide in ["// P::k()\n    2", "\"P\".len() as u32", "r#\"P\"#.len() as u32", "/* P /* nested */ P */ 2"] {
+        let ours_h = ours.replace("    2\n", &format!("    {hide}\n"));
+        let m = with(hide).replace("X + Y\n", "X + Y + Q\n");
+        let r = run_at("x.rs", RS_BASE, &ours_h, &theirs_u, &m);
+        assert!(r.hard.is_empty(), "{hide}: {:?}", r.hard);
+        assert_eq!(verdict_at(&r, "^", "imp_used"), "conflict", "{hide}");
+    }
+}
+
+#[test]
+fn imp_used_rejects_a_removed_import_reintroduced() {
+    // ours removes X; theirs duplicates it; the count rule leaves one X in M.
+    // imp_strict already rejects this (theirs' order has X twice); imp_used
+    // states the rule directly, so it holds whatever imp_strict's order check does.
+    let o = "use a::X;\nuse a::Y;\n";
+    let a = "use a::Y;\n";
+    let b = "use a::X;\nuse a::Y;\nuse a::X;\n";
+    let m = "use a::Y;\nuse a::X;\n";
+    assert_ne!(import_set("x.rs", o, a, b, m, true), "admit");
+    assert_ne!(import_used("x.rs", o, a, b, m, "use a::Y;\nuse a::X;\nfn f() { X; Y; }\n"), "admit");
+    // ours removes X, theirs keeps it, and M keeps it too: one-sided removal dropped
+    assert_ne!(import_used("x.rs", o, a, o, o, "use a::X;\nuse a::Y;\nfn f() { X; Y; }\n"), "admit");
+    // control: the plain one-sided removal
+    assert_eq!(import_used("x.rs", o, a, o, a, "use a::Y;\nfn f() { Y; }\n"), "admit");
+}
+
+#[test]
+fn imp_used_by_language() {
+    let cases: [(&str, &str, &str, &str, &str); 4] = [
+        ("x.py", "import os\n", "import os\nimport json as j\n", "import os\nfrom m import k\n", "\ndef f():\n    return j.dumps(k)\n"),
+        ("x.ts", "import a from 'a';\n", "import a from 'a';\nimport { B as C } from 'b';\n", "import a from 'a';\nimport * as ns from 'n';\n", "\nexport const f = () => <C x={ns.y} />;\n"),
+        ("x.java", "import p.A;\n", "import p.A;\nimport q.B;\n", "import p.A;\nimport static r.S.c;\n", "\nclass T { B b = c(); }\n"),
+        ("x.cs", "using S = p.A;\n", "using S = p.A;\nusing T = q.B;\n", "using S = p.A;\nusing U = r.C;\n", "\nclass K { T t; U u; }\n"),
+    ];
+    for (path, o, a, b, body) in cases {
+        let m: String = {
+            let mut v: Vec<&str> = a.lines().collect();
+            v.push(b.lines().last().unwrap());
+            v.join("\n") + "\n"
+        };
+        assert_eq!(import_set(path, o, a, b, &m, true), "admit", "{path}");
+        assert_eq!(import_used(path, o, a, b, &m, &format!("{m}{body}")), "admit", "{path}");
+        let c = if path.ends_with(".py") { "#" } else { "//" };
+        let hidden: String = body.lines().map(|l| format!("{c} {l}\n")).collect();
+        assert_eq!(import_used(path, o, a, b, &m, &format!("{m}{hidden}")), "conflict", "{path} comment only");
+    }
+}
+
+#[test]
+fn references_skip_comments_strings_and_prefixes() {
+    let r = references("x.py", "import z\nx = f\"{a}\" + b'c'  # d\n'''e\nf'''\ng()\n");
+    assert!(r.contains("x") && r.contains("g"), "{r:?}");
+    for n in ["z", "a", "c", "d", "e", "f"] {
+        assert!(!r.contains(n), "{n} in {r:?}");
+    }
+    let r = references("x.cs", "var p = @\"C:\\\"; var q = h; // i\n");
+    assert!(r.contains("q") && r.contains("h") && !r.contains("C") && !r.contains("i"), "{r:?}");
+    let r = references("x.rs", "fn f<'a>(s: &'a str) -> char { let c = 'x'; w }\n");
+    assert!(r.contains("w") && r.contains("str") && !r.contains("x"), "{r:?}");
+    let r = references("x.ts", "const t = `lit ${u}` + v; /* w */\n");
+    assert!(r.contains("v") && !r.contains("lit") && !r.contains("w"), "{r:?}");
+}

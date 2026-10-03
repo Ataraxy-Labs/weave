@@ -7,6 +7,7 @@
 //! than under `src/commands/`, which stays the thin argument-parsing shell.
 
 pub mod gitscan;
+pub mod land;
 pub(crate) mod parsers;
 pub mod patch;
 pub mod repo_scope;

@@ -422,6 +422,164 @@ pub fn import_set(path: &str, o: &str, a: &str, b: &str, m: &str, strict: bool) 
     "admit"
 }
 
+// ---------------------------------------------------------------- allowance 2b
+// imp_used: imp_strict, plus a use check against the MERGED file. Every import
+// line one side added (vs base) that M keeps must bind at least one name that
+// M references outside its import lines; an import line one side removed must
+// not be in M more often than on that side. An added line whose bound names
+// can't be told (or that binds none: a namespace `using`, `#include`, a
+// wildcard, a side-effect import) declines. References are a lexical
+// identifier scan of M with import lines, comments and strings removed.
+
+/// `admit` | `mismatch` | `conflict` (an added import M keeps is unused) |
+/// `decline`. `m_file` is the whole merged file (for references); `m` the region.
+pub fn import_used(path: &str, o: &str, a: &str, b: &str, m: &str, m_file: &str) -> &'static str {
+    let v = import_set(path, o, a, b, m, true);
+    if v != "admit" {
+        return v;
+    }
+    let (ol, al, bl, ml) = (split_lines(o), split_lines(a), split_lines(b), split_lines(m));
+    let (co, ca, cb, cm) = (counts(&ol), counts(&al), counts(&bl), counts(&ml));
+    let g = |c: &HashMap<&str, i64>, l: &str| *c.get(l).unwrap_or(&0);
+    for &l in ol.iter().chain(&al).chain(&bl) {
+        let (o_, a_, b_) = (g(&co, l), g(&ca, l), g(&cb, l));
+        if is_import(l) && (a_ < o_ || b_ < o_) && g(&cm, l) > a_.min(b_) {
+            return "mismatch"; // one side removed it; M must not reintroduce it
+        }
+    }
+    let refs = references(path, m_file);
+    let used = |n: &str| refs.contains(n) || (path.ends_with(".cs") && n.len() > 9 && n.ends_with("Attribute") && refs.contains(&n[..n.len() - 9]));
+    for &l in &ml {
+        let (o_, a_, b_) = (g(&co, l), g(&ca, l), g(&cb, l));
+        if !is_import(l) || (a_ <= o_ && b_ <= o_) {
+            continue;
+        }
+        match bound_names(path, l) {
+            Some(ns) if !ns.is_empty() => {
+                if !ns.iter().any(|n| used(n)) {
+                    return "conflict";
+                }
+            }
+            _ => return "decline",
+        }
+    }
+    "admit"
+}
+
+/// Identifiers in `t` outside import lines, comments and strings. Lexical, by
+/// file extension. Where the scan can err it errs toward reading code as a
+/// string (a name missed, so the file is rejected), not the reverse: nested
+/// Rust block comments, raw and triple-quoted strings, C# verbatim strings and
+/// Rust lifetimes are handled; template `${..}` / f-string holes count as
+/// string (missed names only cost coverage).
+pub fn references(path: &str, t: &str) -> HashSet<String> {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    let (hash_comment, rust, cs) = (ext == "py", ext == "rs", ext == "cs");
+    let js = matches!(ext, "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts");
+    let char_rule = rust || ext == "scala"; // `'` is a char literal only if it closes at once
+    let multiline_quotes = rust; // Rust "..." may span lines; elsewhere a newline ends it
+    let code: String = t.split_inclusive('\n').filter(|l| !is_import(l)).collect();
+    let s: Vec<char> = code.chars().collect();
+    let mut out = HashSet::new();
+    let (mut i, n) = (0, s.len());
+    let at = |i: usize, p: &str| p.chars().enumerate().all(|(k, c)| s.get(i + k) == Some(&c));
+    // skip a quoted string opened at i (after any prefix) with `q` repeated `qn` times
+    let skip_quoted = |mut i: usize, q: char, qn: usize, escapes: bool, doubled: bool, span_lines: bool| -> usize {
+        i += qn;
+        while i < n {
+            if escapes && s[i] == '\\' {
+                i += 2;
+                continue;
+            }
+            if s[i] == q {
+                if doubled && s.get(i + 1) == Some(&q) {
+                    i += 2;
+                    continue;
+                }
+                if (0..qn).all(|k| s.get(i + k) == Some(&q)) {
+                    return i + qn;
+                }
+            }
+            if s[i] == '\n' && qn == 1 && !span_lines {
+                return i + 1;
+            }
+            i += 1;
+        }
+        n
+    };
+    while i < n {
+        let c = s[i];
+        if hash_comment && c == '#' || !hash_comment && at(i, "//") {
+            while i < n && s[i] != '\n' {
+                i += 1;
+            }
+        } else if !hash_comment && at(i, "/*") {
+            let mut depth = 0;
+            while i < n {
+                if at(i, "/*") {
+                    depth += 1;
+                    i += 2;
+                } else if at(i, "*/") {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 || !rust {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        } else if !rust && at(i, "\"\"\"") || hash_comment && at(i, "'''") {
+            i = skip_quoted(i, c, 3, true, false, true);
+        } else if cs && (at(i, "@\"") || at(i, "$@\"") || at(i, "@$\"")) {
+            let p = if c == '@' && s[i + 1] == '"' { 1 } else { 2 };
+            i = skip_quoted(i + p, '"', 1, false, true, true);
+        } else if c == '"' || c == '`' {
+            i = skip_quoted(i, c, 1, c == '"', false, c == '`' || multiline_quotes);
+        } else if c == '\'' {
+            if char_rule {
+                // 'x' or '\..' closes within a few chars: a char literal; else a lifetime / symbol
+                let close = if s.get(i + 1) == Some(&'\\') { (i + 3..(i + 12).min(n)).find(|&k| s[k] == '\'') } else if s.get(i + 2) == Some(&'\'') { Some(i + 2) } else { None };
+                i = close.map_or(i + 1, |k| k + 1);
+            } else {
+                i = skip_quoted(i, '\'', 1, true, false, false);
+            }
+        } else if c.is_alphabetic() || c == '_' || c == '$' && js {
+            let st = i;
+            while i < n && (s[i].is_alphanumeric() || s[i] == '_' || s[i] == '$' && js) {
+                i += 1;
+            }
+            let id: String = s[st..i].iter().collect();
+            let quote_next = matches!(s.get(i), Some('"') | Some('\''));
+            if rust && (id == "r" || id == "br") && matches!(s.get(i), Some('"') | Some('#')) {
+                // raw string r"..", r#".."#: no escapes
+                let h = s[i..].iter().take_while(|x| **x == '#').count();
+                if s.get(i + h) == Some(&'"') {
+                    let close = format!("\"{}", "#".repeat(h));
+                    i += h + 1;
+                    while i < n && !at(i, &close) {
+                        i += 1;
+                    }
+                    i = (i + close.chars().count()).min(n);
+                    continue;
+                }
+            }
+            // a string prefix (py f"", rb""; rust b"") is not a reference
+            let prefix = quote_next && id.len() <= 2 && id.chars().all(|x| "rRbBfFuU".contains(x));
+            if !prefix {
+                out.insert(id);
+            }
+        } else if c.is_ascii_digit() {
+            while i < n && (s[i].is_alphanumeric() || s[i] == '_') {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------- the check
 
 pub struct Report {
@@ -433,7 +591,7 @@ pub struct Report {
     pub both: Vec<(String, Vec<(&'static str, &'static str)>)>,
 }
 
-pub const ALLOWANCES: [&str; 8] = ["diff3", "imp_strict", "imp_loose", "union", "subsume_any", "subsume", "subsume_ins", "nest"];
+pub const ALLOWANCES: [&str; 9] = ["diff3", "imp_strict", "imp_loose", "union", "subsume_any", "subsume", "subsume_ins", "nest", "imp_used"];
 
 impl Report {
     /// Certified with this set of allowances enabled.
@@ -483,6 +641,7 @@ fn allowances(path: &str, k: &str, o: Option<&Version>, a: &Version, b: &Version
         ("subsume", if ok.is_some() { verdict(subsume(o_, a_, b_, false).map(String::from), m_) } else { "decline" }),
         ("subsume_ins", if ok.is_some() { verdict(subsume(o_, a_, b_, true).map(String::from), m_) } else { "decline" }),
         ("nest", nest),
+        ("imp_used", if region && ok.is_some() { import_used(path, o_, a_, b_, m_, &m.src.t) } else { "decline" }),
     ]
 }
 

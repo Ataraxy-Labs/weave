@@ -9,6 +9,17 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+### Fixed — `weave land` no longer verifies a one-sided resolution
+
+The gate behind `weave land --resolver` labelled VERIFIED an answer that kept
+only one side of a conflict block, silently dropping the other side's change
+(seen on two adjacent entries added to one dict literal). A new gate rule,
+`DROPPED`, holds every conflict block of git's diff3 merge to both sides'
+changes relative to base, measured in tokens: what one side added there must
+survive (`DROPPED`), and what one side deleted there must not come back
+(`UNDELETED`). Identical changes and one side subsuming the other still pass;
+an in-block delete-vs-modify is refused whichever side is kept.
+
 ### Changed — the merge driver fails closed
 
 When weave cannot justify a composition, it now reports a conflict instead of

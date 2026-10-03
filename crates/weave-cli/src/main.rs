@@ -9,7 +9,18 @@ QUICKSTART
   weave explain <file>        per-hunk detail: which lines both sides wrote
   # ... edit the file to resolve it, then:
   weave check                 verify the resolution against the merge stages
+  # ... or let a resolver of your choice do it, behind proof and a gate:
+  weave land --resolver <cmd> label each file PROVEN / VERIFIED / REFUSED
   weave setup --global        make weave the default driver for every repo";
+
+const LAND_EXAMPLES: &str = "\
+EXAMPLES
+  git merge agent/feature               # stops on conflicts
+  weave land --resolver 'python3 scripts/weave-land-resolver.py' \\
+             --certificate land.json    # PROVEN / VERIFIED / REFUSED per file
+  git commit                            # refuses while any file is REFUSED
+
+  weave land --ours main --theirs agent/feature --json   # CI: report only";
 
 #[derive(Parser)]
 #[command(
@@ -115,6 +126,65 @@ enum Commands {
         /// rather than run on. 0 means no limit.
         #[arg(long, default_value_t = 300)]
         timeout: u64,
+    },
+    /// Land a merge and label every file git could not merge PROVEN, VERIFIED
+    /// or REFUSED.
+    ///
+    /// Run it where `git merge` stopped (or give --base/--ours/--theirs to
+    /// read a merge without touching anything). For each file git's line merge
+    /// conflicts on:
+    ///
+    ///   1. weave merges it. A clean result that the independent merge
+    ///      certificate proves is the three-way selection is PROVEN.
+    ///
+    ///   2. Anything else goes to --resolver <cmd>, any program: it gets the
+    ///      file's base/ours/theirs/conflicted text and path as JSON on stdin
+    ///      and prints the resolved file, or one line DELETE / KEEP
+    ///      (modify/delete only) / CANNOT[: reason].
+    ///
+    ///   3. The answer must pass the exact gate: no new marker lines; parses
+    ///      when both sides parse; `weave check` finds nothing (lost or
+    ///      duplicated lines, dangling names, duplicate data keys,
+    ///      modify/delete); every line git merged automatically survives;
+    ///      inside each conflict block both sides' changes survive (an answer
+    ///      that keeps one side of a block drops the other's: DROPPED). One
+    ///      retry, with the findings fed back. Pass: VERIFIED. Fail: REFUSED.
+    ///
+    /// PROVEN and VERIFIED files are written and staged. A REFUSED file keeps
+    /// its conflict markers and stays unmerged; a resolver's rejected answer
+    /// is never written. Files both sides changed that git merges line-cleanly
+    /// are counted, not examined.
+    ///
+    /// Exit 0: every file PROVEN or VERIFIED. 1: some file REFUSED. 2: the run
+    /// failed and nothing was landed.
+    #[command(after_long_help = LAND_EXAMPLES)]
+    Land {
+        /// Resolver command, run with `sh -c` once per attempt (see above)
+        #[arg(long, value_name = "CMD")]
+        resolver: Option<String>,
+        /// Give up on one resolver call after this many seconds
+        #[arg(long, default_value_t = 900, value_name = "SECS")]
+        resolver_timeout: u64,
+        /// Print the report as JSON (the same document --certificate writes)
+        #[arg(long)]
+        json: bool,
+        /// Write the review certificate (JSON: every file's status, rule,
+        /// reason and findings, with the merge's three commits) to this file
+        #[arg(long, value_name = "FILE")]
+        certificate: Option<String>,
+        /// Decide and report, but write nothing to the working tree or index
+        #[arg(long)]
+        dry_run: bool,
+        /// Merge base revision (default: merge-base of --ours and --theirs).
+        /// Any of --base/--ours/--theirs implies --dry-run.
+        #[arg(long)]
+        base: Option<String>,
+        /// Our side (default: HEAD)
+        #[arg(long)]
+        ours: Option<String>,
+        /// Their side (default: MERGE_HEAD, i.e. the merge in progress)
+        #[arg(long)]
+        theirs: Option<String>,
     },
     /// Typed entity ops: the write side of the agent contract. Extract the ops
     /// that turn one file into another, and apply them to a file that may have
@@ -244,6 +314,28 @@ fn main() {
             json,
             timeout: std::time::Duration::from_secs(timeout),
         }),
+        Commands::Land {
+            ref resolver,
+            resolver_timeout,
+            json,
+            ref certificate,
+            dry_run,
+            ref base,
+            ref ours,
+            ref theirs,
+        } => commands::land::run(
+            commands::land::Args {
+                base: base.as_deref(),
+                ours: ours.as_deref(),
+                theirs: theirs.as_deref(),
+                resolver: resolver.as_deref(),
+                resolver_timeout,
+                json,
+                certificate: certificate.as_deref(),
+                dry_run,
+            },
+            &host,
+        ),
         Commands::Patch { ref command } => match command {
             PatchCommands::Extract {
                 ref base_file,
