@@ -9,6 +9,24 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+### Changed — seven commands, variations as flags
+
+`weave --help` lists `setup`, `land`, `explain`, `check`, `preview`, `patch`
+and `stats`, one line each saying which question the command answers.
+`weave setup --off` replaces `unsetup`, `weave explain <file> --summary`
+replaces `summary`, and `weave stats --bench` / `weave stats --repo <path>`
+replace `bench` / `bench-repo`. The live-editing prototype (`claim`,
+`release`, `status`, `apply`) moves under a hidden `weave experimental`
+group. Every old name and flag still works with identical output; at a
+terminal it prints a one-line note on stderr naming the new spelling, and
+nothing extra in `--json` mode or when stdout is not a terminal.
+
+### Added — `weave land --check sem`
+
+With `--onto` or `--queue`, `--check sem` verifies the merged tree with
+`sem check` instead of a `--verify-cmd`: any verdict but pass (exit 0)
+refuses, so a tree sem cannot decide is not published.
+
 ### Added — `weave land --queue` (experimental)
 
 Many agents, one origin, one branch: `weave land --queue` submits HEAD to a

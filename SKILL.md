@@ -102,13 +102,15 @@ means — read that at call time, not here.
 
 | Command | Does |
 |---|---|
-| `weave setup` / `unsetup` | register / remove the git merge driver |
+| `weave setup` / `setup --off` | register / remove the git merge driver |
+| `weave land` | land a merge: gate each conflicted file PROVEN / VERIFIED / REFUSED; `--onto origin/main --check sem` merges, gates, verifies and publishes |
 | `weave explain <file>` | per-entity conflict detail for one conflicted file |
 | `weave check` | verify the working tree (or two revisions) against the merge |
 | `weave preview <branch>` | dry-run a merge before running it |
 | `weave patch extract/apply` | typed entity ops — turn a diff into ops, apply them three-way to a drifted target |
-| `weave summary <file>` | structured JSON summary of the markers in a file |
-| `weave status` / `claim` / `release` | CRDT-backed multi-agent coordination state |
+| `weave stats` | lifetime counters; `--bench` / `--repo <path>` compare weave with git |
+| `weave explain <file> --summary` | structured JSON summary of the markers in a file |
+| `weave experimental status` / `claim` / `release` | CRDT-backed multi-agent coordination state (prototype) |
 
 Run `weave --help` or `weave <command> --help` for full flags.
 

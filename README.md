@@ -12,6 +12,7 @@
 </p>
 
 <p align="center">
+  <a href="#how-weave-land-works">How weave land works</a> ·
   <a href="#install">Install</a> ·
   <a href="#quickstart">Quickstart</a> ·
   <a href="#how-weave-fixes-this">How It Works</a> ·
@@ -32,6 +33,53 @@
 <p align="center">
   <img src="assets/merge-animation.gif" alt="Weave merge animation: two branches add different functions, git conflicts, weave merges cleanly" width="700" />
 </p>
+
+## How weave land works
+
+`weave land` takes a merge from "git stopped" (or "an agent wants this on main") to published, in four steps:
+
+1. **Merge.** weave merges by function and by entry, not by line. Two agents who add different entries to the same list, table, map or `switch` both keep their entry.
+2. **Gate.** Every file of the merge must pass fixed, built-in rules: nothing either side wrote is dropped, nothing either side changed is undone, no key or `case` label is stated twice, and the file still parses. The gate is deterministic code, the same on every run, with no AI in it.
+3. **Verify.** Your command runs on the merged tree (`--verify-cmd 'cargo test'`), or `--check sem` runs `sem check`.
+4. **Publish.** Only if the gate and the verify step both pass, fast-forward only. If main moved meanwhile, the new main is merged in and all four steps run again.
+
+What is fixed and what is yours: the gate's rules are fixed and cannot be turned off. What runs in the verify step is configurable.
+
+**Example: two agents add a case to the same `switch`.** Agent A adds `case 500`, agent B adds `case 409`, both right after `case 404`. git conflicts on those lines; weave keeps both:
+
+```bash
+git merge agent-b      # CONFLICT (content): Merge conflict in status.go
+weave land
+```
+```
+weave land: 1 file(s) git could not merge — 0 PROVEN, 1 VERIFIED, 0 REFUSED
+  VERIFIED  status.go  elem_union: weave's element union passed the independent element check (both-changed regions admitted by: elem_union) and the gate; no resolver was asked
+```
+```go
+	case 404:
+		return "not found"
+	case 409:
+		return "from agent b"
+	case 500:
+		return "server error"
+```
+
+**The same, but both agents add `case 500`** with different bodies. That is a real conflict: only a person or a resolver can say which body is right. If a resolver answers by keeping both cases, the gate refuses the answer, and the agent gets:
+
+```
+weave land: 1 file(s) git could not merge — 0 PROVEN, 0 VERIFIED, 1 REFUSED
+  REFUSED   status.go  gate: the resolver's answer failed the gate twice: WEAVE
+              - DUP: the case `500` is stated 2x in one `switch code {`; ours states it 1x there, theirs 1x
+```
+
+A refused file keeps its conflict markers and nothing is published (exit 1).
+
+To land onto main:
+
+```bash
+weave land --onto origin/main --verify-cmd 'go build ./... && go test ./...'
+weave land --onto origin/main --check sem
+```
 
 ## Quickstart
 
@@ -98,7 +146,7 @@ The key difference: Git produces false conflicts on **independent changes** beca
 
 ## Weave vs Mergiraf
 
-31 hand-crafted merge scenarios across 7 languages, comparable to [mergiraf](https://mergiraf.org/)'s own test corpus. Run `weave bench` to reproduce:
+31 hand-crafted merge scenarios across 7 languages, comparable to [mergiraf](https://mergiraf.org/)'s own test corpus. Run `weave stats --bench` to reproduce:
 
 Two of the 31 **must not** merge. When both sides add different decorators to the same Python or TypeScript function, decorator application is function composition, so the stack order is a semantic decision neither side made — `@cache` outside `@auth` serves cached responses without ever running the auth check. Weave refuses rather than fabricate an order, and a tool that merges those cleanly is wrong, not better. Annotations in Java, C# and Kotlin are unordered metadata, so weave still set-unions those.
 
@@ -112,19 +160,19 @@ All three tools correctly refuse the two decorator scenarios. Mergiraf fails on 
 
 ## Real-World Benchmarks
 
-Replayed against real merge commits from five long-lived open-source repositories. For each of the first 500 merge commits per repo, weave re-runs the merge (base/ours/theirs from the actual git history) and compares its output to both Git's line merge and the human-authored merge commit. Reproduce with `weave bench-repo <path-to-clone> --limit 500`; full per-repo breakdown, including which files disagree and why, is at [ataraxy-labs.github.io/weave/benchmarks.html](https://ataraxy-labs.github.io/weave/benchmarks.html).
+Replayed against real merge commits from five long-lived open-source repositories. For each of the first 500 merge commits per repo, weave re-runs the merge (base/ours/theirs from the actual git history) and compares its output to both Git's line merge and the human-authored merge commit. Reproduce with `weave stats --repo <path-to-clone> --limit 500`; full per-repo breakdown, including which files disagree and why, is at [ataraxy-labs.github.io/weave/benchmarks.html](https://ataraxy-labs.github.io/weave/benchmarks.html).
 
 - **Win**: the line-based 3-way merge conflicted, weave resolved cleanly
 - **Regression**: the line-based 3-way merge resolved cleanly, weave conflicted
 - **Human match**: of weave's wins, how many are byte-identical (whitespace-normalized) to what the developer actually wrote
 
-> **Note (0.5.3):** regenerated on the 0.5.3 engine on 2026-09-01 (`weave bench-repo <clone>
+> **Note (0.5.3):** regenerated on the 0.5.3 engine on 2026-09-01 (`weave stats --repo <clone>
 > --limit 500`, fresh full clones). Read against the previous table with three caveats, stated
 > rather than smoothed over. First, 0.5.3 conflicts on purpose where 0.5.2 sometimes resolved
 > silently (divergent same-name additions, tightened same-entity and gap verdicts) — most of the
 > regression increase is that tightening doing its job; on CPython, whose tested window is
 > identical between runs, all of it is. Second, the earlier run's exact commit window was not
-> recorded, and `bench-repo` walks the most recent N merges — for git, Go, and TypeScript the two
+> recorded, and `stats --repo` walks the most recent N merges — for git, Go, and TypeScript the two
 > runs replay substantially different commit sets, so cross-run rate comparisons there are
 > indicative, not exact; this run's windows are current as of the date above. Third, audited
 > details: the "clean line merge" baseline is a diff3 implementation (`diffy`), which disagrees
@@ -242,7 +290,7 @@ This configures Git to use weave for all supported file types. Then use `git mer
 To revert back to normal git merging:
 
 ```bash
-weave unsetup
+weave setup --off
 ```
 
 To set up for just yourself (without modifying `.gitattributes`), write the same supported file type rules to `.git/info/attributes` instead:
@@ -462,31 +510,29 @@ tree and command (`.git/weave-land-verify-ok`), so a retry repeats no work.
 
 ## CLI Commands
 
-Beyond `setup`/`explain`/`check`/`preview` above, the `weave` binary has commands for the
-CRDT coordination layer and for typed entity patches. Run `weave --help` or `weave <command> --help`
-for the full flag list; the table below is what each one is for.
+Seven commands. Each `--help` line says which question the command answers, and every flag has an example (`weave <command> --help`).
 
-| Command | What it does |
+| Command | The question it answers |
 |---|---|
-| `weave status [--file] [--agent]` | Entity and agent state from the CRDT: claims, last editor, merge state |
-| `weave claim <agent-id> <file> <entity>` | Claim an entity before editing it (advisory: weave does not enforce it) |
-| `weave release <agent-id> <file> <entity>` | Release a previously claimed entity |
-| `weave apply <file>...` | Materialize entity edits held in the CRDT back onto the working files |
-| `weave patch extract <base-file> <changed-file>` | Emit the typed ops that turn `base-file` into `changed-file` |
-| `weave patch apply <ops-file> <target-file>` | Apply those ops to a target file, three-way against the ops' base, in case the target has drifted since the ops were extracted |
-| `weave land [--resolver <cmd>]` | Land a merge, labelling each conflicted file PROVEN, VERIFIED or REFUSED; see [above](#landing-an-agents-merge-weave-land) |
-| `weave land --onto origin/main [--verify-cmd <cmd>]` | Merge, gate, verify and publish fast-forward only, re-checking when main moves; see [above](#the-whole-landing-weave-land---onto-remotebranch) |
-| `weave summary <file>` | Parse a file's weave conflict markers into a structured (optionally JSON) summary |
-| `weave stats` | Lifetime merge counters, if you've opted in with `WEAVE_STATS=1` (off by default) |
-| `weave bench` | Run the 31-scenario synthetic benchmark against weave, Mergiraf, and git |
-| `weave bench-repo <path> [--limit N]` | Replay real merge commits from a cloned repo; see [Real-World Benchmarks](#real-world-benchmarks) |
+| `weave setup [--global] [--local] [--off]` | Make `git merge` use weave here (`--global`: every repo; `--off`: stop) |
+| `weave land [--resolver <cmd>] [--onto <remote>/<branch>] [--verify-cmd <cmd> \| --check sem] [--queue]` | Can this merge land? Merge, gate every file (PROVEN / VERIFIED / REFUSED), verify, publish; see [above](#landing-an-agents-merge-weave-land). `--queue` is experimental |
+| `weave explain <file> [--summary] [--json]` | Why did this file conflict? `--summary`: a structured summary of the weave markers in any file |
+| `weave check [--json]` | Is my conflict resolution right? Lost lines, duplicates, leftover markers, dangling names |
+| `weave preview <branch> [--file <path>]` | What would merging this branch look like? Nothing is written |
+| `weave patch extract <base-file> <changed-file>` / `weave patch apply <ops-file> <target-file>` | Apply an edit to a file that drifted: typed entity ops, merged three-way against the ops' base |
+| `weave stats [--bench] [--repo <path> --limit N]` | How has weave done? Lifetime counters if you opted in with `WEAVE_STATS=1`; `--bench` runs the 31-scenario synthetic benchmark; `--repo` replays real merge commits from a clone (see [Real-World Benchmarks](#real-world-benchmarks)) |
 
-`claim`/`release`/`status`/`apply` all operate on the same `.weave/state.automerge` CRDT
-document as the MCP tools below: the CLI and MCP server are two front ends onto one
-coordination state. That document lives in the repo's working tree but is never repo
-content: the first time weave writes it, it adds `.weave/` to the repo's local
-`.git/info/exclude` (never your own `.gitignore`), so it never shows up in `git status`
-or gets swept into `git add -A`.
+Every earlier command name still works, with the same output. At a terminal weave prints a one-line note on stderr with the new spelling; in `--json` mode or when output is piped it prints nothing extra.
+
+| Old | New |
+|---|---|
+| `weave unsetup` | `weave setup --off` |
+| `weave summary <file>` | `weave explain <file> --summary` |
+| `weave bench` | `weave stats --bench` |
+| `weave bench-repo <path>` | `weave stats --repo <path>` |
+| `weave claim`, `release`, `status`, `apply` | `weave experimental claim`, `release`, `status`, `apply` |
+
+The `weave experimental` group (hidden from `--help`) is the live-editing prototype: it claims and releases entities and applies edits held in the `.weave/state.automerge` CRDT document, the same document the MCP coordination tools below use. Claims are advisory. That document lives in the repo's working tree but is never repo content: the first time weave writes it, it adds `.weave/` to the repo's local `.git/info/exclude` (never your own `.gitignore`), so it never shows up in `git status` or gets swept into `git add -A`.
 
 ## MCP Server
 
@@ -543,7 +589,7 @@ deliberately separate concerns with different data models: the merge is a pure
 function over three file revisions, run fresh on every `git merge`/`weave preview`/
 `weave check` call. The CRDT is the thing that persists; it's what lets two live
 agents see each other's claims and in-flight edits *before* either one commits,
-via `weave_claim_entity`/`weave_update_entity_content` or `weave claim`/`weave apply`.
+via `weave_claim_entity`/`weave_update_entity_content` or `weave experimental claim`/`weave experimental apply`.
 Nothing in the merge path depends on the CRDT ever having run.
 
 ## How It Works
@@ -569,7 +615,7 @@ Nothing in the merge path depends on the CRDT ever having run.
   well, so they take Git's line merge, always (see [Supported Languages](#supported-languages)).
 - **Files over 1MB, binary files, and file types with no parser** fall back to Git's line-level
   merge automatically.
-- **Entity claims are advisory, not enforced.** `weave_claim_entity` and `weave claim` are
+- **Entity claims are advisory, not enforced.** `weave_claim_entity` and `weave experimental claim` are
   cooperative locks inside the CRDT coordination layer; weave does not stop a second agent
   (or you) from editing a claimed entity anyway.
 - **Crashed agents aren't reaped.** `weave_agent_heartbeat`'s liveness timestamp is informational;
