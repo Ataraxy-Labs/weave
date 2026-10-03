@@ -133,7 +133,13 @@ fn regex_lite_us(text: &str) -> String {
 }
 
 /// (golden name, old invocation, new spellings that must print the same)
-const CASES: &[(&str, &[&str], &[&[&str]])] = &[
+type Case = (
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static [&'static str]],
+);
+
+const CASES: &[Case] = &[
     ("explain_json", &["explain", "app.py", "--json"], &[]),
     ("explain_text", &["explain", "app.py"], &[]),
     (
