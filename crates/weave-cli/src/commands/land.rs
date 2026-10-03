@@ -43,6 +43,9 @@ pub(crate) struct OntoArgs<'a> {
     pub resolver_timeout: u64,
     pub verify_cmd: Option<&'a str>,
     pub verify_timeout: u64,
+    /// `--check` (`sem` | `none`); None: the `.weave/config` default.
+    pub check: Option<&'a str>,
+    pub checkers: Option<&'a str>,
     pub attempts: usize,
     pub certificate_dir: Option<&'a str>,
 }
@@ -60,6 +63,7 @@ pub(crate) fn run_onto(args: OntoArgs<'_>, host: &Host) -> R<()> {
             }),
             verify_cmd: args.verify_cmd.map(str::to_string),
             verify_timeout: Duration::from_secs(args.verify_timeout),
+            check: weave_cli::semcheck::resolve(args.check, args.checkers, Path::new("."))?,
             attempts: args.attempts,
             certificate_dir: args.certificate_dir.map(std::path::PathBuf::from),
         };
@@ -96,6 +100,7 @@ pub(crate) fn run_queue(
                 }),
                 verify_cmd: args.verify_cmd.map(str::to_string),
                 verify_timeout: Duration::from_secs(args.verify_timeout),
+                check: weave_cli::semcheck::resolve(args.check, args.checkers, Path::new("."))?,
                 attempts: args.attempts,
                 certificate_dir: args.certificate_dir.map(std::path::PathBuf::from),
             },

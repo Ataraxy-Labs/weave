@@ -15,5 +15,6 @@ pub mod patch;
 pub mod preserve;
 pub mod queue;
 pub mod repo_scope;
+pub mod semcheck;
 pub mod wire;
 pub mod worktree;

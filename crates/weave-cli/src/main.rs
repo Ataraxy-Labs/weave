@@ -48,12 +48,17 @@ EXAMPLES
   # build and test the merged tree, publish fast-forward only; retried when
   # main moves, and the new merge is gated and built again
   weave land --onto origin/main --verify-cmd 'go build ./... && go vet ./...'
-  weave land --onto origin/main --check sem    # verify with sem check instead
+  weave land --onto origin/main --check sem    # verify with sem check
 
 
   # experimental: many agents, one main: queue HEAD and block until it lands or is refused;
   # candidates land one at a time in order, so no push races another
-  weave land --queue --verify-cmd 'go build ./... && go vet ./...'";
+  weave land --queue --verify-cmd 'go build ./... && go vet ./...'
+
+  # verify the merged tree with the project's own compiler, type checker,
+  # linter and tests via `sem check` (exact, incremental where provable);
+  # `[land] check = sem` in .weave/config makes it the default
+  weave land --queue --check sem";
 
 #[derive(Parser)]
 #[command(
@@ -275,13 +280,24 @@ enum Commands {
         /// Example: --verify-cmd 'cargo check && cargo test'
         #[arg(long, value_name = "CMD", requires = "publish")]
         verify_cmd: Option<String>,
-        /// With --onto: verify the merged tree with `sem check` (the project's
-        /// checkers; any verdict but pass refuses). Example: weave land --onto origin/main --check sem
-        #[arg(long, value_name = "CHECKER", value_parser = ["sem"], requires = "publish", conflicts_with = "verify_cmd")]
-        check: Option<String>,
-        /// Give up on the verify command after this many seconds. Example: --verify-timeout 600
+        /// Give up on the verify command (and on sem check) after this many seconds.
+        /// Example: --verify-timeout 600
         #[arg(long, default_value_t = 1800, value_name = "SECS")]
         verify_timeout: u64,
+        /// With --onto/--queue: `sem` runs `sem check --base <tip>` on the final
+        /// merged tree before publishing — the project's own compiler, type
+        /// checker, linter and tests, with the verdict of the full run,
+        /// rechecking only what the merge can affect. Any verdict but pass
+        /// (fail, could not decide, sem not installed) refuses, and its
+        /// diagnostics are the report. `none` turns a `.weave/config` default
+        /// (`[land] check = sem`) off. Runs after --verify-cmd, if both.
+        /// Example: weave land --onto origin/main --check sem
+        #[arg(long, value_name = "sem|none", requires = "publish")]
+        check: Option<String>,
+        /// With --check sem: sem check's --checkers (default: `.weave/config`
+        /// land.checkers, else every checker sem detects). Example: --checkers ts,lint
+        #[arg(long, value_name = "LIST", requires = "publish")]
+        checkers: Option<String>,
         /// With --onto: how many times to merge a moved tip and try again. Example: --attempts 10
         #[arg(long, default_value_t = 5, value_name = "N")]
         attempts: usize,
@@ -537,62 +553,60 @@ fn main() {
             ref result,
             ref onto,
             ref verify_cmd,
-            ref check,
             verify_timeout,
+            ref check,
+            ref checkers,
             attempts,
             ref certificate_dir,
             queue,
             lease_ttl,
             queue_timeout,
-        } => {
-            // `--check sem` verifies the merged tree with `sem check`.
-            let verify_cmd = match check.as_deref() {
-                Some("sem") => Some("sem check".to_string()),
-                _ => verify_cmd.clone(),
-            };
-            match onto {
-                _ if queue => commands::land::run_queue(
-                    commands::land::OntoArgs {
-                        target: onto.as_deref().unwrap_or("origin/main"),
-                        resolver: resolver.as_deref(),
-                        resolver_timeout,
-                        verify_cmd: verify_cmd.as_deref(),
-                        verify_timeout,
-                        attempts,
-                        certificate_dir: certificate_dir.as_deref(),
-                    },
-                    lease_ttl,
-                    queue_timeout,
-                    &host,
-                ),
-                Some(target) => commands::land::run_onto(
-                    commands::land::OntoArgs {
-                        target,
-                        resolver: resolver.as_deref(),
-                        resolver_timeout,
-                        verify_cmd: verify_cmd.as_deref(),
-                        verify_timeout,
-                        attempts,
-                        certificate_dir: certificate_dir.as_deref(),
-                    },
-                    &host,
-                ),
-                None => commands::land::run(
-                    commands::land::Args {
-                        base: base.as_deref(),
-                        ours: ours.as_deref(),
-                        theirs: theirs.as_deref(),
-                        resolver: resolver.as_deref(),
-                        resolver_timeout,
-                        json,
-                        certificate: certificate.as_deref(),
-                        dry_run,
-                        result: result.as_deref(),
-                    },
-                    &host,
-                ),
-            }
-        }
+        } => match onto {
+            _ if queue => commands::land::run_queue(
+                commands::land::OntoArgs {
+                    target: onto.as_deref().unwrap_or("origin/main"),
+                    resolver: resolver.as_deref(),
+                    resolver_timeout,
+                    verify_cmd: verify_cmd.as_deref(),
+                    verify_timeout,
+                    check: check.as_deref(),
+                    checkers: checkers.as_deref(),
+                    attempts,
+                    certificate_dir: certificate_dir.as_deref(),
+                },
+                lease_ttl,
+                queue_timeout,
+                &host,
+            ),
+            Some(target) => commands::land::run_onto(
+                commands::land::OntoArgs {
+                    target,
+                    resolver: resolver.as_deref(),
+                    resolver_timeout,
+                    verify_cmd: verify_cmd.as_deref(),
+                    verify_timeout,
+                    check: check.as_deref(),
+                    checkers: checkers.as_deref(),
+                    attempts,
+                    certificate_dir: certificate_dir.as_deref(),
+                },
+                &host,
+            ),
+            None => commands::land::run(
+                commands::land::Args {
+                    base: base.as_deref(),
+                    ours: ours.as_deref(),
+                    theirs: theirs.as_deref(),
+                    resolver: resolver.as_deref(),
+                    resolver_timeout,
+                    json,
+                    certificate: certificate.as_deref(),
+                    dry_run,
+                    result: result.as_deref(),
+                },
+                &host,
+            ),
+        },
         Commands::Patch { ref command } => match command {
             PatchCommands::Extract {
                 ref base_file,

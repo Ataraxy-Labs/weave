@@ -17,7 +17,10 @@
 //!    answer (revisions mode, `--result`) — and a file it refuses gets a
 //!    second hearing as HEAD holds it now, so a later fix commit counts;
 //! 4. `--verify-cmd`, when given, runs on the final tree (a build, the
-//!    affected tests); a non-zero exit refuses;
+//!    affected tests); a non-zero exit refuses; then `--check sem` (or the
+//!    `.weave/config` default) runs `sem check --base <T>` on it: any verdict
+//!    but pass — fail, could not decide, no sem installed — refuses, and the
+//!    diagnostics are the refusal's report ([`crate::semcheck`]);
 //! 5. a fast-forward-only update of `<branch>` on `<remote>`. When it is
 //!    rejected, the branch moved: back to 1 — the new merge is gated again,
 //!    and the verify command runs again on the new tree.
@@ -42,6 +45,7 @@ use crate::gitscan;
 use crate::land::{self, Present, Resolver, Status};
 use crate::mergestate;
 use crate::preserve;
+use crate::semcheck;
 
 type R<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -52,6 +56,8 @@ pub struct Options {
     pub resolver: Option<Resolver>,
     pub verify_cmd: Option<String>,
     pub verify_timeout: Duration,
+    /// `sem check` on the final tree (`--check sem`); limited by `verify_timeout`.
+    pub check: Option<crate::semcheck::Check>,
     pub attempts: usize,
     pub certificate_dir: Option<PathBuf>,
 }
@@ -230,7 +236,9 @@ pub enum Prep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
     /// Short machine reason: "nothing to land", "merge refused",
-    /// "a merge on the branch was refused", "verify command failed".
+    /// "a merge on the branch was refused", "verify command failed",
+    /// "sem check failed", "sem check could not decide", "sem not installed",
+    /// "sem check checked another tree".
     pub reason: &'static str,
     /// The files the gate refused (empty for a verify failure).
     pub files: Vec<String>,
@@ -370,7 +378,65 @@ pub fn prepare(
             }
         }
     }
+    // 4b. sem check on the exact tree to be published
+    if let Some(check) = &opts.check {
+        let tree = rev(dir, "HEAD^{tree}")?;
+        let head = rev(dir, "HEAD")?;
+        let key = format!(
+            "{tree} sem-check {}",
+            check.checkers.as_deref().unwrap_or("*")
+        );
+        if !verify_ok.has(&key) {
+            writeln!(
+                out,
+                "land: running sem check on the merged tree (base {}) …",
+                &tip[..tip.len().min(12)]
+            )?;
+            let outcome = semcheck::run(dir, tip, &tree, check, opts.verify_timeout, env)?;
+            let cert = semcheck::certificate(tip, &head, &tree, &outcome);
+            write_certificate(opts, "check", &cert)?;
+            record_check(&gd, &tree, &cert);
+            match outcome {
+                semcheck::Outcome::Pass(doc) => {
+                    writeln!(
+                        out,
+                        "land: sem check PASS: {} (certificate {})",
+                        semcheck::summary(&doc),
+                        doc["certificate"]["digest"].as_str().unwrap_or("?")
+                    )?;
+                    verify_ok.add(&key)?;
+                }
+                semcheck::Outcome::Refused { reason, report, .. } => {
+                    writeln!(out, "{report}")?;
+                    writeln!(
+                        out,
+                        "\nland: REFUSED. sem check did not pass the merged tree (your branch + \
+                         {target}); nothing was published. Fix what it reports (it may come from \
+                         combining your change with what is on {target}), commit the fix, then \
+                         run land again."
+                    )?;
+                    return Ok(Prep::Refused(Refusal::bare(reason)));
+                }
+            }
+        }
+    }
     Ok(Prep::Ready(rev(dir, "HEAD")?))
+}
+
+/// The last sem check document for `tree`, kept in `<git-dir>/weave-land-checks`
+/// so the landing queue can put it in the ticket's result.
+fn record_check(gd: &Path, tree: &str, cert: &serde_json::Value) {
+    let d = gd.join("weave-land-checks");
+    if std::fs::create_dir_all(&d).is_ok() {
+        let _ = std::fs::write(d.join(format!("{tree}.json")), cert.to_string());
+    }
+}
+
+/// The sem check document recorded for `tree` in `dir`'s git dir, if any.
+pub fn recorded_check(dir: &Path, tree: &str) -> Option<serde_json::Value> {
+    let gd = PathBuf::from(git(dir, &["rev-parse", "--absolute-git-dir"]).ok()?);
+    let t = std::fs::read_to_string(gd.join("weave-land-checks").join(format!("{tree}.json"))).ok()?;
+    serde_json::from_str(&t).ok()
 }
 
 /// `path:first-last` (1-based) for every conflict block still in `files`.

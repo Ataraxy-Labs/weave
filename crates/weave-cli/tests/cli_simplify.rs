@@ -330,7 +330,7 @@ fn help_lists_the_seven_commands() {
 }
 
 #[test]
-fn land_check_takes_sem_and_needs_a_landing() {
+fn land_check_needs_a_landing_and_a_known_checker() {
     let root = plain("check-flag");
     let out = weave(&root, &["land", "--check", "sem"]);
     assert_eq!(
@@ -339,23 +339,6 @@ fn land_check_takes_sem_and_needs_a_landing() {
         "--check needs --onto or --queue"
     );
     let out = weave(&root, &["land", "--onto", "origin/main", "--check", "lint"]);
-    assert_eq!(out.status.code(), Some(2), "only `sem` is a checker");
-    let out = weave(
-        &root,
-        &[
-            "land",
-            "--onto",
-            "origin/main",
-            "--check",
-            "sem",
-            "--verify-cmd",
-            "true",
-        ],
-    );
-    assert_eq!(
-        out.status.code(),
-        Some(2),
-        "--check and --verify-cmd are exclusive"
-    );
+    assert!(!out.status.success(), "only `sem` (or `none`) is a checker");
     let _ = std::fs::remove_dir_all(&root);
 }

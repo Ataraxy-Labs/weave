@@ -570,10 +570,20 @@ fn land_tickets(
                     .and_then(Value::as_u64)
                     .unwrap_or(1800),
             ),
+            // the submitter's --check, as resolved where it was submitted
+            check: (meta.get("check").and_then(Value::as_str) == Some("sem")).then(|| {
+                crate::semcheck::Check {
+                    checkers: meta
+                        .get("checkers")
+                        .and_then(Value::as_str)
+                        .map(String::from),
+                }
+            }),
             attempts: 1,
             certificate_dir: q.onto.certificate_dir.clone(),
         };
         let mut report: Vec<u8> = Vec::new();
+        let mut checked: Option<Value> = None;
         let prepared = lander_tree(ctx, &candidate).and_then(|wt| {
             let n = next.to_string();
             let env = [
@@ -581,7 +591,13 @@ fn land_tickets(
                 ("WEAVE_QUEUE_CANDIDATE", candidate.as_str()),
                 ("WEAVE_LAND_REPO", ctx.dir.to_str().unwrap_or(".")),
             ];
-            onto::prepare(&wt, &opts, host, &mut report, &tip, &env)
+            let p = onto::prepare(&wt, &opts, host, &mut report, &tip, &env);
+            if opts.check.is_some() {
+                if let Ok(tree) = git(&wt, &["rev-parse", "HEAD^{tree}"]) {
+                    checked = onto::recorded_check(&wt, &tree);
+                }
+            }
+            p
         });
         let report_text = String::from_utf8_lossy(&report).to_string();
         let tail: String = {
@@ -592,6 +608,14 @@ fn land_tickets(
             "kind": "result", "ticket": next, "candidate": candidate, "submitter": submitter,
             "lander": ctx.me, "tip": tip, "report": tail,
         });
+        if let Some(c) = checked {
+            // sem check's certificate travels with the ticket's result (its
+            // diagnostics are in the report)
+            result["check"] = json!({
+                "verdict": c["verdict"], "reason": c["reason"], "tree": c["tree"],
+                "certificate": c["sem"]["certificate"],
+            });
+        }
         let landed = match prepared {
             Ok(Prep::Ready(head)) => {
                 result["landed"] = json!(head);
@@ -730,6 +754,8 @@ pub fn submit(dir: &Path, q: &QueueOptions, host: &Host, out: &mut dyn Write) ->
         let meta = json!({
             "verify_cmd": q.onto.verify_cmd,
             "verify_timeout": q.onto.verify_timeout.as_secs(),
+            "check": q.onto.check.as_ref().map(|_| "sem"),
+            "checkers": q.onto.check.as_ref().and_then(|c| c.checkers.clone()),
         });
         let ticket = ctx.enqueue(&candidate, &meta)?;
         writeln!(
@@ -791,6 +817,7 @@ pub fn submit(dir: &Path, q: &QueueOptions, host: &Host, out: &mut dyn Write) ->
         let now = git(&top, &["rev-parse", "FETCH_HEAD"])?;
         let mut local_opts = clone_opts(&q.onto);
         local_opts.verify_cmd = None; // the lander verifies; here only the merge
+        local_opts.check = None;
         match onto::prepare(&top, &local_opts, host, out, &now, &[])? {
             Prep::Refused(r) => {
                 if r.reason == "merge refused" {
@@ -825,6 +852,7 @@ fn clone_opts(o: &Options) -> Options {
         resolver: o.resolver.clone(),
         verify_cmd: o.verify_cmd.clone(),
         verify_timeout: o.verify_timeout,
+        check: o.check.clone(),
         attempts: o.attempts,
         certificate_dir: o.certificate_dir.clone(),
     }
