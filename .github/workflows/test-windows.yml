@@ -27,6 +27,11 @@ jobs:
       - name: Build weave-driver
         run: cargo build --release --target x86_64-pc-windows-msvc --bin weave-driver --features vendored-openssl
 
+      - name: Git identity for tests that commit
+        run: |
+          git config --global user.name ci
+          git config --global user.email ci@example.invalid
+
       - name: Run tests
         run: cargo test --workspace
 
