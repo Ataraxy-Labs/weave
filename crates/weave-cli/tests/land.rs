@@ -1,5 +1,7 @@
 //! `weave land`, end to end: the real binary on synthetic merges, with a fake
 //! resolver that replays canned answers and records what it was asked.
+// The resolvers here are POSIX shell scripts run through `sh -c`; these tests run on Unix CI.
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
