@@ -22,6 +22,10 @@ fn git(dir: &Path, args: &[&str]) -> Output {
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_AUTHOR_DATE", "@1700000000")
         .env("GIT_COMMITTER_DATE", "@1700000000")
+        .env("GIT_AUTHOR_NAME", "golden")
+        .env("GIT_AUTHOR_EMAIL", "golden@example.invalid")
+        .env("GIT_COMMITTER_NAME", "golden")
+        .env("GIT_COMMITTER_EMAIL", "golden@example.invalid")
         .output()
         .expect("run git")
 }
@@ -158,6 +162,8 @@ const CASES: &[Case] = &[
     ("bench", &["bench"], &[&["stats", "--bench"]]),
 ];
 
+// The goldens were recorded on Unix; Windows differs in line endings and paths.
+#[cfg(unix)]
 #[test]
 fn goldens_old_invocations_and_their_new_spellings() {
     let update = std::env::var_os("WEAVE_UPDATE_GOLDENS").is_some();
