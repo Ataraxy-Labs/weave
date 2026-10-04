@@ -16,6 +16,6 @@ exit Some(1)
       "verdict": "FOUND: app.py — 3 conflict marker line(s) still present"
     }
   ],
-  "scope": "working tree vs the three merge stages of HEAD × MERGE_HEAD (base 30dc8444, merge in progress) — 1 file(s) either side changed"
+  "scope": "working tree vs the three merge stages of HEAD × MERGE_HEAD (base 88c8d8c4, merge in progress) — 1 file(s) either side changed"
 }
 --- stderr

@@ -16,10 +16,10 @@ exit Some(1)
     }
   ],
   "merge": {
-    "base": "30dc8444264cf171e723d3fbf1969280da26895f",
+    "base": "88c8d8c49cac3a93e0abb3e6af51dc0c27ecb01b",
     "mode": "dry-run",
-    "ours": "c732ab333e58bdfc2c1c2ab05ff404cd84efb299",
-    "theirs": "2e749db641cb925650a880706e8db90e0cb2241f"
+    "ours": "abf5227ce79cd7e4dd959d5e785396d8ed45a868",
+    "theirs": "5d6da81e887f47e87024613c460f7b51cf09ec29"
   },
   "not_examined": [],
   "proof_allowances": [
