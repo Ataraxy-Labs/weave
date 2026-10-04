@@ -8,6 +8,8 @@
 //! queue gated and verified; a killed or paused lander's lock is taken over
 //! and the paused one cannot publish when it wakes; a verify failure or a
 //! conflict refuses that candidate alone.
+// These tests drive POSIX shell scripts and Unix permissions; they run on Unix CI.
+#![cfg(unix)]
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};

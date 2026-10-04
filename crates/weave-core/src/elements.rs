@@ -854,7 +854,7 @@ impl<'a> M<'a> {
             (Lang::Go, "function_declaration" | "type_declaration")
                 if e.parent().is_some_and(|p| p.kind() == "source_file") =>
             {
-                let n = name(e).or_else(|| e.named_child(0).and_then(&name))?;
+                let n = name(e).or_else(|| e.named_child(0).and_then(name))?;
                 Some(format!("fn:{n}"))
             }
             (Lang::Go, "method_declaration")

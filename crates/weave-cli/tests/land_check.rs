@@ -9,6 +9,8 @@
 //! at all refuses (fail closed); the result's certificate is recorded; a
 //! `.weave/config` default turns it on and `--check none` off; `--verify-cmd`
 //! still runs.
+// These tests drive POSIX shell scripts and Unix permissions; they run on Unix CI.
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

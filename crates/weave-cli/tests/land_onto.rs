@@ -4,6 +4,8 @@
 //! The rule under test: nothing is published that has not passed the gate,
 //! and the verify command, against the exact tip of main it lands on — and a
 //! main that moves during land is merged and checked again.
+// These tests drive POSIX shell scripts and Unix permissions; they run on Unix CI.
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
