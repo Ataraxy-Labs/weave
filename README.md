@@ -36,50 +36,9 @@
 
 ## How weave land works
 
-`weave land` takes a merge from "git stopped" (or "an agent wants this on main") to published, in four steps:
+`weave land` merges code and checks the result for structural problems. Add `--onto` to integrate and publish, and `--verify-cmd` or `--check sem` to validate the final tree before publishing.
 
-1. **Merge.** weave merges by function and by entry, not by line. Two agents who add different entries to the same list, table, map or `switch` both keep their entry.
-2. **Gate.** Every file of the merge must pass fixed, built-in rules: nothing either side wrote is dropped, nothing either side changed is undone, no key or `case` label is stated twice, and the file still parses. The gate is deterministic code, the same on every run, with no AI in it.
-3. **Verify.** Your command runs on the merged tree (`--verify-cmd 'cargo test'`), and/or `--check sem` runs `sem check`: the project's own compiler, type checker, linter and tests, rechecking only what the merge can affect when that gives the same answer. Any verdict but pass refuses.
-4. **Publish.** Only if the gate and the verify step both pass, fast-forward only. If main moved meanwhile, the new main is merged in and all four steps run again.
-
-What is fixed and what is yours: the gate's rules are fixed and cannot be turned off. What runs in the verify step is configurable.
-
-**Example: two agents add a case to the same `switch`.** Agent A adds `case 500`, agent B adds `case 409`, both right after `case 404`. git conflicts on those lines; weave keeps both:
-
-```bash
-git merge agent-b      # CONFLICT (content): Merge conflict in status.go
-weave land
-```
-```
-weave land: 1 file(s) git could not merge — 0 PROVEN, 1 VERIFIED, 0 REFUSED
-  VERIFIED  status.go  elem_union: weave's element union passed the independent element check (both-changed regions admitted by: elem_union) and the gate; no resolver was asked
-```
-```go
-	case 404:
-		return "not found"
-	case 409:
-		return "from agent b"
-	case 500:
-		return "server error"
-```
-
-**The same, but both agents add `case 500`** with different bodies. That is a real conflict: only a person or a resolver can say which body is right. If a resolver answers by keeping both cases, the gate refuses the answer, and the agent gets:
-
-```
-weave land: 1 file(s) git could not merge — 0 PROVEN, 0 VERIFIED, 1 REFUSED
-  REFUSED   status.go  gate: the resolver's answer failed the gate twice: WEAVE
-              - DUP: the case `500` is stated 2x in one `switch code {`; ours states it 1x there, theirs 1x
-```
-
-A refused file keeps its conflict markers and nothing is published (exit 1).
-
-To land onto main:
-
-```bash
-weave land --onto origin/main --verify-cmd 'go build ./... && go test ./...'
-weave land --onto origin/main --check sem
-```
+[Usage and safety](#landing-an-agents-merge-weave-land)
 
 ## Quickstart
 
@@ -397,116 +356,36 @@ next two commands; see [Quickstart](#quickstart).
 
 ## Landing an agent's merge: `weave land`
 
-`weave land` runs where `git merge` stopped and gives every file git could not merge
-(content, add/add and modify/delete conflicts) one of three labels:
-
-| Status | Meaning |
-|---|---|
-| **PROVEN** | weave merged the file cleanly **and** an independent merge certificate (`crates/weave-certify`, which shares no merge code with weave) shows the result is the three-way selection of base, ours and theirs. Where both sides changed one region, only the rules `imp_used` (import lines, each one a side added still used by the merged file), `subsume_ins` and `nest` can admit it. |
-| **VERIFIED** | The answer passed the exact gate below, and either a resolver of your choice wrote it, or weave merged the file cleanly as an element union (two sides adding entries to one map, switch, const block or test table) that the certificate's own `elem_union` check admits — every inserted element verbatim, base order kept, no key twice, a construct the policy treats as a set, a result that parses. The check also reads the whole file as one statement list, so both sides appending distinctly named top-level functions (Go `func`/types/methods, JS `function`, Python `def`) lands the same way. The second needs no resolver call; it is VERIFIED, not PROVEN, because `elem_union` is not part of the proof rule set. |
-| **REFUSED** | Neither. The file keeps its conflict markers and stays unmerged, so `git commit` refuses. A rejected answer is never written. |
+Resolve a merge in progress, check its result, and stage accepted files:
 
 ```bash
-git merge agent/feature
-weave land --resolver 'WEAVE_LAND_MODEL="<any model CLI>" python3 scripts/weave-land-resolver.py' \
-           --certificate land.json
-git commit                   # only once nothing is REFUSED
+weave land
+weave land --resolver '<resolver-command>' --certificate land.json
 ```
 
-**The resolver** is any command, run with `sh -c`. It gets one JSON object on stdin: `path`,
-`kind`, `base`, `ours`, `theirs`, `conflicted` (git's merge with markers), `attempt`, `previous`
-and `findings`, with `null` for an absent side. It prints the complete resolved file, or one line:
-`DELETE` or `KEEP` (modify/delete only), or `CANNOT[: reason]`. Nothing is tied to a model vendor.
-`scripts/weave-land-resolver.py` is an example that prompts whatever CLI `WEAVE_LAND_MODEL` names.
+A resolver is optional. It receives merge inputs as JSON on stdin and returns a resolved file. Rejected answers are not written; unresolved files remain conflicted.
 
-**The gate** checks each answer against the file's three stages:
-
-- no conflict-marker line that neither side has;
-- it parses when both sides parse;
-- `weave check` finds nothing: lost or duplicated lines, dangling names, duplicate data keys, a
-  data file that no longer loads, modify/delete. A duplicate or dangling name that ours or theirs
-  already has doesn't count against the answer. A file weave has no grammar for gets the line
-  rules alone.
-- every line git merged automatically outside the conflict blocks is still there;
-- inside each conflict block, both sides' changes survive: every token (identifier, number,
-  operator) one side added there is still there, and nothing one side deleted there is back. An
-  answer that keeps one side of a block verbatim is refused unless that side already holds the
-  other's change; identical changes and one side subsuming the other pass, and a block where one
-  side deletes what the other edits is refused whichever side is kept. Tokens, not lines, so
-  re-wrapping or folding two edits of one line into one line passes.
-
-A failed answer gets one retry, with the findings fed back. It passes (VERIFIED) or it is
-refused, with the findings.
-
-In a blind audit (n = 200 accepted files per arm), a cheap model resolving agent-PR
-conflicts on its own had 22.0% of its accepted merges judged wrong. Behind this pipeline the
-figure was 9.5%. That gate did not have the both-sides rule (the last bullet), which was added
-after a one-sided answer was seen passing it.
-
-**An answer already in the tree** is judged before any resolver is asked: a file the merge
-driver resolved by itself (stage 0 in the index), or, with `--result <rev>`, that revision's
-file. It is PROVEN when it is weave's certified merge and VERIFIED when it passes the gate. So
-a file weave's driver merged cleanly is not handed back to the resolver as if it were
-unresolved.
-
-The labels cover files git's line merge conflicts on, and every other file both sides changed
-whose merge does not pass weave's own merge check. A file git merges line-cleanly is examined
-too: git's answer must lose no line both sides kept, state nothing twice, and state no `case`
-label, map/object/dict key or struct-literal field twice in one container where neither side
-does (two features each adding `case 3:` to one switch is line-clean to git and does not
-compile). One that fails is a unit like a conflicted file. Each file is checked on its own
-three stages, so an effect across files (a caller in a file neither side touched) is outside
-the gate, and so is a semantic conflict that leaves every file well-formed — that is what
-`--verify-cmd` is for. Renames are not followed.
-
-| Flag | |
+| Result | Meaning |
 |---|---|
-| `--resolver <cmd>` | The resolver. Without one, every unproven file is REFUSED. |
-| `--json` | Print the report as JSON (`schema: "weave-land/1"`). |
-| `--certificate <file>` | Write the same JSON as the review certificate for the merge commit. It records the three commits and each file's status, rule, reason, findings and landed sha256. |
-| `--dry-run` | Decide and report, but write nothing. |
-| `--base/--ours/--theirs <rev>` | Read a merge between revisions instead of the one in progress. Implies `--dry-run`; useful in CI. |
-| `--result <rev>` | With the above: judge `<rev>`'s files as the merge's answer (re-check a merge commit as committed). |
+| **PROVEN** | The result satisfies the supported structural proof rules. |
+| **VERIFIED** | The result passed the merge gate, without a structural proof. |
+| **REFUSED** | The result was not accepted; resolve the reported findings. |
 
-Exit codes: `0` every file PROVEN or VERIFIED, `1` some file REFUSED, `2` the run failed.
+These labels describe merge checks, not proof that the program behaves correctly. The gate checks individual files for problems such as lost changes, duplicates, and invalid syntax; it does not establish cross-file or runtime correctness.
 
-### The whole landing: `weave land --onto <remote>/<branch>`
+### Integrate and publish
 
-`--onto` owns the loop an agent's `land` script used to: it fetches the branch, merges its tip
-in (`git merge --no-commit`, through whatever merge driver is configured), runs the gate over
-**every** file of that merge (conflicted, driver-merged and line-clean alike), commits it, gates
-any other merge commit on the branch not yet checked (as committed, or as the branch now holds
-the file, so a later fix counts), runs `--verify-cmd` on the final tree, and
-then updates the branch on the remote fast-forward only. If the branch moved meanwhile, it merges
-the new tip and checks everything again; nothing is ever published that has not passed the gate
-and the verify command against the exact tip it lands on. Any refusal publishes nothing and
-exits 1; a refused merge is left in progress with the refused files conflicted, and running
-`--onto` again checks the in-place resolution and commits it.
+`--onto` merges the target branch, gates the result, runs configured validation, and publishes fast-forward only. If the target moves, it retries against the new tip.
 
 ```bash
-weave land --onto origin/main --verify-cmd 'go vet ./... && go test ./...'
+weave land --onto origin/main --verify-cmd 'go build ./... && go test ./...'
+# Or use Sem's project checkers:
+weave land --onto origin/main --check sem
 ```
 
-**Set a verify command.** The gate reads each file on its own; it cannot see that two features
-which each merge cleanly no longer work together (in one benchmark run, two lexer changes that
-both parsed and compiled made a new operator unreachable). At the least run a compile or build
-(`go vet ./...` — it type-checks test files too —, `cargo check`, `tsc --noEmit`,
-`npm run build`); better, the tests the merge touched. It runs with `sh -c` in the repository
-root, on a clean checkout of the commit to be published, with `WEAVE_LAND_ONTO` (the tip landed
-onto) and `WEAVE_LAND_HEAD` in the environment; a non-zero exit, a timeout, or a change to
-tracked files refuses.
+**Configure validation before publishing.** A failed gate or configured validation refuses publication. Without `--onto`, `weave land` does not publish.
 
-| Flag | |
-|---|---|
-| `--onto <remote>/<branch>` | Land the current branch there, as above. |
-| `--verify-cmd <cmd>` | Run on the final tree before publishing; failure refuses. Recommended: at least a build. |
-| `--verify-timeout <secs>` | Default 1800. |
-| `--attempts <n>` | How many times to merge a moved tip and retry (default 5). |
-| `--certificate-dir <dir>` | Write every gate certificate there. |
-| `--resolver <cmd>` | As above, for files neither weave nor an in-place resolution answers. |
-
-Checked merges are remembered by commit id (`.git/weave-land-verified`) and verify passes by
-tree and command (`.git/weave-land-verify-ok`), so a retry repeats no work.
+Use `--dry-run` to inspect without writing, `--json` for structured output, and `weave land --help` for resolver inputs, revision selection, timeouts, and other options. Exit codes: `0` accepted, `1` refused, `2` execution error.
 
 ## CLI Commands
 
