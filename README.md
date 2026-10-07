@@ -81,6 +81,31 @@ weave land --onto origin/main --verify-cmd 'go build ./... && go test ./...'
 weave land --onto origin/main --check sem
 ```
 
+## Developer and agent interfaces
+
+Keep using Git. Weave handles entity-level patches and merges; [Sem](https://github.com/Ataraxy-Labs/sem) helps you find and understand code. An entity is a code unit such as a function, class, or method.
+
+| Interface | Purpose |
+|---|---|
+| For developers | Use setup, stats, conflict inspection, checks, and landing commands alongside Git. Claims are available for optional coordination. |
+| For agents | Use a focused set of tools to find, read, edit, and check code. |
+
+We are designing a shared agent interface: **search, read, edit, check, impact, graph, diff, certify**. These are proposed names, not new commands you can run today. See [MCP Server](#mcp-server) for current tools and [Sem's interface overview](https://github.com/Ataraxy-Labs/sem#developer-and-agent-interfaces) for what each proposed operation does.
+
+The goal is a familiar workflow with more precise targets: search for code, read what you need, edit one or several entities, then check the result. Ordinary source code and file access remain available. The interface should detect stale edits and avoid returning extra context unless requested.
+
+### Which commands should I use?
+
+- `weave setup`: configure Git to use Weave.
+- `weave stats`: inspect merge statistics or run benchmarks.
+- `weave experimental claim` / `release`: coordinate edits. Claims are experimental and do not block other editors. The older `weave claim` / `release` names still work.
+- `weave check`: check a merge for problems such as lost code or unresolved names. Use `sem check` for project checkers; these are different checks.
+- `weave land --onto`: integrate and publish changes when explicitly requested—not as a side effect of editing.
+
+Prefer the current spellings in [CLI Commands](#cli-commands). Older names remain compatible; you do not need to change existing scripts.
+
+No CLI commands or MCP tools are removed by this documentation change.
+
 ## Quickstart
 
 ```bash
@@ -547,7 +572,7 @@ claude mcp add --scope user weave -- weave-mcp
 ```
 
 The server discovers the repo from the first tool call's file path, the
-`WEAVE_REPO` env var, or its working directory. It exposes 22 tools in two
+`WEAVE_REPO` env var, or its working directory. It exposes 22 tools in three
 independent groups (each tool's own description states when to call it and
 what an empty result means):
 
