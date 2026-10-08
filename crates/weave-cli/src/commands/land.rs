@@ -123,72 +123,26 @@ pub(crate) fn run_queue(
 
 /// `Ok(any file refused)`.
 fn land(args: Args<'_>, host: &Host) -> R<bool> {
-    let dir = Path::new(".");
-    let revisions = args.base.is_some() || args.ours.is_some() || args.theirs.is_some();
-    let present = match (revisions, args.result) {
-        (_, Some(rev)) => Some(land::Present::Rev(rev.to_string())),
-        (false, None) => Some(land::Present::WorkingTree { unmerged: false }),
-        (true, None) => None,
+    let run = land::Run {
+        base: args.base,
+        ours: args.ours,
+        theirs: args.theirs,
+        result: args.result,
+        resolver: args.resolver.map(|command| Resolver {
+            command: command.to_string(),
+            timeout: Duration::from_secs(args.resolver_timeout),
+        }),
+        dry_run: args.dry_run,
     };
-    let plan = land::plan(dir, args.base, args.ours, args.theirs, present.as_ref())?;
-    let resolver = args.resolver.map(|command| Resolver {
-        command: command.to_string(),
-        timeout: Duration::from_secs(args.resolver_timeout),
-    });
-
-    let mut reports = plan.not_text.clone();
-    for unit in &plan.units {
-        reports.push(land::land_unit(unit, host, resolver.as_ref())?);
-    }
-    reports.sort_by(|a, b| a.path.cmp(&b.path));
-
-    let mode = if revisions {
-        "revisions"
-    } else if args.dry_run {
-        "dry-run"
-    } else {
-        "working-tree"
-    };
-    if mode == "working-tree" {
-        land::write_back(dir, &plan, &reports)?;
-    }
-    // A merge as committed (`--result`): every change only one side made
-    // must be in it too — files the gate never reads, since nothing in them
-    // conflicts.
-    // In the working tree, once nothing is left unmerged: the tree the merge
-    // commit would hold, however it came about.
-    let judged = match args.result {
-        Some(result) => Some(result.to_string()),
-        None if mode == "working-tree" => weave_cli::preserve::merge_in_tree(dir)?,
-        None => None,
-    };
-    let lost = match &judged {
-        Some(result) => {
-            weave_cli::preserve::check(dir, &plan.base, &plan.ours, &plan.theirs, result)?
-        }
-        None => Vec::new(),
-    };
-    let mut doc = land::document(&plan, &reports, mode);
-    if judged.is_some() {
-        doc["one_sided"] = serde_json::to_value(&lost)?;
-    }
+    let landing = land::run(Path::new("."), &run, host)?;
     if let Some(path) = args.certificate {
-        std::fs::write(path, serde_json::to_string_pretty(&doc)? + "\n")
+        std::fs::write(path, serde_json::to_string_pretty(&landing.doc)? + "\n")
             .map_err(|e| format!("could not write the certificate to {path}: {e}"))?;
     }
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&doc)?);
+        println!("{}", serde_json::to_string_pretty(&landing.doc)?);
     } else {
-        print!("{}", land::render(&plan, &reports));
-        if !lost.is_empty() {
-            println!(
-                "REFUSED: the result loses changes only one side made:\n{}",
-                weave_cli::preserve::render(&lost, "ours", "theirs")
-            );
-        }
-        if mode != "working-tree" {
-            println!("({mode}: nothing was written to the working tree or the index)");
-        }
+        print!("{}", landing.text);
     }
-    Ok(!lost.is_empty() || reports.iter().any(|r| r.status == land::Status::Refused))
+    Ok(landing.refused)
 }

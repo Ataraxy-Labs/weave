@@ -191,7 +191,7 @@
       <div class="arch-arrow">&darr;</div>
       <div class="arch-layer" style="border-color: var(--cyan);">
         <div class="label" style="color: var(--cyan);">weave-mcp</div>
-        <div class="desc">MCP server with 22 tools. stdio transport for Claude Desktop/CLI integration. Wraps weave-crdt and weave-core into callable agent tools.</div>
+        <div class="desc">MCP server with one tool per weave command. stdio transport for Claude Desktop/CLI integration. Wraps weave-crdt and weave-core into callable agent tools.</div>
       </div>
       <div class="arch-arrow">&darr;</div>
       <div class="arch-layer" style="border-color: var(--orange);">
@@ -306,7 +306,7 @@
     <section id="mcp">
       <h2>MCP server</h2>
       <p class="section-desc">
-        <a href="https://modelcontextprotocol.io" style="color:var(--cyan)">MCP</a> (Model Context Protocol) lets AI agents call tools. weave-mcp exposes 22 tools over stdio transport. Add it to Claude Code, Claude Desktop, or any MCP-compatible client.
+        <a href="https://modelcontextprotocol.io" style="color:var(--cyan)">MCP</a> (Model Context Protocol) lets AI agents call tools. weave-mcp exposes five tools over stdio transport: weave_preview, weave_explain, weave_check, weave_land and weave_patch. Add it to Claude Code, Claude Desktop, or any MCP-compatible client.
       </p>
 
       <h3 style="font-size: 16px; color: var(--accent); margin: 0 0 16px;">Setup</h3>
@@ -362,66 +362,27 @@
 
       <div class="tool-grid">
         <div class="tool-card" style="border-color: var(--green);">
-          <div class="tool-name">weave_extract_entities</div>
-          <div class="tool-desc">List all entities in a file &mdash; names, types, line ranges. Input: <code>{file_path}</code></div>
+          <div class="tool-name">weave_preview</div>
+          <div class="tool-desc">Dry-run a merge of two branches. Per-file verdicts, a findings document, or the strategy used on each entity. Input: <code>{base_branch, target_branch, file_path?, detail?}</code></div>
         </div>
-        <div class="tool-card" style="border-color: var(--purple);">
-          <div class="tool-name">weave_claim_entity</div>
-          <div class="tool-desc">Claim an entity before editing. Advisory lock. Input: <code>{agent_id, file_path, entity_name}</code></div>
-        </div>
-        <div class="tool-card" style="border-color: var(--purple);">
-          <div class="tool-name">weave_release_entity</div>
-          <div class="tool-desc">Release claim after done editing. Input: <code>{agent_id, file_path, entity_name}</code></div>
-        </div>
-        <div class="tool-card" style="border-color: var(--blue);">
-          <div class="tool-name">weave_status</div>
-          <div class="tool-desc">Entity list with claim and modification status. Input: <code>{file_path}</code></div>
-        </div>
-        <div class="tool-card" style="border-color: var(--blue);">
-          <div class="tool-name">weave_who_is_editing</div>
-          <div class="tool-desc">Check if anyone is editing a specific entity. Input: <code>{file_path, entity_name}</code></div>
+        <div class="tool-card" style="border-color: var(--yellow);">
+          <div class="tool-name">weave_explain</div>
+          <div class="tool-desc">Why a file conflicted: which guard refused, and the hunks both sides wrote in. Input: <code>{file_path, markers?}</code></div>
         </div>
         <div class="tool-card" style="border-color: var(--red);">
-          <div class="tool-name">weave_potential_conflicts</div>
-          <div class="tool-desc">Entities being edited by multiple agents. Input: <code>{agent_id?}</code></div>
+          <div class="tool-name">weave_check</div>
+          <div class="tool-desc">Is the resolution right? Leftover markers, lost or duplicated lines, and cross-file breakage. Input: <code>{base?, ours?, theirs?}</code></div>
         </div>
-        <div class="tool-card" style="border-color: var(--green);">
-          <div class="tool-name">weave_preview_merge</div>
-          <div class="tool-desc">Dry-run merge analysis between branches. Input: <code>{base_branch, target_branch, file_path?}</code></div>
-        </div>
-        <div class="tool-card" style="border-color: var(--orange);">
-          <div class="tool-name">weave_agent_register</div>
-          <div class="tool-desc">Register agent in coordination state. Input: <code>{agent_id, branch}</code></div>
-        </div>
-        <div class="tool-card" style="border-color: var(--orange);">
-          <div class="tool-name">weave_agent_heartbeat</div>
-          <div class="tool-desc">Keep-alive + update working state. Input: <code>{agent_id, working_on}</code></div>
-        </div>
-        <div class="tool-card" style="border-color: var(--yellow);">
-          <div class="tool-name">weave_validate_merge</div>
-          <div class="tool-desc">Detect semantic risks in a merge &mdash; entities that reference each other and were both modified. Input: <code>{base_branch, target_branch, file_path?}</code></div>
+        <div class="tool-card" style="border-color: var(--purple);">
+          <div class="tool-name">weave_land</div>
+          <div class="tool-desc">Label every file of a stopped merge PROVEN, VERIFIED or REFUSED, and write the ones that pass. Input: <code>{resolver?, dry_run?, base?, ours?, theirs?}</code></div>
         </div>
         <div class="tool-card" style="border-color: var(--cyan);">
-          <div class="tool-name">weave_get_dependencies</div>
-          <div class="tool-desc">What does this entity call or reference? Uses cross-file dependency graph. Input: <code>{file_path, entity_name}</code></div>
-        </div>
-        <div class="tool-card" style="border-color: var(--cyan);">
-          <div class="tool-name">weave_get_dependents</div>
-          <div class="tool-desc">Who calls or references this entity? Reverse dependency lookup. Input: <code>{file_path, entity_name}</code></div>
-        </div>
-        <div class="tool-card" style="border-color: var(--cyan);">
-          <div class="tool-name">weave_impact_analysis</div>
-          <div class="tool-desc">Transitive blast radius if an entity changes. BFS through dependency graph. Input: <code>{file_path, entity_name}</code></div>
-        </div>
-        <div class="tool-card" style="border-color: var(--green);">
-          <div class="tool-name">weave_diff</div>
-          <div class="tool-desc">Entity-level semantic diff between two refs. Shows added, modified, deleted, renamed entities. Input: <code>{base_ref, target_ref?, file_path?}</code></div>
-        </div>
-        <div class="tool-card" style="border-color: var(--yellow);">
-          <div class="tool-name">weave_merge_summary</div>
-          <div class="tool-desc">Parse weave conflict markers into structured JSON. Entity names, conflict types, confidence, resolution hints. Input: <code>{file_path}</code></div>
+          <div class="tool-name">weave_patch</div>
+          <div class="tool-desc">Extract typed entity ops, or apply them to a drifted file as a three-way merge. Input: <code>{file_path, ops?, base_content?, write?}</code></div>
         </div>
       </div>
+      <p style="color: var(--dim); margin-top: 12px;">For callers and blast radius use sem's MCP server. The live multi-agent CRDT tools (claim, release, status, ...) are listed only with <code>WEAVE_EXPERIMENTAL=1</code>, and older tool names still answer when called.</p>
 
       <h3 style="font-size: 16px; color: var(--accent); margin: 32px 0 16px;">Example: agent workflow</h3>
       <div class="terminal">

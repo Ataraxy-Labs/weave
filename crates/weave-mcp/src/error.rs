@@ -1,6 +1,6 @@
 //! What the server can fail at, and how each failure reaches the client.
 //!
-//! Every one of the 22 tools used to answer failure with
+//! Every one of the tools used to answer failure with
 //! `ErrorData::internal_error(msg.to_string())`. That signature took
 //! `impl ToString`, so the one properly typed error in the workspace
 //! (`weave_crdt::WeaveError`) arrived at an agent as prose, indistinguishable

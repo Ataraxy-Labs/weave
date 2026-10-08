@@ -336,3 +336,101 @@ pub(crate) struct ResolveConflictParams {
     )]
     pub ordinal: Option<u32>,
 }
+
+// ── The listed verbs, one per `weave` command ──
+
+/// How much of a previewed merge to return.
+#[derive(Debug, Default, Clone, Copy, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PreviewDetail {
+    /// Per-file clean/conflict verdicts, a confidence rating and entity stats.
+    #[default]
+    Summary,
+    /// A weave-findings document per diverging file: conflicts, semantic
+    /// warnings and the guard that refused each one.
+    Findings,
+    /// Per entity, the resolution strategy weave used or would use.
+    Entities,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreviewParams {
+    #[schemars(description = "Base branch to merge from (e.g. 'main')")]
+    pub base_branch: String,
+    #[schemars(description = "Target branch to merge into (e.g. 'feature-x')")]
+    pub target_branch: String,
+    #[schemars(description = "Optional: preview only this file")]
+    pub file_path: Option<String>,
+    #[schemars(
+        description = "Optional: 'summary' (default) for per-file verdicts, 'findings' for the typed findings document per diverging file, 'entities' for the strategy weave used on each entity"
+    )]
+    pub detail: Option<PreviewDetail>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExplainParams {
+    #[schemars(description = "The conflicted file to explain")]
+    pub file_path: String,
+    #[schemars(
+        description = "Optional: true to summarize the weave conflict markers already in the file instead of reading the merge's three stages from the index (works outside a merge in progress)"
+    )]
+    pub markers: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LandParams {
+    #[schemars(
+        description = "Optional: merge base revision. With ours/theirs, the merge is read from revisions and nothing is written"
+    )]
+    pub base: Option<String>,
+    #[schemars(description = "Optional: our side (branch, tag or SHA)")]
+    pub ours: Option<String>,
+    #[schemars(description = "Optional: their side (branch, tag or SHA)")]
+    pub theirs: Option<String>,
+    #[schemars(
+        description = "Optional: judge this revision's files as the merge's answer (re-checking a merge commit)"
+    )]
+    pub result: Option<String>,
+    #[schemars(
+        description = "Optional: a command that resolves a file weave cannot. It gets base/ours/theirs/conflicted text as JSON on stdin and prints the resolved file, or DELETE / KEEP / CANNOT[: reason]"
+    )]
+    pub resolver: Option<String>,
+    #[schemars(description = "Optional: seconds the resolver may take per file (default 120)")]
+    pub resolver_timeout: Option<u64>,
+    #[schemars(
+        description = "Optional: in the working tree, label every file but write nothing (default false)"
+    )]
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PatchParams {
+    #[schemars(
+        description = "The file the patch is for. Without ops: its current content is the changed side, unless changed_content is given. With ops: the target the ops are applied to"
+    )]
+    pub file_path: String,
+    #[schemars(
+        description = "Optional: an ops document from an earlier weave_patch call. Present: apply it to file_path. Absent: extract the ops from base_content to the file"
+    )]
+    pub ops: Option<String>,
+    #[schemars(
+        description = "The file before the change. Required to extract; when applying, the base the ops were extracted against (omit when the ops embed it)"
+    )]
+    pub base_content: Option<String>,
+    #[schemars(
+        description = "Optional, extract only: the changed file, when it is not what is on disk at file_path"
+    )]
+    pub changed_content: Option<String>,
+    #[schemars(
+        description = "Optional, extract only: embed base_content in the ops so they apply three-way with nothing else (default true)"
+    )]
+    pub embed_base: Option<bool>,
+    #[schemars(
+        description = "Optional, apply only: write a clean result to file_path (default false: return the content)"
+    )]
+    pub write: Option<bool>,
+}

@@ -122,66 +122,13 @@ fn verify(args: Args<'_>) -> R<()> {
 
 /// The default: verify what is on disk.
 fn working_tree(json: bool) -> R<()> {
-    let dir = Path::new(".");
-    let Some(scope) = gitscan::merge_scope(dir)? else {
+    let Some(report) = worktree::check_in_progress(Path::new("."))? else {
         // Not an error, and emphatically not silence.
-        println!(
-            "weave check: no merge, rebase, cherry-pick or revert in progress and HEAD is \
-             not a merge commit, so there is no three-way context to verify a resolution \
-             against. NOTHING WAS CHECKED — this is not a clean bill of health."
-        );
+        println!("weave check: {}", worktree::NOTHING_TO_CHECK);
         return Ok(());
     };
-    let mut verdicts = worktree::check(
-        &scope.base,
-        &scope.ours,
-        &scope.theirs,
-        &scope.work,
-        &scope.subjects,
-    );
-    verdicts.extend(
-        scope
-            .unreadable
-            .iter()
-            .map(|(file, why)| worktree::Verdict::unread(file, why)),
-    );
-    verdicts.extend(scope.irregular.iter().map(|file| {
-        worktree::Verdict::noted(
-            file,
-            "a symlink or submodule in a merge stage — not source, so git's guarantees stand",
-        )
-    }));
-    verdicts.sort_by(|a, b| a.file.cmp(&b.file));
-    let report = worktree::Report {
-        scope: match worktree::oversize_note(&scope.work) {
-            Some(note) => format!("{}; {note}", scope.scope),
-            None => scope.scope,
-        },
-        verdicts,
-    };
     if json {
-        let payload = serde_json::json!({
-            "scope": report.scope,
-            "files": report.verdicts.iter().map(|v| serde_json::json!({
-                "file": v.file,
-                "ok": v.ok(),
-                "verdict": v.line(),
-                "findings": v.findings.iter().map(|f| serde_json::json!({
-                    "class": f.class,
-                    "detail": f.detail,
-                    "suggestion": f.suggestion,
-                })).collect::<Vec<_>>(),
-                // Advisories are non-blocking: they ride beside the verdict and
-                // never move `ok` or the exit code.
-                "advisories": v.advisories.iter().map(|a| serde_json::json!({
-                    "class": a.class,
-                    "entity": a.entity,
-                    "entity_type": a.entity_type,
-                    "detail": a.detail,
-                })).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        println!("{}", serde_json::to_string_pretty(&report.to_json())?);
     } else {
         print!("{}", report.render());
     }

@@ -89,14 +89,12 @@ Or any MCP client, via stdio:
 
 `weave-mcp` discovers the repo from the first tool call's file path, the
 `WEAVE_REPO` env var, or its working directory — set `WEAVE_REPO` if you
-launch it from outside the repo. It exposes `weave_check`/`weave_findings`
-(the read contract to call after a merge, or before one with explicit revs),
-entity inspection (`weave_extract_entities`, `weave_diff`,
-`weave_get_dependencies`/`_dependents`, `weave_impact_analysis`), and a
-claim/release layer (`weave_claim_entity`, `weave_status`,
-`weave_potential_conflicts`, ...) for coordinating multiple agents in one
-repo. Each tool's description says when to call it and what an empty result
-means — read that at call time, not here.
+launch it from outside the repo. It lists one tool per command:
+`weave_preview`, `weave_explain`, `weave_check`, `weave_land` and `weave_patch`.
+For callers and blast radius use sem's MCP server. The live claim/release CRDT
+layer (`weave_claim_entity`, `weave_status`, ...) is listed only with
+`WEAVE_EXPERIMENTAL=1`. Each tool's description says when to call it and what an
+empty result means — read that at call time, not here.
 
 ## Reference
 

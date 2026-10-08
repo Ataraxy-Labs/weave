@@ -1556,6 +1556,98 @@ pub fn write_back(dir: &Path, plan: &Plan, reports: &[FileReport]) -> R<()> {
     Ok(())
 }
 
+// ------------------------------------------------------------------- the run
+
+/// A non-publishing landing in `dir`: the merge `weave land` (without
+/// `--onto`/`--queue`) runs, shared by the CLI and the MCP server.
+pub struct Run<'a> {
+    pub base: Option<&'a str>,
+    pub ours: Option<&'a str>,
+    pub theirs: Option<&'a str>,
+    /// Judge this revision's files as the merge's answer.
+    pub result: Option<&'a str>,
+    pub resolver: Option<Resolver>,
+    /// In the working tree: label every file but write nothing.
+    pub dry_run: bool,
+}
+
+/// What a [`run`] decided.
+pub struct Landing {
+    /// The JSON report (`--json`, `--certificate`).
+    pub doc: serde_json::Value,
+    /// The human summary.
+    pub text: String,
+    /// Some file REFUSED, or the result loses a one-sided change.
+    pub refused: bool,
+    /// `revisions`, `dry-run` or `working-tree`; only the last writes.
+    pub mode: &'static str,
+}
+
+/// Plan the merge in `dir`, land every unit, and in the working tree write
+/// the PROVEN and VERIFIED files back.
+pub fn run(dir: &Path, args: &Run<'_>, host: &Host) -> R<Landing> {
+    let revisions = args.base.is_some() || args.ours.is_some() || args.theirs.is_some();
+    let present = match (revisions, args.result) {
+        (_, Some(rev)) => Some(Present::Rev(rev.to_string())),
+        (false, None) => Some(Present::WorkingTree { unmerged: false }),
+        (true, None) => None,
+    };
+    let plan = plan(dir, args.base, args.ours, args.theirs, present.as_ref())?;
+
+    let mut reports = plan.not_text.clone();
+    for unit in &plan.units {
+        reports.push(land_unit(unit, host, args.resolver.as_ref())?);
+    }
+    reports.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let mode = if revisions {
+        "revisions"
+    } else if args.dry_run {
+        "dry-run"
+    } else {
+        "working-tree"
+    };
+    if mode == "working-tree" {
+        write_back(dir, &plan, &reports)?;
+    }
+    // A merge as committed (`result`): every change only one side made must
+    // be in it too — files the gate never reads, since nothing in them
+    // conflicts. In the working tree, once nothing is left unmerged: the tree
+    // the merge commit would hold, however it came about.
+    let judged = match args.result {
+        Some(result) => Some(result.to_string()),
+        None if mode == "working-tree" => crate::preserve::merge_in_tree(dir)?,
+        None => None,
+    };
+    let lost = match &judged {
+        Some(result) => crate::preserve::check(dir, &plan.base, &plan.ours, &plan.theirs, result)?,
+        None => Vec::new(),
+    };
+    let mut doc = document(&plan, &reports, mode);
+    if judged.is_some() {
+        doc["one_sided"] = serde_json::to_value(&lost)?;
+    }
+    let mut text = render(&plan, &reports);
+    if !lost.is_empty() {
+        text.push_str(&format!(
+            "REFUSED: the result loses changes only one side made:\n{}\n",
+            crate::preserve::render(&lost, "ours", "theirs")
+        ));
+    }
+    if mode != "working-tree" {
+        text.push_str(&format!(
+            "({mode}: nothing was written to the working tree or the index)\n"
+        ));
+    }
+    let refused = !lost.is_empty() || reports.iter().any(|r| r.status == Status::Refused);
+    Ok(Landing {
+        doc,
+        text,
+        refused,
+        mode,
+    })
+}
+
 // ----------------------------------------------------------------- the report
 
 /// The whole run, as `--json` prints it and `--certificate` writes it.
