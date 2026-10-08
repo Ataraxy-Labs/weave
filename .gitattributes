@@ -92,3 +92,7 @@
 *.xhtml merge=weave
 *.xml merge=weave
 *.zig merge=weave
+
+# Test fixtures are real merge stages, compared byte for byte: never
+# convert their line endings (a Windows checkout would add CRLF).
+crates/weave-core/tests/fixtures/** -text
