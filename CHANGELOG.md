@@ -21,6 +21,17 @@ group. Every old name and flag still works with identical output; at a
 terminal it prints a one-line note on stderr naming the new spelling, and
 nothing extra in `--json` mode or when stdout is not a terminal.
 
+### Changed — the MCP server lists one tool per command
+
+`weave-mcp` lists five tools instead of 22: `weave_preview` (detail
+`summary`, `findings` or `entities`, replacing `weave_preview_merge`,
+`weave_findings` and `weave_merge_audit`), `weave_explain` (`markers=true`
+replaces `weave_merge_summary`), `weave_check` (now also verifies the working
+tree, like `weave check`), and the new `weave_land` and `weave_patch`. The
+live-editing CRDT tools are listed only with `WEAVE_EXPERIMENTAL=1`; for
+callers and blast radius use sem. Every old tool name still answers when
+called (#179).
+
 ### Added — `weave land --check sem`
 
 With `--onto` or `--queue`, `--check sem` (or `[land] check = sem` in
