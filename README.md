@@ -426,27 +426,23 @@ claude mcp add --scope user weave -- weave-mcp
 ```
 
 The server discovers the repo from the first tool call's file path, the
-`WEAVE_REPO` env var, or its working directory. It exposes 22 tools in two
-independent groups (each tool's own description states when to call it and
-what an empty result means):
+`WEAVE_REPO` env var, or its working directory. It lists five tools, one per
+`weave` command (each tool's own description states when to call it and what an
+empty result means):
 
-- **Merge analysis** reads git refs or the working tree directly, no setup needed:
-  `weave_findings`, `weave_check`, `weave_preview_merge`, `weave_diff`,
-  `weave_merge_audit`, `weave_validate_merge`, `weave_merge_summary`.
-- **Entity and dependency inspection** reads a file's or the repo's structure:
-  `weave_extract_entities`, `weave_get_dependencies`, `weave_get_dependents`,
-  `weave_impact_analysis`.
-- **Live coordination** tracks edits in the shared CRDT (`.weave/state.automerge`) for
-  agents editing the same repo at the same time, starting with `weave_agent_register`:
-  `weave_agent_register`, `weave_agent_heartbeat`, `weave_claim_entity`,
-  `weave_release_entity`, `weave_status`, `weave_who_is_editing`,
-  `weave_potential_conflicts`, `weave_update_entity_content`,
-  `weave_get_entity_content`, `weave_merge_file`, `weave_resolve_conflict`.
+- `weave_preview`: dry-run a merge of two branches, as per-file verdicts, a
+  findings document, or the strategy weave used on each entity.
+- `weave_explain`: why a file conflicted, from the merge's three stages.
+- `weave_check`: is the resolution right, plus the cross-file breakage a per-file
+  merge driver can't see (a rename in `a.py` whose surviving caller lives in `b.py`).
+- `weave_land`: label every file of a stopped merge PROVEN, VERIFIED or REFUSED, and
+  write the ones that pass.
+- `weave_patch`: carry an edit to a file that drifted, as a three-way entity merge.
 
-Start with `weave_findings` after (or before) a merge between two branches, or
-`weave_check` for the cross-file binding risk a per-file git merge driver can't see:
-a rename in `a.py` whose surviving caller lives in `b.py` merges both files cleanly on
-its own, and the break is only visible repo-wide.
+For callers, dependencies and blast radius, use [sem](https://github.com/Ataraxy-Labs/sem)'s
+MCP server. The live multi-agent CRDT tools (`weave_claim_entity`,
+`weave_update_entity_content`, ...) are listed only with `WEAVE_EXPERIMENTAL=1`. Every
+older tool name still answers when called, so existing clients keep working.
 
 ## Architecture
 
@@ -455,7 +451,7 @@ weave-core       # Library: entity extraction, entity-level 3-way merge, reconst
 weave-driver     # Git merge driver binary (called by git via %O %A %B %L %P)
 weave-cli        # CLI: `weave setup`, `weave explain`, `weave check`, `weave patch`, ...
 weave-crdt       # Automerge-backed CRDT: live multi-agent coordination state only
-weave-mcp        # MCP server exposing weave to agent frameworks (22 tools)
+weave-mcp        # MCP server exposing weave to agent frameworks (one tool per command)
 weave-github     # GitHub webhook service behind the hosted PR-comment integration
                  #   (publish = false, not a binary you install; runs weave's merge
                  #   analysis on pull_request events and posts the result as a comment)

@@ -192,7 +192,74 @@ pub struct Report {
     pub verdicts: Vec<Verdict>,
 }
 
+/// What `weave check` says when there is no merge to verify against.
+pub const NOTHING_TO_CHECK: &str = "no merge, rebase, cherry-pick or revert in progress and HEAD \
+     is not a merge commit, so there is no three-way context to verify a resolution against. \
+     NOTHING WAS CHECKED — this is not a clean bill of health.";
+
+/// Verify the resolution on disk in `dir` against the merge in progress (or
+/// HEAD's merge commit). `None`: no three-way context to verify against.
+pub fn check_in_progress(
+    dir: &std::path::Path,
+) -> Result<Option<Report>, Box<dyn std::error::Error>> {
+    let Some(scope) = crate::gitscan::merge_scope(dir)? else {
+        return Ok(None);
+    };
+    let mut verdicts = check(
+        &scope.base,
+        &scope.ours,
+        &scope.theirs,
+        &scope.work,
+        &scope.subjects,
+    );
+    verdicts.extend(
+        scope
+            .unreadable
+            .iter()
+            .map(|(file, why)| Verdict::unread(file, why)),
+    );
+    verdicts.extend(scope.irregular.iter().map(|file| {
+        Verdict::noted(
+            file,
+            "a symlink or submodule in a merge stage — not source, so git's guarantees stand",
+        )
+    }));
+    verdicts.sort_by(|a, b| a.file.cmp(&b.file));
+    Ok(Some(Report {
+        scope: match oversize_note(&scope.work) {
+            Some(note) => format!("{}; {note}", scope.scope),
+            None => scope.scope,
+        },
+        verdicts,
+    }))
+}
+
 impl Report {
+    /// The report as `weave check --json` prints it.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "scope": self.scope,
+            "files": self.verdicts.iter().map(|v| serde_json::json!({
+                "file": v.file,
+                "ok": v.ok(),
+                "verdict": v.line(),
+                "findings": v.findings.iter().map(|f| serde_json::json!({
+                    "class": f.class,
+                    "detail": f.detail,
+                    "suggestion": f.suggestion,
+                })).collect::<Vec<_>>(),
+                // Advisories are non-blocking: they ride beside the verdict and
+                // never move `ok` or the exit code.
+                "advisories": v.advisories.iter().map(|a| serde_json::json!({
+                    "class": a.class,
+                    "entity": a.entity,
+                    "entity_type": a.entity_type,
+                    "detail": a.detail,
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        })
+    }
+
     /// (files verified clean, files with findings, findings). One pass, one
     /// answer: the summary sentence and the exit code are two readings of the
     /// same tally, and computing them separately is how they drift.

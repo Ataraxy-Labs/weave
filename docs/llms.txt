@@ -83,24 +83,23 @@ Cargo workspace with 6 crates:
 - weave-driver: git merge driver binary (called with %O %A %B %L %P)
 - weave-cli: setup, explain, check, patch, preview, status, bench, summary commands
 - weave-crdt: Automerge-backed agent coordination state
-- weave-mcp: MCP server with 22 tools for AI agent integration
+- weave-mcp: MCP server, one tool per weave command, for AI agent integration
 - weave-github: GitHub integration
 
-## MCP Tools (22)
+## MCP Tools
 
-Merge analysis — read git refs or the working tree directly, no setup needed:
-- weave_findings: typed findings for a merge between two branches (the agent-facing read contract)
-- weave_check: cross-file binding check between two revisions (defaults to HEAD x MERGE_HEAD)
-- weave_preview_merge: dry-run clean/conflict verdict and stats between two branches
-- weave_diff: entity-level diff between two refs (added/modified/deleted/renamed)
-- weave_merge_audit: per-entity resolution-strategy audit trail for a two-branch merge
-- weave_validate_merge: semantic-risk subset of weave_findings (modified entities referencing modified entities)
-- weave_merge_summary: parse an already-conflicted file's markers into structured JSON
-- weave_extract_entities: list entities in a file with type and line range
-- weave_get_dependencies / weave_get_dependents: what an entity calls / who calls it
-- weave_impact_analysis: full transitive blast radius of changing an entity
+Listed, one per weave command:
+- weave_preview: dry-run a merge of two branches; detail summary (default) | findings | entities
+- weave_explain: why a file conflicted, from the merge's three stages; markers=true summarizes weave markers in the file
+- weave_check: verify the resolution in the working tree plus cross-file breakage (DANGLING, SHADOW); base/ours/theirs for two revisions
+- weave_land: label a stopped merge's files PROVEN / VERIFIED / REFUSED and write the ones that pass; dry_run, resolver, revisions
+- weave_patch: extract typed entity ops (base_content -> file) or apply them (ops) to a drifted file, three-way
 
-Live coordination — a shared CRDT (.weave/state.automerge) for agents editing one repo at once;
+For callers, dependencies and blast radius use sem's MCP server (sem_find, sem_impact).
+Older tool names (weave_findings, weave_preview_merge, weave_merge_audit, weave_diff, weave_get_dependents, ...)
+still answer when called but are not listed.
+
+Experimental, listed only with WEAVE_EXPERIMENTAL=1: Live coordination — a shared CRDT (.weave/state.automerge) for agents editing one repo at once;
 call weave_agent_register first:
 - weave_agent_register / weave_agent_heartbeat: announce and keep an agent's presence live
 - weave_claim_entity / weave_release_entity: advisory lock before/after editing an entity
