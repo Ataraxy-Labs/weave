@@ -90,6 +90,11 @@ pub struct Edit {
     /// version of one function.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect: Option<String>,
+    /// For `rename`: also rename the name where it appears as a whole word in
+    /// comments and in docs and other text files (Markdown, reStructuredText,
+    /// plain text). String literals are still left alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub everywhere: bool,
     /// For `rename`: the files to rename in, as git pathspec globs
     /// (`src/**`, `*.py`). Default: the whole repository.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -136,6 +141,8 @@ struct Plain {
     allow_signature_change: bool,
     /// Rename every identifier `.0` to `.1` in this file.
     rename_ident: Option<(String, String)>,
+    /// For a rename: also comments, and whole words in a text file.
+    everywhere: bool,
     /// For a rename: the file that defines the renamed entity.
     home: Option<String>,
     expect: Option<String>,
@@ -171,6 +178,7 @@ impl Edit {
             delete: self.delete,
             allow_signature_change: self.allow_signature_change,
             rename_ident: None,
+            everywhere: false,
             home: None,
             expect: self.expect.clone(),
         };
@@ -254,9 +262,19 @@ pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditErr
                 files.insert(0, path.clone());
             }
             for f in files {
-                let p = Plain { rename_ident: Some((from.clone(), to.clone())), entity: (f == path).then(|| entity.clone()), kind: plain.kind.clone(), home: Some(path.clone()), ..Default::default() };
+                let p = Plain { rename_ident: Some((from.clone(), to.clone())), entity: (f == path).then(|| entity.clone()), kind: plain.kind.clone(), home: Some(path.clone()), everywhere: e.everywhere, ..Default::default() };
                 by_file.entry(f).or_default().push((index, p));
             }
+            let other: Vec<String> = if e.everywhere {
+                let (text, rest): (Vec<String>, Vec<String>) = other.into_iter().partition(|f| is_text_doc(f));
+                for f in text {
+                    let p = Plain { rename_ident: Some((from.clone(), to.clone())), everywhere: true, ..Default::default() };
+                    by_file.entry(f).or_default().push((index, p));
+                }
+                rest
+            } else {
+                other
+            };
             if !other.is_empty() {
                 notes.push(format!("{} also appears in files weave cannot parse, left as they are: {}", from, other.join(", ")));
             }
@@ -422,9 +440,12 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
             Some(name) => Some(find(path, src, name, e.kind.as_deref(), None)?),
             None => None,
         };
+        if e.home.is_none() && is_text_doc(path) {
+            return Ok(replace_words(src, from, to));
+        }
         let home = e.home.as_deref().unwrap_or(path);
         let module = home.rsplit('/').next().unwrap_or(home).split('.').next().unwrap_or("");
-        return Ok(rename_identifiers(path, src, from, to, target.as_ref(), module));
+        return Ok(rename_identifiers(path, src, from, to, target.as_ref(), module, e.everywhere));
     }
     let anchors = [e.after.is_some(), e.before.is_some(), e.append, e.into.is_some()].iter().filter(|b| **b).count();
     if anchors > 1 {
@@ -707,6 +728,32 @@ fn replace_text(src: &str, start: usize, end: usize, old: &str, new: &str, all: 
     Ok(format!("{}{replaced}{}", &src[..start], &src[end..]))
 }
 
+/// Docs and other prose files a rename with `everywhere` also updates.
+fn is_text_doc(path: &str) -> bool {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(ext.as_str(), "md" | "mdx" | "markdown" | "rst" | "txt" | "adoc")
+}
+
+/// Byte offsets of `word` in `text` where it stands as a whole word.
+fn word_hits<'a>(text: &'a str, word: &'a str) -> impl Iterator<Item = (usize, &'a str)> + 'a {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(word).filter(move |(i, _)| {
+        !text[..*i].chars().next_back().is_some_and(is_word) && !text[i + word.len()..].chars().next().is_some_and(is_word)
+    })
+}
+
+fn replace_words(text: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (i, _) in word_hits(text, from).collect::<Vec<_>>() {
+        out.push_str(&text[at..i]);
+        out.push_str(to);
+        at = i + from.len();
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
 fn is_identifier(s: &str) -> bool {
     let mut c = s.chars();
     c.next().is_some_and(|f| f.is_alphabetic() || f == '_' || f == '$') && c.all(|x| x.is_alphanumeric() || x == '_' || x == '$')
@@ -739,7 +786,7 @@ fn mentions(root: &Path, word: &str, scope: &[String]) -> (Vec<String>, Vec<Stri
 /// `cells.cell_len`), and the name of another definition (a method of the
 /// same name in some class). `target` is the renamed entity when `src` is
 /// the file that defines it.
-fn rename_identifiers(path: &str, src: &str, from: &str, to: &str, target: Option<&SemanticEntity>, module: &str) -> String {
+fn rename_identifiers(path: &str, src: &str, from: &str, to: &str, target: Option<&SemanticEntity>, module: &str, comments: bool) -> String {
     use sem_core::parser::plugins::code::{language_config_for_content, parse_tree};
     let Some(tree) = language_config_for_content(src, path).and_then(|c| parse_tree(c, src)) else {
         return src.to_string();
@@ -761,6 +808,13 @@ fn rename_identifiers(path: &str, src: &str, from: &str, to: &str, target: Optio
             continue;
         }
         let k = n.kind();
+        if comments && k.contains("comment") {
+            for (i, _) in word_hits(&src[n.byte_range()], from) {
+                let at = n.start_byte() + i;
+                hits.push(at..at + from.len());
+            }
+            continue;
+        }
         if !(k.contains("identifier") || k == "name" || k == "constant") || &src[n.byte_range()] != from {
             continue;
         }
@@ -1169,5 +1223,19 @@ mod tests {
         run(&d, &e, false).unwrap();
         let out = std::fs::read_to_string(d.join("v.rs")).unwrap();
         assert!(!out.contains("Is it an array") && !out.contains("#[inline]") && out.contains("pub fn len"), "{out}");
+    }
+
+    #[test]
+    fn rename_everywhere_also_updates_comments_and_docs() {
+        let d = scratch();
+        let git = |a: &[&str]| std::process::Command::new("git").arg("-C").arg(&d).args(a).output().unwrap();
+        git(&["init", "-q"]);
+        std::fs::write(d.join("x.py"), "def area():\n    # area is cached\n    return \"area\"\n").unwrap();
+        std::fs::write(d.join("README.md"), "Call `area()` (not areas).\n").unwrap();
+        git(&["add", "."]);
+        let e: Vec<Edit> = serde_json::from_str(r#"[{"file":"x.py","entity":"area","rename":"size","everywhere":true}]"#).unwrap();
+        run(&d, &e, false).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("x.py")).unwrap(), "def size():\n    # size is cached\n    return \"area\"\n");
+        assert_eq!(std::fs::read_to_string(d.join("README.md")).unwrap(), "Call `size()` (not areas).\n");
     }
 }

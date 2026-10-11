@@ -488,6 +488,9 @@ pub(crate) struct EditSpec {
     #[schemars(description = "Optional: the entity's version from sem_find (v:...): the edit is refused if the entity changed since that read, instead of overwriting someone else's change")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect: Option<String>,
+    #[schemars(description = "With rename: also rename the name where it appears as a whole word in comments and in docs (Markdown, reStructuredText, text files); strings are left alone")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub everywhere: bool,
     #[schemars(description = "With rename: only in files matching these globs, e.g. [\"src/**\", \"tests/**\"]. Default: the whole repository")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scope: Vec<String>,
