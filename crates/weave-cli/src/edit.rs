@@ -396,7 +396,9 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
         let indent = indent_at(src, start);
         let gap = gap_before(src, start);
         let end = line_end(src, end);
-        return Ok(format!("{}{gap}{indent}{}{}", &src[..end], content.trim_matches('\n'), &src[end..]));
+        let out = format!("{}{gap}{indent}{}{}", &src[..end], fit(content, &indent), &src[end..]);
+        placed_under(path, src, &out, Some(&parent.name))?;
+        return Ok(out);
     }
     if e.old.is_some() != e.new.is_some() {
         return Err(("old and new go together".into(), vec![]));
@@ -424,14 +426,18 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
         let target = find(path, src, anchor, e.kind.as_deref(), e.ordinal)?;
         let (start, end) = span(src, &target);
         let indent = indent_at(src, start);
-        let body = content.trim_matches('\n');
+        let body = fit(content, &indent);
         let gap = gap_before(src, start);
-        return Ok(if e.after.is_some() {
+        let out = if e.after.is_some() {
             let end = line_end(src, end);
             format!("{}{gap}{indent}{body}{}", &src[..end], &src[end..])
         } else {
             format!("{}{body}{gap}{indent}{}", &src[..start], &src[start..])
-        });
+        };
+        let all = entities(path, src);
+        let parent = target.parent_id.as_ref().and_then(|id| all.iter().find(|p| &p.id == id)).map(|p| p.name.clone());
+        placed_under(path, src, &out, parent.as_deref())?;
+        return Ok(out);
     }
 
     if e.append {
@@ -477,8 +483,7 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
             }
             let target = find(path, src, name, e.kind.as_deref(), e.ordinal)?;
             let (start, end) = span(src, &target);
-            let body = content.strip_suffix('\n').unwrap_or(content);
-            let body = if src[..start].ends_with(|c: char| c == ' ' || c == '\t') { body.trim_start() } else { body };
+            let body = if src[..start].ends_with([' ', '\t']) { fit(content, &indent_at(src, start)) } else { content.trim_matches('\n').to_string() };
             let out = format!("{}{body}{}", &src[..start], &src[end..]);
             if !e.allow_signature_change {
                 identity_kept(path, &target, &src[start..end], &out, start, body.len())?;
@@ -491,6 +496,74 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
             vec![],
         )),
     }
+}
+
+/// `content` as text to place where `indent` already stands: the first line
+/// without its indentation, the rest at the depth the file needs. Accepts the
+/// three ways agents write a nested entity: every line at its final depth,
+/// only the body at its final depth (sem's form), or every line relative to
+/// the entity.
+fn fit(content: &str, indent: &str) -> String {
+    let content = content.trim_matches('\n');
+    let lines: Vec<&str> = content.lines().collect();
+    let width = |l: &str| l.len() - l.trim_start_matches([' ', '\t']).len();
+    let Some(first) = lines.iter().position(|l| !l.trim().is_empty()) else { return String::new() };
+    let base = width(lines[first]);
+    let target = indent.len();
+    let unit = if indent.contains('\t') { "\t" } else { " " };
+    // relative form: a body line no deeper than where the entity will stand
+    let relative = base == 0 && target > 0 && lines.iter().skip(first + 1).find(|l| !l.trim().is_empty()).is_some_and(|l| width(l) <= target);
+    let mut out = Vec::with_capacity(lines.len());
+    for (i, l) in lines.iter().enumerate() {
+        if i == first {
+            out.push(l.trim_start().to_string());
+        } else if l.trim().is_empty() {
+            out.push(String::new());
+        } else {
+            let w = width(l) as isize;
+            // relative: shift by the depth; every line at its final depth:
+            // re-base on the target; sem's form (base 0, body final): as is
+            let shift = if relative { target as isize } else if base > 0 { target as isize - base as isize } else { 0 };
+            let n = (w + shift).max(0) as usize;
+            out.push(format!("{}{}", unit.repeat(n), l.trim_start()));
+        }
+    }
+    out.join("\n")
+}
+
+/// An added entity must land where it was meant to: a sibling of its anchor,
+/// or a member of the class it was added into.
+fn placed_under(path: &str, before: &str, after: &str, parent: Option<&str>) -> Result<(), Fail> {
+    let keys = |src: &str| {
+        let all = entities(path, src);
+        all.iter()
+            .filter(|e| !e.name.is_empty())
+            .map(|e| {
+                let p = e.parent_id.as_ref().and_then(|id| all.iter().find(|x| &x.id == id)).map(|x| x.name.clone());
+                (p, e.name.clone())
+            })
+            .collect::<Vec<_>>()
+    };
+    let old = keys(before);
+    let mut new = keys(after);
+    for k in &old {
+        if let Some(i) = new.iter().position(|n| n == k) {
+            new.remove(i);
+        }
+    }
+    let added_names: Vec<&String> = new.iter().map(|(_, n)| n).collect();
+    // the outermost new entities: those whose parent is not itself new
+    for (p, name) in &new {
+        if p.as_ref().is_some_and(|p| added_names.contains(&p)) {
+            continue;
+        }
+        if p.as_deref() != parent {
+            let wanted = parent.map(|p| format!("in {p}")).unwrap_or_else(|| "at the top level".into());
+            let got = p.as_ref().map(|p| format!("inside {p}")).unwrap_or_else(|| "at the top level".into());
+            return Err((format!("{name} would land {got}, not {wanted}: check the content's indentation"), vec![]));
+        }
+    }
+    Ok(())
 }
 
 /// A replace must leave an entity of the same name, kind and visibility
@@ -827,5 +900,17 @@ mod tests {
         let (out, r) = go(PY, vec![edit(|e| { e.into = Some("K".into()); e.content = Some("def z(self):\n        return 0".into()); })]).unwrap();
         assert!(out.contains("        return 3\n\n    def z(self):\n        return 0\n\n\ndef b"), "{out}");
         assert_eq!(r.files[0].added, vec!["K.z"]);
+    }
+
+    #[test]
+    fn inserted_content_is_reindented_whichever_way_it_is_written() {
+        for content in [
+            "    def z(self):\n        return 0",
+            "def z(self):\n        return 0",
+            "def z(self):\n    return 0",
+        ] {
+            let (out, _) = go(PY, vec![edit(|e| { e.after = Some("K.m".into()); e.content = Some(content.into()); })]).unwrap();
+            assert!(out.contains("        return 2\n\n    def z(self):\n        return 0\n\n    def n"), "{content:?}\n{out}");
+        }
     }
 }
