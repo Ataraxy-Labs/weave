@@ -143,6 +143,9 @@ struct Plain {
     rename_ident: Option<(String, String)>,
     /// For a rename: also comments, and whole words in a text file.
     everywhere: bool,
+    /// For a rename: the entity is a member (a method or field), so `x.name`
+    /// is a use of it rather than of something else spelled the same.
+    member: bool,
     /// For a rename: the file that defines the renamed entity.
     home: Option<String>,
     expect: Option<String>,
@@ -179,6 +182,7 @@ impl Edit {
             allow_signature_change: self.allow_signature_change,
             rename_ident: None,
             everywhere: false,
+            member: false,
             home: None,
             expect: self.expect.clone(),
         };
@@ -259,13 +263,16 @@ pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditErr
                 return Err(fail(format!("{to:?} is not an identifier")));
             }
             renamed.push(from.clone());
+            let home_src = std::fs::read_to_string(root.join(&path)).unwrap_or_default();
+            let target = find(&path, &home_src, &entity, plain.kind.as_deref(), plain.ordinal).map_err(|(m, c)| EditError { index, file: e.file.clone(), message: m, candidates: c })?;
+            let member = target.parent_id.is_some() || target.entity_type == "method";
             let (code, other) = mentions(root, &from, &e.scope);
             let mut files: Vec<String> = code;
             if !files.contains(&path) {
                 files.insert(0, path.clone());
             }
             for f in files {
-                let p = Plain { rename_ident: Some((from.clone(), to.clone())), entity: (f == path).then(|| entity.clone()), kind: plain.kind.clone(), home: Some(path.clone()), everywhere: e.everywhere, ..Default::default() };
+                let p = Plain { rename_ident: Some((from.clone(), to.clone())), entity: (f == path).then(|| entity.clone()), kind: plain.kind.clone(), home: Some(path.clone()), everywhere: e.everywhere, member, ..Default::default() };
                 by_file.entry(f).or_default().push((index, p));
             }
             let other: Vec<String> = if e.everywhere {
@@ -278,6 +285,12 @@ pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditErr
             } else {
                 other
             };
+            if member {
+                let twins: Vec<String> = code_twins(root, &from, &path, target.start_line);
+                if !twins.is_empty() {
+                    notes.push(format!("{from} is also defined at {}: calls like x.{from}() were renamed whatever x is, so check the ones on those types", twins.join(", ")));
+                }
+            }
             if !other.is_empty() {
                 notes.push(format!("{} also appears in files weave cannot parse, left as they are: {}", from, other.join(", ")));
             }
@@ -488,7 +501,7 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
         }
         let home = e.home.as_deref().unwrap_or(path);
         let module = home.rsplit('/').next().unwrap_or(home).split('.').next().unwrap_or("");
-        return Ok(rename_identifiers(path, src, from, to, target.as_ref(), module, e.everywhere));
+        return Ok(rename_identifiers(path, src, from, to, target.as_ref(), module, e.everywhere, e.member));
     }
     let anchors = [e.after.is_some(), e.before.is_some(), e.append, e.into.is_some()].iter().filter(|b| **b).count();
     if anchors > 1 {
@@ -506,7 +519,9 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
         let indent = indent_at(src, start);
         let gap = gap_before(src, start);
         let end = line_end(src, end);
-        let out = format!("{}{gap}{indent}{}{}", &src[..end], fit(content, &indent), &src[end..]);
+        let body = fit(content, &indent);
+        let body = if uses_tabs(src) { tabify(&body) } else { body };
+        let out = format!("{}{gap}{indent}{}{}", &src[..end], body, &src[end..]);
         placed_under(path, src, &out, Some(&parent.name))?;
         return Ok(out);
     }
@@ -529,7 +544,8 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
             }
             None => (0, src.len()),
         };
-        return replace_text(src, start, end, old, new, e.all, e.entity.as_deref());
+        let new = if uses_tabs(src) && new.lines().any(|l| l.starts_with("    ")) && !old.lines().any(|l| l.starts_with("    ")) { tabify(new) } else { new.clone() };
+        return replace_text(src, start, end, old, &new, e.all, e.entity.as_deref());
     }
 
     if let Some(anchor) = e.after.as_ref().or(e.before.as_ref()) {
@@ -541,6 +557,7 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
         let (start, end) = span(src, &target);
         let indent = indent_at(src, start);
         let body = fit(content, &indent);
+        let body = if uses_tabs(src) { tabify(&body) } else { body };
         let gap = gap_before(src, start);
         let out = if e.after.is_some() {
             let end = line_end(src, end);
@@ -605,6 +622,7 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
             let (start, end) = span(src, &target);
             check_version(name, &src[start..end], e.expect.as_deref())?;
             let body = if src[..start].ends_with([' ', '\t']) { fit(content, &indent_at(src, start)) } else { content.trim_matches('\n').to_string() };
+            let body = if uses_tabs(src) { tabify(&body) } else { body };
             let out = format!("{}{body}{}", &src[..start], &src[end..]);
             if !e.allow_signature_change {
                 identity_kept(path, &target, &src[start..end], &out, start, body.len())?;
@@ -624,6 +642,23 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
 /// three ways agents write a nested entity: every line at its final depth,
 /// only the body at its final depth (sem's form), or every line relative to
 /// the entity.
+/// Does this file indent with tabs?
+fn uses_tabs(src: &str) -> bool {
+    let (tabs, spaces) = src.lines().fold((0, 0), |(t, sp), l| (t + l.starts_with('\t') as usize, sp + l.starts_with("  ") as usize));
+    tabs > spaces
+}
+
+/// Leading runs of spaces as tabs, four to a tab, for a file indented with tabs.
+fn tabify(text: &str) -> String {
+    text.lines()
+        .map(|l| {
+            let lead = l.len() - l.trim_start_matches(' ').len();
+            if lead == 0 { l.to_string() } else { format!("{}{}{}", "\t".repeat(lead / 4), " ".repeat(lead % 4), &l[lead..]) }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn fit(content: &str, indent: &str) -> String {
     let content = content.trim_matches('\n');
     let lines: Vec<&str> = content.lines().collect();
@@ -771,6 +806,23 @@ fn replace_text(src: &str, start: usize, end: usize, old: &str, new: &str, all: 
     Ok(format!("{}{replaced}{}", &src[..start], &src[end..]))
 }
 
+/// Other definitions spelled `name` in the repository's code (not the one at
+/// `home:line`), as `file:line`.
+fn code_twins(root: &Path, name: &str, home: &str, line: usize) -> Vec<String> {
+    let (code, _) = mentions(root, name, &[]);
+    let mut out = Vec::new();
+    for f in code {
+        let Ok(src) = std::fs::read_to_string(root.join(&f)) else { continue };
+        for e in entities(&f, &src) {
+            if e.name == name && !(f == home && e.start_line == line) {
+                out.push(format!("{f}:{}", e.start_line));
+            }
+        }
+    }
+    out.truncate(8);
+    out
+}
+
 /// Docs and other prose files a rename with `everywhere` also updates.
 fn is_text_doc(path: &str) -> bool {
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
@@ -829,7 +881,8 @@ fn mentions(root: &Path, word: &str, scope: &[String]) -> (Vec<String>, Vec<Stri
 /// `cells.cell_len`), and the name of another definition (a method of the
 /// same name in some class). `target` is the renamed entity when `src` is
 /// the file that defines it.
-fn rename_identifiers(path: &str, src: &str, from: &str, to: &str, target: Option<&SemanticEntity>, module: &str, comments: bool) -> String {
+#[allow(clippy::too_many_arguments)]
+fn rename_identifiers(path: &str, src: &str, from: &str, to: &str, target: Option<&SemanticEntity>, module: &str, comments: bool, member: bool) -> String {
     use sem_core::parser::plugins::code::{language_config_for_content, parse_tree};
     let Some(tree) = language_config_for_content(src, path).and_then(|c| parse_tree(c, src)) else {
         return src.to_string();
@@ -862,8 +915,9 @@ fn rename_identifiers(path: &str, src: &str, from: &str, to: &str, target: Optio
             continue;
         }
         if let Some(p) = n.parent() {
-            // obj.name: the member is someone else's unless obj is the module
-            if MEMBER.contains(&p.kind()) && p.child(0).is_some_and(|o| o.id() != n.id()) {
+            // obj.name: someone else's member unless obj is the module, or the
+            // renamed entity is itself a member (then obj.name is its call)
+            if !member && MEMBER.contains(&p.kind()) && p.child(0).is_some_and(|o| o.id() != n.id()) {
                 let object = p.child(0).map(|o| &src[o.byte_range()]).unwrap_or("");
                 if object != module {
                     continue;
@@ -1280,5 +1334,19 @@ mod tests {
         run(&d, &e, false).unwrap();
         assert_eq!(std::fs::read_to_string(d.join("x.py")).unwrap(), "def size():\n    # size is cached\n    return \"area\"\n");
         assert_eq!(std::fs::read_to_string(d.join("README.md")).unwrap(), "Call `size()` (not areas).\n");
+    }
+
+    #[test]
+    fn method_renames_follow_calls_and_tabbed_files_stay_tabbed() {
+        let d = scratch();
+        let git = |a: &[&str]| std::process::Command::new("git").arg("-C").arg(&d).args(a).output().unwrap();
+        git(&["init", "-q"]);
+        std::fs::write(d.join("c.go"), "package c\n\ntype C struct{}\n\nfunc (c *C) IsAvail() bool {\n\treturn true\n}\n\nfunc use(c *C) bool {\n\treturn c.IsAvail()\n}\n").unwrap();
+        git(&["add", "."]);
+        let e: Vec<Edit> = serde_json::from_str(r#"[{"file":"c.go","entity":"IsAvail","rename":"IsAvailable"},{"file":"c.go","after":"IsAvailable","content":"// Deprecated: use IsAvailable.\nfunc (c *C) IsAvail() bool {\n    return c.IsAvailable()\n}"}]"#).unwrap();
+        run(&d, &e, false).unwrap();
+        let out = std::fs::read_to_string(d.join("c.go")).unwrap();
+        assert!(out.contains("\treturn c.IsAvailable()\n}\n\nfunc use"), "{out}");
+        assert!(out.contains("func (c *C) IsAvail() bool {\n\treturn c.IsAvailable()\n}"), "{out}");
     }
 }
