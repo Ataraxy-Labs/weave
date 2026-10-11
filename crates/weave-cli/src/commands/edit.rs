@@ -46,6 +46,9 @@ pub(crate) fn run(mut a: Args) -> Result<(), Box<dyn std::error::Error>> {
     let root = weave_core::git::find_repo_root(std::path::Path::new(".")).unwrap_or_else(|_| std::path::PathBuf::from("."));
     match edit::run(&root, &edits, a.dry_run) {
         Ok(r) => {
+            if r.written {
+                edit::speculate(&root);
+            }
             if a.json {
                 println!("{}", serde_json::to_string_pretty(&r)?);
             } else if r.files.is_empty() {

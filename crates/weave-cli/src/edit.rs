@@ -335,9 +335,6 @@ pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditErr
     }
     let review = if dry_run { Vec::new() } else { review(root, &files, &renamed) };
     let written = !dry_run && !reports.is_empty();
-    if written {
-        speculate(root);
-    }
     Ok(Report { written, files: reports, notes, review, then: None })
 }
 
@@ -414,7 +411,7 @@ fn last_command(root: &Path) -> Option<(String, String)> {
 /// background. Agents follow an edit by rerunning the same command after
 /// thinking for some seconds; by then this run is done or under way, and
 /// `sem check --run` joins it instead of starting over.
-fn speculate(root: &Path) {
+pub fn speculate(root: &Path) {
     if std::env::var("WEAVE_SPECULATE").is_ok_and(|v| v == "0") {
         return;
     }

@@ -1929,10 +1929,15 @@ impl WeaveServer {
             .map_err(|e| rmcp::ErrorData::invalid_params(format!("edits: {e}"), None))?;
         let out = match weave_cli::edit::run(&ctx.repo_root, &edits, params.dry_run.unwrap_or(false)) {
             Ok(mut r) => {
-                if let Some(cmd) = params.then.as_deref().filter(|c| !c.trim().is_empty() && r.written) {
-                    let root = ctx.repo_root.clone();
-                    let cmd = cmd.to_string();
-                    r.then = tokio::task::spawn_blocking(move || weave_cli::edit::then(&root, &cmd)).await.ok();
+                match params.then.as_deref().filter(|c| !c.trim().is_empty() && r.written) {
+                    // the edit's own check is the run: no speculative one beside it
+                    Some(cmd) => {
+                        let root = ctx.repo_root.clone();
+                        let cmd = cmd.to_string();
+                        r.then = tokio::task::spawn_blocking(move || weave_cli::edit::then(&root, &cmd)).await.ok();
+                    }
+                    None if r.written => weave_cli::edit::speculate(&ctx.repo_root),
+                    None => {}
                 }
                 serde_json::to_value(&r).unwrap_or_default()
             }
