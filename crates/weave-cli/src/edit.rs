@@ -136,6 +136,8 @@ struct Plain {
     allow_signature_change: bool,
     /// Rename every identifier `.0` to `.1` in this file.
     rename_ident: Option<(String, String)>,
+    /// For a rename: the file that defines the renamed entity.
+    home: Option<String>,
     expect: Option<String>,
 }
 
@@ -169,6 +171,7 @@ impl Edit {
             delete: self.delete,
             allow_signature_change: self.allow_signature_change,
             rename_ident: None,
+            home: None,
             expect: self.expect.clone(),
         };
         match self.op.as_deref() {
@@ -244,7 +247,7 @@ pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditErr
                 files.insert(0, path.clone());
             }
             for f in files {
-                let p = Plain { rename_ident: Some((from.clone(), to.clone())), entity: (f == path).then(|| entity.clone()), kind: plain.kind.clone(), ..Default::default() };
+                let p = Plain { rename_ident: Some((from.clone(), to.clone())), entity: (f == path).then(|| entity.clone()), kind: plain.kind.clone(), home: Some(path.clone()), ..Default::default() };
                 by_file.entry(f).or_default().push((index, p));
             }
             if !other.is_empty() {
@@ -382,10 +385,15 @@ type Fail = (String, Vec<String>);
 
 fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, Fail> {
     if let Some((from, to)) = &e.rename_ident {
-        if let Some(name) = &e.entity {
-            find(path, src, name, e.kind.as_deref(), None)?;
-        }
-        return Ok(rename_identifiers(path, src, from, to));
+        // in the defining file, the target's own definition is renamed and
+        // every other entity spelled the same is left alone
+        let target = match &e.entity {
+            Some(name) => Some(find(path, src, name, e.kind.as_deref(), None)?),
+            None => None,
+        };
+        let home = e.home.as_deref().unwrap_or(path);
+        let module = home.rsplit('/').next().unwrap_or(home).split('.').next().unwrap_or("");
+        return Ok(rename_identifiers(path, src, from, to, target.as_ref(), module));
     }
     let anchors = [e.after.is_some(), e.before.is_some(), e.append, e.into.is_some()].iter().filter(|b| **b).count();
     if anchors > 1 {
@@ -676,23 +684,52 @@ fn mentions(root: &Path, word: &str, scope: &[String]) -> (Vec<String>, Vec<Stri
 
 /// Rename identifier tokens spelled `from`: tree-sitter leaves whose kind is
 /// an identifier, so strings, comments and longer names are never touched.
-fn rename_identifiers(path: &str, src: &str, from: &str, to: &str) -> String {
+/// Two kinds of same-spelled identifiers are someone else's and are skipped:
+/// a member access (`obj.name`, unless `obj` is the defining module, as in
+/// `cells.cell_len`), and the name of another definition (a method of the
+/// same name in some class). `target` is the renamed entity when `src` is
+/// the file that defines it.
+fn rename_identifiers(path: &str, src: &str, from: &str, to: &str, target: Option<&SemanticEntity>, module: &str) -> String {
     use sem_core::parser::plugins::code::{language_config_for_content, parse_tree};
     let Some(tree) = language_config_for_content(src, path).and_then(|c| parse_tree(c, src)) else {
         return src.to_string();
     };
+    // other definitions spelled `from`: their name tokens are not renamed
+    let others: Vec<(usize, usize)> = entities(path, src)
+        .iter()
+        .filter(|e| e.name == from && target.is_none_or(|t| t.start_line != e.start_line))
+        .map(|e| span(src, e))
+        .collect();
+    let target_span = target.map(|t| span(src, t));
+    const MEMBER: &[&str] = &["attribute", "member_expression", "field_expression", "selector_expression", "navigation_expression", "member_access_expression", "field_access", "property_access_expression"];
     let mut hits = Vec::new();
     let mut cursor = tree.walk();
     let mut stack = vec![tree.root_node()];
     while let Some(n) = stack.pop() {
-        if n.child_count() == 0 {
-            let k = n.kind();
-            if (k.contains("identifier") || k == "name" || k == "constant") && &src[n.byte_range()] == from {
-                hits.push(n.byte_range());
-            }
+        if n.child_count() > 0 {
+            stack.extend(n.children(&mut cursor));
             continue;
         }
-        stack.extend(n.children(&mut cursor));
+        let k = n.kind();
+        if !(k.contains("identifier") || k == "name" || k == "constant") || &src[n.byte_range()] != from {
+            continue;
+        }
+        if let Some(p) = n.parent() {
+            // obj.name: the member is someone else's unless obj is the module
+            if MEMBER.contains(&p.kind()) && p.child(0).is_some_and(|o| o.id() != n.id()) {
+                let object = p.child(0).map(|o| &src[o.byte_range()]).unwrap_or("");
+                if object != module {
+                    continue;
+                }
+            }
+        }
+        // the name token of another definition spelled the same
+        let at = n.start_byte();
+        let defines_other = others.iter().any(|&(s, t)| at >= s && at <= t && src[s..at].lines().count() <= 3 && !target_span.is_some_and(|(ts, tt)| at >= ts && at <= tt && ts >= s && tt <= t));
+        if defines_other && is_definition_name(&n) {
+            continue;
+        }
+        hits.push(n.byte_range());
     }
     hits.sort_by_key(|r| r.start);
     let mut out = String::with_capacity(src.len());
@@ -704,6 +741,16 @@ fn rename_identifiers(path: &str, src: &str, from: &str, to: &str) -> String {
     }
     out.push_str(&src[at..]);
     out
+}
+
+
+/// Is this identifier the name a definition introduces (`def name`, `fn
+/// name`, `class name`, a method or property name)?
+fn is_definition_name(n: &tree_sitter::Node) -> bool {
+    let Some(p) = n.parent() else { return false };
+    let k = p.kind();
+    let definition = k.contains("definition") || k.contains("declaration") || k.contains("function_item") || k.contains("method") || k.ends_with("_item") || k == "property_signature" || k == "pair";
+    definition && p.child_by_field_name("name").is_some_and(|c| c.id() == n.id())
 }
 
 /// Every entity in the file, at every depth.
@@ -953,5 +1000,22 @@ mod tests {
         go(PY, vec![edit(|e| { e.entity = Some(EntityRef::from("a")); e.old = Some("1".into()); e.new = Some("2".into()); e.expect = Some(v.clone()); })]).unwrap();
         let err = go(PY, vec![edit(|e| { e.entity = Some(EntityRef::from("a")); e.old = Some("1".into()); e.new = Some("2".into()); e.expect = Some("v:00000000".into()); })]).unwrap_err();
         assert!(err.message.contains("changed since you read it"), "{}", err.message);
+    }
+
+    #[test]
+    fn rename_leaves_members_and_other_definitions_alone() {
+        let d = scratch();
+        let git = |a: &[&str]| std::process::Command::new("git").arg("-C").arg(&d).args(a).output().unwrap();
+        git(&["init", "-q"]);
+        std::fs::write(d.join("cells.py"), "def cell_len(s):\n    return len(s)\n").unwrap();
+        std::fs::write(d.join("text.py"), "from cells import cell_len\nimport cells\n\n\nclass Text:\n    @property\n    def cell_len(self):\n        return cell_len(self.s)\n\n\ndef w(t):\n    return t.cell_len + cells.cell_len(\"x\")\n").unwrap();
+        git(&["add", "."]);
+        let e: Vec<Edit> = serde_json::from_str(r#"[{"file":"cells.py","entity":"cell_len","rename":"cell_width"}]"#).unwrap();
+        run(&d, &e, false).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("cells.py")).unwrap(), "def cell_width(s):\n    return len(s)\n");
+        assert_eq!(
+            std::fs::read_to_string(d.join("text.py")).unwrap(),
+            "from cells import cell_width\nimport cells\n\n\nclass Text:\n    @property\n    def cell_len(self):\n        return cell_width(self.s)\n\n\ndef w(t):\n    return t.cell_len + cells.cell_width(\"x\")\n"
+        );
     }
 }
