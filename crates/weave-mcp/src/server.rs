@@ -1916,7 +1916,7 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Change code by entity, written straight to disk: no Read first. Each edit names a file and an entity (function, class, method or key; `Class.method` for a member) and one action: content replaces the entity; old/new replaces text inside it (must match once); after/before/append with content adds a new entity, into: \"Class\" adds it as the class's last member; delete removes it; rename renames it and every reference across the repository in one edit. Without entity, old/new edits the whole file (imports, configs, any text file), and content alone creates a file that does not exist. Resolved against the file as it is now, so other agents' changes elsewhere are kept. A batch is all or nothing. Returns which entities were added, modified and deleted. Edits are refused, never half-applied, so a dry run first is rarely worth a turn. Use it for every code change instead of reading the file and editing lines."
+        description = "Change code by entity, written straight to disk: no Read first. Each edit names a file and an entity (function, class, method or key; `Class.method` for a member) and one action: content replaces the entity; old/new replaces text inside it (must match once); after/before/append with content adds a new entity, into: \"Class\" adds it as the class's last member; delete removes it; rename renames it and every reference across the repository in one edit. Without entity, old/new edits the whole file (imports, configs, any text file), and content alone creates a file that does not exist. Resolved against the file as it is now, so other agents' changes elsewhere are kept. A batch is all or nothing. Returns which entities were added, modified and deleted. then: \"<test command>\" runs it right after writing and returns its result in this response (edit and check in one call). Edits are refused, never half-applied, so a dry run first is rarely worth a turn. Use it for every code change instead of reading the file and editing lines."
     )]
     async fn weave_edit(
         &self,
@@ -1928,7 +1928,14 @@ impl WeaveServer {
             .and_then(serde_json::from_value)
             .map_err(|e| rmcp::ErrorData::invalid_params(format!("edits: {e}"), None))?;
         let out = match weave_cli::edit::run(&ctx.repo_root, &edits, params.dry_run.unwrap_or(false)) {
-            Ok(r) => serde_json::to_value(&r).unwrap_or_default(),
+            Ok(mut r) => {
+                if let Some(cmd) = params.then.as_deref().filter(|c| !c.trim().is_empty() && r.written) {
+                    let root = ctx.repo_root.clone();
+                    let cmd = cmd.to_string();
+                    r.then = tokio::task::spawn_blocking(move || weave_cli::edit::then(&root, &cmd)).await.ok();
+                }
+                serde_json::to_value(&r).unwrap_or_default()
+            }
             Err(e) => serde_json::json!({ "written": false, "error": e }),
         };
         Ok(CallToolResult::success(vec![Content::text(

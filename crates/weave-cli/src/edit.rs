@@ -217,6 +217,9 @@ pub struct Report {
     /// edit rather than discover from a failing test.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub review: Vec<String>,
+    /// The output of the `then` command, run once the edits were written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub then: Option<String>,
 }
 
 /// Why a batch was refused. Nothing was written.
@@ -331,7 +334,11 @@ pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditErr
         }
     }
     let review = if dry_run { Vec::new() } else { review(root, &files, &renamed) };
-    Ok(Report { written: !dry_run && !reports.is_empty(), files: reports, notes, review })
+    let written = !dry_run && !reports.is_empty();
+    if written {
+        speculate(root);
+    }
+    Ok(Report { written, files: reports, notes, review, then: None })
 }
 
 /// One file's edits, in order: (path, content on disk, content after).
@@ -386,6 +393,45 @@ fn parses_worse(path: &str, before: &str, after: &str) -> Option<String> {
     }
     let line = a.iter().find(|l| !b.contains(l)).or(a.first()).copied().unwrap_or(0);
     Some(format!("the edits leave {path} unparseable near line {line}; nothing was written"))
+}
+
+/// The sem binary: `SEM_BIN`, else `sem` on PATH.
+fn sem_bin() -> String {
+    std::env::var("SEM_BIN").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "sem".to_string())
+}
+
+/// `<git common dir>/sem-run/last`: the build or test command the agent ran
+/// last through `sem check --run`, and the directory it ran it in.
+fn last_command(root: &Path) -> Option<(String, String)> {
+    let o = std::process::Command::new("git").args(["rev-parse", "--path-format=absolute", "--git-common-dir"]).current_dir(root).output().ok()?;
+    let dir = std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("sem-run");
+    let text = std::fs::read_to_string(dir.join("last")).ok()?;
+    let (rel, cmd) = text.split_once('\n')?;
+    (!cmd.trim().is_empty()).then(|| (rel.to_string(), cmd.to_string()))
+}
+
+/// Start the agent's last test command on the tree just written, in the
+/// background. Agents follow an edit by rerunning the same command after
+/// thinking for some seconds; by then this run is done or under way, and
+/// `sem check --run` joins it instead of starting over.
+fn speculate(root: &Path) {
+    if std::env::var("WEAVE_SPECULATE").is_ok_and(|v| v == "0") {
+        return;
+    }
+    let Some((rel, cmd)) = last_command(root) else { return };
+    let cwd = root.join(rel);
+    let quoted = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let line = format!("{} check --run {} --quiet >/dev/null 2>&1 &", quoted(&sem_bin()), quoted(&cmd));
+    let _ = std::process::Command::new("sh").arg("-c").arg(line).current_dir(cwd).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+}
+
+/// Run `cmd` through `sem check --run` once the edits are written, so an edit
+/// and its check take one call; it joins the speculative run if there is one.
+pub fn then(root: &Path, cmd: &str) -> String {
+    match std::process::Command::new(sem_bin()).args(["check", "--run", cmd]).current_dir(root).stdin(std::process::Stdio::null()).output() {
+        Ok(o) => format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+        Err(e) => format!("could not run sem check --run: {e} (set SEM_BIN)"),
+    }
 }
 
 fn lock(root: &Path) -> Option<std::fs::File> {

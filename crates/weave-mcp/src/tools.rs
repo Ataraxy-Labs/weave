@@ -503,4 +503,6 @@ pub(crate) struct EditParams {
     pub edits: Vec<EditSpec>,
     #[schemars(description = "Optional: report what would change and write nothing")]
     pub dry_run: Option<bool>,
+    #[schemars(description = "Optional: a build or test command to run once the edits are written (e.g. \"go test ./...\"); its result comes back in this same response, so editing and checking take one call")]
+    pub then: Option<String>,
 }
