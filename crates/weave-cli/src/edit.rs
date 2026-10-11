@@ -85,6 +85,11 @@ pub struct Edit {
     /// left alone; files without a grammar that mention it are listed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rename: Option<String>,
+    /// The entity's version as sem showed it (`v:…`): the edit is refused if
+    /// the entity changed since, so two agents never overwrite each other's
+    /// version of one function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<String>,
     /// For `rename`: the files to rename in, as git pathspec globs
     /// (`src/**`, `*.py`). Default: the whole repository.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -131,6 +136,7 @@ struct Plain {
     allow_signature_change: bool,
     /// Rename every identifier `.0` to `.1` in this file.
     rename_ident: Option<(String, String)>,
+    expect: Option<String>,
 }
 
 impl Edit {
@@ -163,6 +169,7 @@ impl Edit {
             delete: self.delete,
             allow_signature_change: self.allow_signature_change,
             rename_ident: None,
+            expect: self.expect.clone(),
         };
         match self.op.as_deref() {
             None | Some("replace") => {}
@@ -412,7 +419,11 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
             return Err(("the file does not exist; create it with content alone".into(), vec![]));
         }
         let (start, end) = match &e.entity {
-            Some(name) => span(src, &find(path, src, name, e.kind.as_deref(), e.ordinal)?),
+            Some(name) => {
+                let (s, t) = span(src, &find(path, src, name, e.kind.as_deref(), e.ordinal)?);
+                check_version(name, &src[s..t], e.expect.as_deref())?;
+                (s, t)
+            }
             None => (0, src.len()),
         };
         return replace_text(src, start, end, old, new, e.all, e.entity.as_deref());
@@ -454,6 +465,7 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
         let name = e.entity.as_ref().ok_or_else(|| ("delete needs the entity to delete".to_string(), vec![]))?;
         let target = find(path, src, name, e.kind.as_deref(), e.ordinal)?;
         let (start, end) = span(src, &target);
+        check_version(name, &src[start..end], e.expect.as_deref())?;
         let mut from = line_start(src, start);
         if src[from..start].trim().is_empty() {
             // whole lines: drop the entity's lines and one blank line around it
@@ -483,6 +495,7 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
             }
             let target = find(path, src, name, e.kind.as_deref(), e.ordinal)?;
             let (start, end) = span(src, &target);
+            check_version(name, &src[start..end], e.expect.as_deref())?;
             let body = if src[..start].ends_with([' ', '\t']) { fit(content, &indent_at(src, start)) } else { content.trim_matches('\n').to_string() };
             let out = format!("{}{body}{}", &src[..start], &src[end..]);
             if !e.allow_signature_change {
@@ -596,6 +609,26 @@ fn visibility(text: &str) -> Vec<&str> {
     const WORDS: &[&str] = &["export", "pub", "pub(crate)", "public", "private", "protected", "internal"];
     let head = text.lines().find(|l| { let t = l.trim_start(); !t.is_empty() && !t.starts_with('@') && !t.starts_with("#[") && !t.starts_with("//") && !t.starts_with('#') }).unwrap_or("");
     head.split_whitespace().take_while(|w| !w.contains('(') || w.starts_with("pub(")).filter(|w| WORDS.contains(w)).collect()
+}
+
+/// sem's entity version: `v:` + FNV-1a (32 bits) of the source without
+/// trailing newlines.
+pub fn version(source: &str) -> String {
+    let mut h: u32 = 0x811c9dc5;
+    for b in source.trim_end_matches('\n').bytes() {
+        h = (h ^ b as u32).wrapping_mul(0x01000193);
+    }
+    format!("v:{h:08x}")
+}
+
+fn check_version(name: &str, source: &str, expect: Option<&str>) -> Result<(), Fail> {
+    let Some(want) = expect.map(str::trim).filter(|w| !w.is_empty()) else { return Ok(()) };
+    let want = if want.starts_with("v:") { want.to_string() } else { format!("v:{want}") };
+    let now = version(source);
+    if now == want {
+        return Ok(());
+    }
+    Err((format!("{name} changed since you read it ({want}, now {now}): read it again and redo the edit on the current version"), vec![]))
 }
 
 fn replace_text(src: &str, start: usize, end: usize, old: &str, new: &str, all: bool, entity: Option<&str>) -> Result<String, Fail> {
@@ -912,5 +945,13 @@ mod tests {
             let (out, _) = go(PY, vec![edit(|e| { e.after = Some("K.m".into()); e.content = Some(content.into()); })]).unwrap();
             assert!(out.contains("        return 2\n\n    def z(self):\n        return 0\n\n    def n"), "{content:?}\n{out}");
         }
+    }
+
+    #[test]
+    fn expect_refuses_an_entity_changed_since_it_was_read() {
+        let v = version("def a():\n    return 1");
+        go(PY, vec![edit(|e| { e.entity = Some(EntityRef::from("a")); e.old = Some("1".into()); e.new = Some("2".into()); e.expect = Some(v.clone()); })]).unwrap();
+        let err = go(PY, vec![edit(|e| { e.entity = Some(EntityRef::from("a")); e.old = Some("1".into()); e.new = Some("2".into()); e.expect = Some("v:00000000".into()); })]).unwrap_err();
+        assert!(err.message.contains("changed since you read it"), "{}", err.message);
     }
 }

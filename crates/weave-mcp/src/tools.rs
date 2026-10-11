@@ -485,6 +485,9 @@ pub(crate) struct EditSpec {
     #[schemars(description = "Rename entity (defined in file) to this name, together with every identifier spelled like it in the repository's code: one edit instead of one per call site. Strings and comments are left alone; files without a grammar that mention it are listed in notes")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rename: Option<String>,
+    #[schemars(description = "Optional: the entity's version from sem_find (v:...): the edit is refused if the entity changed since that read, instead of overwriting someone else's change")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<String>,
     #[schemars(description = "With rename: only in files matching these globs, e.g. [\"src/**\", \"tests/**\"]. Default: the whole repository")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scope: Vec<String>,

@@ -672,7 +672,7 @@ fn main() {
         Commands::Edit { file, entity, kind, ordinal, content, content_file, old, new, all, after, before, append, delete, allow_signature_change, rename, scope, dry_run, json } => {
             commands::edit::run(commands::edit::Args {
                 file_or_batch: file,
-                single: weave_cli::edit::Edit { file: String::new(), entity: entity.map(|e| weave_cli::edit::EntityRef::from(e.as_str())), op: None, kind, ordinal, content, old, new, all, after, before, append, into: None, delete, allow_signature_change, rename, scope },
+                single: weave_cli::edit::Edit { file: String::new(), entity: entity.map(|e| weave_cli::edit::EntityRef::from(e.as_str())), op: None, kind, ordinal, content, old, new, all, after, before, append, into: None, delete, allow_signature_change, rename, expect: None, scope },
                 content_file,
                 dry_run,
                 json,
