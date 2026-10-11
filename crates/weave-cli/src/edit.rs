@@ -215,6 +215,10 @@ pub struct EditError {
 /// parallel. Nothing is written unless every edit resolved and no edited
 /// file parses worse than it did before.
 pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditError> {
+    // Agents editing one checkout at once: each batch reads, plans and
+    // writes under one lock per repository, so a batch always applies to
+    // the files as the previous batch left them and no edit is lost.
+    let _lock = if dry_run { None } else { lock(root) };
     let mut by_file: BTreeMap<String, Vec<(usize, Plain)>> = BTreeMap::new();
     let mut notes = Vec::new();
     for (index, e) in edits.iter().enumerate() {
@@ -323,6 +327,17 @@ fn parses_worse(path: &str, before: &str, after: &str) -> Option<String> {
     }
     let line = a.iter().find(|l| !b.contains(l)).or(a.first()).copied().unwrap_or(0);
     Some(format!("the edits leave {path} unparseable near line {line}; nothing was written"))
+}
+
+fn lock(root: &Path) -> Option<std::fs::File> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in root.to_string_lossy().bytes() {
+        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+    }
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(std::env::temp_dir().join(format!("weave-edit-{h:016x}.lock"))).ok()?;
+    f.lock().ok()?;
+    Some(f)
 }
 
 fn io_error(path: &str, e: std::io::Error) -> EditError {
