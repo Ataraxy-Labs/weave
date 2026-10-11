@@ -204,6 +204,11 @@ pub struct Report {
     /// without a grammar that still mention a renamed name.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Entities whose signature changed or that were deleted, with every
+    /// place their name is still used: the call sites to update in the next
+    /// edit rather than discover from a failing test.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review: Vec<String>,
 }
 
 /// Why a batch was refused. Nothing was written.
@@ -307,7 +312,8 @@ pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditErr
             std::fs::write(&abs, now).map_err(|e| io_error(path, e))?;
         }
     }
-    Ok(Report { written: !dry_run && !reports.is_empty(), files: reports, notes })
+    let review = if dry_run { Vec::new() } else { review(root, &files, &renamed) };
+    Ok(Report { written: !dry_run && !reports.is_empty(), files: reports, notes, review })
 }
 
 /// One file's edits, in order: (path, content on disk, content after).
@@ -860,6 +866,59 @@ fn gap_before(src: &str, start: usize) -> String {
     "\n".repeat(newlines.clamp(2, 3))
 }
 
+/// A definition's signature: its text up to where the body starts, with
+/// decorators and attributes dropped and whitespace collapsed.
+fn signature(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().skip_while(|l| { let t = l.trim_start(); t.starts_with('@') || t.starts_with("#[") }).collect();
+    let text = lines.join("\n");
+    let cut = ["{", ":\n", "=>", " where "].iter().filter_map(|m| text.find(m)).min().unwrap_or(text.len().min(400));
+    text[..cut].split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// For each entity the batch deleted or gave a new signature: the places its
+/// name is still used, from `git grep`, after the batch was written.
+fn review(root: &Path, files: &[(String, Option<String>, String)], renamed: &[String]) -> Vec<String> {
+    let mut changed: Vec<(String, String, &'static str)> = Vec::new(); // (name, file, why)
+    for (path, disk, now) in files {
+        let Some(disk) = disk else { continue };
+        let before = entities(path, disk);
+        let after = entities(path, now);
+        for b in &before {
+            if b.name.len() < 3 || renamed.contains(&b.name) || !matches!(b.entity_type.as_str(), "function" | "method" | "class" | "struct" | "interface" | "trait" | "type" | "enum" | "constructor") {
+                continue;
+            }
+            match after.iter().find(|a| a.name == b.name && a.entity_type == b.entity_type) {
+                None => changed.push((b.name.clone(), path.clone(), "was deleted")),
+                Some(a) if signature(&a.content) != signature(&b.content) => changed.push((b.name.clone(), path.clone(), "changed its signature")),
+                _ => {}
+            }
+        }
+    }
+    let edited: Vec<&str> = files.iter().map(|(p, _, _)| p.as_str()).collect();
+    let mut out = Vec::new();
+    for (name, home, why) in changed {
+        let Ok(o) = std::process::Command::new("git").arg("-C").arg(root).args(["grep", "-n", "-w", "-I", "--untracked", "-F", "-e", &name]).output() else { continue };
+        let sites: Vec<String> = String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| sem_core::parser::plugins::code::language_config_for_content("", l.split(':').next().unwrap_or("")).is_some())
+            .filter(|l| !l.contains(&format!("def {name}")) && !l.contains(&format!("fn {name}")) && !l.contains(&format!("function {name}")) && !l.contains(&format!("class {name}")))
+            .map(|l| {
+                let mut parts = l.splitn(3, ':');
+                let (f, n, t) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or("").trim());
+                let mark = if edited.contains(&f) { " (file edited in this batch)" } else { "" };
+                format!("{f}:{n}: {t}{mark}")
+            })
+            .collect();
+        if sites.is_empty() {
+            continue;
+        }
+        let more = sites.len().saturating_sub(20);
+        let tail = if more > 0 { format!("\n  ... and {more} more") } else { String::new() };
+        out.push(format!("{name} ({home}) {why}; still used at:\n  {}{tail}", sites.into_iter().take(20).collect::<Vec<_>>().join("\n  ")));
+    }
+    out
+}
+
 fn report(path: &str, before: Option<&str>, after: &str) -> FileReport {
     let key = |e: &SemanticEntity, all: &[SemanticEntity]| {
         let parent = e.parent_id.as_ref().and_then(|id| all.iter().find(|p| &p.id == id)).map(|p| format!("{}.", p.name)).unwrap_or_default();
@@ -1042,5 +1101,18 @@ mod tests {
             std::fs::read_to_string(d.join("text.py")).unwrap(),
             "from cells import cell_width\nimport cells\n\n\nclass Text:\n    @property\n    def cell_len(self):\n        return cell_width(self.s)\n\n\ndef w(t):\n    return t.cell_len + cells.cell_width(\"x\")\n"
         );
+    }
+
+    #[test]
+    fn signature_changes_list_the_call_sites_left() {
+        let d = scratch();
+        let git = |a: &[&str]| std::process::Command::new("git").arg("-C").arg(&d).args(a).output().unwrap();
+        git(&["init", "-q"]);
+        std::fs::write(d.join("x.py"), "def area():\n    return 1\n\n\ndef total():\n    return area()\n").unwrap();
+        std::fs::write(d.join("y.py"), "from x import area\n\nprint(area())\n").unwrap();
+        git(&["add", "."]);
+        let e: Vec<Edit> = serde_json::from_str(r#"[{"file":"x.py","entity":"area","content":"def area(n):\n    return n"}]"#).unwrap();
+        let r = run(&d, &e, false).unwrap();
+        assert!(r.review.len() == 1 && r.review[0].contains("y.py:3: print(area())") && r.review[0].contains("x.py:6: return area() (file edited in this batch)"), "{:?}", r.review);
     }
 }
