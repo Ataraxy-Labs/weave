@@ -1057,6 +1057,30 @@ fn gap_before(src: &str, start: usize) -> String {
     "\n".repeat(newlines.clamp(2, 3))
 }
 
+/// Review an edit another tool made (an agent's own edit or patch tool):
+/// for each `(file, content before the edit)` (`None` before: the file is new
+/// or its content at HEAD stands in), what the edit broke in the parse and
+/// which callers a signature change or deletion left behind. Then start the
+/// agent's last test command on the new tree, as after a weave edit.
+pub fn review_external(root: &Path, files: &[(String, Option<String>)]) -> Vec<String> {
+    let mut planned = Vec::new();
+    let mut out = Vec::new();
+    for (file, before) in files {
+        let Ok(path) = normalize(root, file) else { continue };
+        let Ok(after) = std::fs::read_to_string(root.join(&path)) else { continue };
+        let before = before.clone().or_else(|| {
+            std::process::Command::new("git").args(["show", &format!("HEAD:{path}")]).current_dir(root).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        });
+        if let Some(why) = parses_worse(&path, before.as_deref().unwrap_or(""), &after) {
+            out.push(why.replace("; nothing was written", ""));
+        }
+        planned.push((path, before, after));
+    }
+    out.extend(review(root, &planned, &[]));
+    speculate(root);
+    out
+}
+
 /// A definition's signature: its text up to where the body starts, with
 /// decorators and attributes dropped and whitespace collapsed.
 fn signature(content: &str) -> String {
@@ -1092,7 +1116,15 @@ fn review(root: &Path, files: &[(String, Option<String>, String)], renamed: &[St
         let sites: Vec<String> = String::from_utf8_lossy(&o.stdout)
             .lines()
             .filter(|l| sem_core::parser::plugins::code::language_config_for_content("", l.split(':').next().unwrap_or("")).is_some())
-            .filter(|l| !l.contains(&format!("def {name}")) && !l.contains(&format!("fn {name}")) && !l.contains(&format!("function {name}")) && !l.contains(&format!("class {name}")))
+            .filter(|l| {
+                let text = l.splitn(3, ':').nth(2).unwrap_or("").trim_start();
+                // the definition itself, and mentions in comments, are not uses
+                let defines = [format!("def {name}"), format!("fn {name}"), format!("function {name}"), format!("class {name}"), format!("func {name}("), format!(") {name}(")]
+                    .iter()
+                    .any(|d| text.contains(d.as_str()) && (text.starts_with("def ") || text.starts_with("fn ") || text.starts_with("pub ") || text.starts_with("func ") || text.starts_with("function ") || text.starts_with("class ") || text.starts_with("export ") || text.starts_with("async ")));
+                let comment = ["//", "#", "*", "/*", "--"].iter().any(|c| text.starts_with(c));
+                !defines && !comment
+            })
             .map(|l| {
                 let mut parts = l.splitn(3, ':');
                 let (f, n, t) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or("").trim());

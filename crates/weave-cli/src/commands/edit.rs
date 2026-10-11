@@ -20,6 +20,23 @@ pub(crate) struct Args {
     pub json: bool,
 }
 
+/// `weave edit --review file[=before]...`: review edits another tool made.
+pub(crate) fn review(specs: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let root = weave_core::git::find_repo_root(std::path::Path::new(".")).unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let files: Vec<(String, Option<String>)> = specs
+        .iter()
+        .map(|s| match s.split_once('=') {
+            Some((f, b)) if !b.is_empty() => (f.to_string(), std::fs::read_to_string(b).ok()),
+            Some((f, _)) => (f.to_string(), Some(String::new())),
+            None => (s.clone(), None),
+        })
+        .collect();
+    for line in edit::review_external(&root, &files) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
 pub(crate) fn run(mut a: Args) -> Result<(), Box<dyn std::error::Error>> {
     let edits: Vec<Edit> = match a.file_or_batch.as_deref() {
         Some(s) if s.trim_start().starts_with(['[', '{']) => batch(s)?,

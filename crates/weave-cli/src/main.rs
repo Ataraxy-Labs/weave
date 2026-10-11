@@ -377,6 +377,11 @@ enum Commands {
         /// Report what would change, write nothing
         #[arg(long)]
         dry_run: bool,
+        /// Review edits another tool already made instead of editing: the files
+        /// (each `path` or `path=file-holding-its-content-before`); reports a broken
+        /// parse and stranded callers, and starts the last test command
+        #[arg(long, num_args = 1.., value_name = "FILE[=BEFORE]")]
+        review: Vec<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -669,7 +674,11 @@ fn main() {
                 &host,
             ),
         },
-        Commands::Edit { file, entity, kind, ordinal, content, content_file, old, new, all, after, before, append, delete, allow_signature_change, rename, scope, dry_run, json } => {
+        Commands::Edit { file, entity, kind, ordinal, content, content_file, old, new, all, after, before, append, delete, allow_signature_change, rename, scope, dry_run, json, review } if !review.is_empty() => {
+            let _ = (file, entity, kind, ordinal, content, content_file, old, new, all, after, before, append, delete, allow_signature_change, rename, scope, dry_run, json);
+            commands::edit::review(&review)
+        }
+        Commands::Edit { file, entity, kind, ordinal, content, content_file, old, new, all, after, before, append, delete, allow_signature_change, rename, scope, dry_run, json, .. } => {
             commands::edit::run(commands::edit::Args {
                 file_or_batch: file,
                 single: weave_cli::edit::Edit { file: String::new(), entity: entity.map(|e| weave_cli::edit::EntityRef::from(e.as_str())), op: None, kind, ordinal, content, old, new, all, after, before, append, into: None, delete, allow_signature_change, rename, expect: None, everywhere: false, scope },
