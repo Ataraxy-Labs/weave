@@ -68,6 +68,10 @@ pub struct Edit {
     /// Add `content` at the end of the file.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub append: bool,
+    /// Add `content` as the last member of this class (or other container),
+    /// so a new method needs no anchor and nothing read first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
     /// Delete `entity`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub delete: bool,
@@ -76,6 +80,15 @@ pub struct Edit {
     /// edit meant for one entity silently becomes a different one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_signature_change: bool,
+    /// Rename `entity` (defined in `file`) to this name, and every identifier
+    /// spelled like it in the code files of `scope`. Strings and comments are
+    /// left alone; files without a grammar that mention it are listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename: Option<String>,
+    /// For `rename`: the files to rename in, as git pathspec globs
+    /// (`src/**`, `*.py`). Default: the whole repository.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -113,8 +126,11 @@ struct Plain {
     after: Option<String>,
     before: Option<String>,
     append: bool,
+    into: Option<String>,
     delete: bool,
     allow_signature_change: bool,
+    /// Rename every identifier `.0` to `.1` in this file.
+    rename_ident: Option<(String, String)>,
 }
 
 impl Edit {
@@ -143,8 +159,10 @@ impl Edit {
             after: self.after.clone(),
             before: self.before.clone(),
             append: self.append,
+            into: self.into.clone(),
             delete: self.delete,
             allow_signature_change: self.allow_signature_change,
+            rename_ident: None,
         };
         match self.op.as_deref() {
             None | Some("replace") => {}
@@ -172,6 +190,10 @@ pub struct FileReport {
 pub struct Report {
     pub written: bool,
     pub files: Vec<FileReport>,
+    /// Things the edits did not do that the agent may want to: e.g. files
+    /// without a grammar that still mention a renamed name.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// Why a batch was refused. Nothing was written.
@@ -194,10 +216,31 @@ pub struct EditError {
 /// file parses worse than it did before.
 pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditError> {
     let mut by_file: BTreeMap<String, Vec<(usize, Plain)>> = BTreeMap::new();
+    let mut notes = Vec::new();
     for (index, e) in edits.iter().enumerate() {
         let fail = |message: String| EditError { index, file: e.file.clone(), message, candidates: vec![] };
         let path = normalize(root, &e.file).map_err(fail)?;
         let plain = e.plain().map_err(fail)?;
+        if let Some(to) = &e.rename {
+            let entity = plain.entity.clone().ok_or_else(|| fail("rename needs the entity to rename".into()))?;
+            let from = entity.rsplit(['.', ':']).next().unwrap_or(&entity).to_string();
+            if !is_identifier(to) {
+                return Err(fail(format!("{to:?} is not an identifier")));
+            }
+            let (code, other) = mentions(root, &from, &e.scope);
+            let mut files: Vec<String> = code;
+            if !files.contains(&path) {
+                files.insert(0, path.clone());
+            }
+            for f in files {
+                let p = Plain { rename_ident: Some((from.clone(), to.clone())), entity: (f == path).then(|| entity.clone()), kind: plain.kind.clone(), ..Default::default() };
+                by_file.entry(f).or_default().push((index, p));
+            }
+            if !other.is_empty() {
+                notes.push(format!("{} also appears in files weave cannot parse, left as they are: {}", from, other.join(", ")));
+            }
+            continue;
+        }
         by_file.entry(path).or_default().push((index, plain));
     }
 
@@ -225,7 +268,7 @@ pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditErr
             std::fs::write(&abs, now).map_err(|e| io_error(path, e))?;
         }
     }
-    Ok(Report { written: !dry_run && !reports.is_empty(), files: reports })
+    Ok(Report { written: !dry_run && !reports.is_empty(), files: reports, notes })
 }
 
 /// One file's edits, in order: (path, content on disk, content after).
@@ -316,9 +359,29 @@ fn normalize(root: &Path, file: &str) -> Result<String, String> {
 type Fail = (String, Vec<String>);
 
 fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, Fail> {
-    let anchors = [e.after.is_some(), e.before.is_some(), e.append].iter().filter(|b| **b).count();
+    if let Some((from, to)) = &e.rename_ident {
+        if let Some(name) = &e.entity {
+            find(path, src, name, e.kind.as_deref(), None)?;
+        }
+        return Ok(rename_identifiers(path, src, from, to));
+    }
+    let anchors = [e.after.is_some(), e.before.is_some(), e.append, e.into.is_some()].iter().filter(|b| **b).count();
     if anchors > 1 {
-        return Err(("use only one of after, before and append".into(), vec![]));
+        return Err(("use only one of after, before, append and into".into(), vec![]));
+    }
+    if let Some(container) = &e.into {
+        let content = e.content.as_deref().ok_or_else(|| ("into needs content: the member to add".to_string(), vec![]))?;
+        let parent = find(path, src, container, None, None)?;
+        let all = entities(path, src);
+        let last = all.iter().filter(|m| m.parent_id.as_deref() == Some(parent.id.as_str())).max_by_key(|m| m.end_line);
+        let Some(last) = last else {
+            return Err((format!("{container} has no members to add after; use after or old/new"), vec![]));
+        };
+        let (start, end) = span(src, last);
+        let indent = indent_at(src, start);
+        let gap = gap_before(src, start);
+        let end = line_end(src, end);
+        return Ok(format!("{}{gap}{indent}{}{}", &src[..end], content.trim_matches('\n'), &src[end..]));
     }
     if e.old.is_some() != e.new.is_some() {
         return Err(("old and new go together".into(), vec![]));
@@ -463,6 +526,63 @@ fn replace_text(src: &str, start: usize, end: usize, old: &str, new: &str, all: 
     }
     let replaced = if all { scope.replace(old, new) } else { scope.replacen(old, new, 1) };
     Ok(format!("{}{replaced}{}", &src[..start], &src[end..]))
+}
+
+fn is_identifier(s: &str) -> bool {
+    let mut c = s.chars();
+    c.next().is_some_and(|f| f.is_alphabetic() || f == '_' || f == '$') && c.all(|x| x.is_alphanumeric() || x == '_' || x == '$')
+}
+
+/// Files that mention `word`: (code files weave parses, other files).
+fn mentions(root: &Path, word: &str, scope: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(root).args(["grep", "-l", "-w", "-I", "--untracked", "-F", "-e", word, "--"]);
+    for g in scope {
+        cmd.arg(format!(":(glob){g}"));
+    }
+    let Ok(out) = cmd.output() else { return (vec![], vec![]) };
+    let (mut code, mut other) = (Vec::new(), Vec::new());
+    for f in String::from_utf8_lossy(&out.stdout).lines() {
+        let f = f.to_string();
+        if sem_core::parser::plugins::code::language_config_for_content("", &f).is_some() {
+            code.push(f);
+        } else {
+            other.push(f);
+        }
+    }
+    (code, other)
+}
+
+/// Rename identifier tokens spelled `from`: tree-sitter leaves whose kind is
+/// an identifier, so strings, comments and longer names are never touched.
+fn rename_identifiers(path: &str, src: &str, from: &str, to: &str) -> String {
+    use sem_core::parser::plugins::code::{language_config_for_content, parse_tree};
+    let Some(tree) = language_config_for_content(src, path).and_then(|c| parse_tree(c, src)) else {
+        return src.to_string();
+    };
+    let mut hits = Vec::new();
+    let mut cursor = tree.walk();
+    let mut stack = vec![tree.root_node()];
+    while let Some(n) = stack.pop() {
+        if n.child_count() == 0 {
+            let k = n.kind();
+            if (k.contains("identifier") || k == "name" || k == "constant") && &src[n.byte_range()] == from {
+                hits.push(n.byte_range());
+            }
+            continue;
+        }
+        stack.extend(n.children(&mut cursor));
+    }
+    hits.sort_by_key(|r| r.start);
+    let mut out = String::with_capacity(src.len());
+    let mut at = 0;
+    for r in hits {
+        out.push_str(&src[at..r.start]);
+        out.push_str(to);
+        at = r.end;
+    }
+    out.push_str(&src[at..]);
+    out
 }
 
 /// Every entity in the file, at every depth.
@@ -669,5 +789,28 @@ mod tests {
         assert!(renamed.message.contains("allow_signature_change"), "{}", renamed.message);
         let (out, _) = go(PY, vec![edit(|e| { e.entity = Some(EntityRef::from("a")); e.content = Some("def z():\n    return 1".into()); e.allow_signature_change = true; })]).unwrap();
         assert!(out.contains("def z():"));
+    }
+
+    #[test]
+    fn rename_touches_identifiers_not_strings() {
+        let d = scratch();
+        let git = |a: &[&str]| std::process::Command::new("git").arg("-C").arg(&d).args(a).output().unwrap();
+        git(&["init", "-q"]);
+        std::fs::write(d.join("x.py"), PY).unwrap();
+        std::fs::write(d.join("y.py"), "from x import a\n\nprint(a(), \"a\", aa)  # a\n").unwrap();
+        std::fs::write(d.join("notes.md"), "call a() first\n").unwrap();
+        git(&["add", "."]);
+        let e: Vec<Edit> = serde_json::from_str(r#"[{"file":"x.py","entity":"a","rename":"first"}]"#).unwrap();
+        let r = run(&d, &e, false).unwrap();
+        assert!(std::fs::read_to_string(d.join("x.py")).unwrap().contains("def first():") && std::fs::read_to_string(d.join("x.py")).unwrap().contains("return first()"));
+        assert_eq!(std::fs::read_to_string(d.join("y.py")).unwrap(), "from x import first\n\nprint(first(), \"a\", aa)  # a\n");
+        assert!(r.notes[0].contains("notes.md"), "{:?}", r.notes);
+    }
+
+    #[test]
+    fn into_adds_a_last_member() {
+        let (out, r) = go(PY, vec![edit(|e| { e.into = Some("K".into()); e.content = Some("def z(self):\n        return 0".into()); })]).unwrap();
+        assert!(out.contains("        return 3\n\n    def z(self):\n        return 0\n\n\ndef b"), "{out}");
+        assert_eq!(r.files[0].added, vec!["K.z"]);
     }
 }

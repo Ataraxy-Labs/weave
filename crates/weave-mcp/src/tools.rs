@@ -470,6 +470,9 @@ pub(crate) struct EditSpec {
     #[schemars(description = "Add content as a new entity right before this one")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<String>,
+    #[schemars(description = "Add content as the last member of this class: a new method needs no anchor and no read")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
     #[schemars(description = "Add content at the end of the file")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub append: bool,
@@ -479,6 +482,12 @@ pub(crate) struct EditSpec {
     #[schemars(description = "Optional: let a replace rename the entity or change its kind or visibility (refused otherwise)")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_signature_change: bool,
+    #[schemars(description = "Rename entity (defined in file) to this name, together with every identifier spelled like it in the repository's code: one edit instead of one per call site. Strings and comments are left alone; files without a grammar that mention it are listed in notes")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename: Option<String>,
+    #[schemars(description = "With rename: only in files matching these globs, e.g. [\"src/**\", \"tests/**\"]. Default: the whole repository")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

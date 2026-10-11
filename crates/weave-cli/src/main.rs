@@ -368,6 +368,12 @@ enum Commands {
         /// Let a replace rename the entity or change its kind or visibility
         #[arg(long)]
         allow_signature_change: bool,
+        /// Rename --entity to this name, with every identifier spelled like it in the code. Example: --rename cell_width
+        #[arg(long, requires = "entity")]
+        rename: Option<String>,
+        /// With --rename: only in files matching these globs (repeatable). Example: --scope 'src/**'
+        #[arg(long)]
+        scope: Vec<String>,
         /// Report what would change, write nothing
         #[arg(long)]
         dry_run: bool,
@@ -663,10 +669,10 @@ fn main() {
                 &host,
             ),
         },
-        Commands::Edit { file, entity, kind, ordinal, content, content_file, old, new, all, after, before, append, delete, allow_signature_change, dry_run, json } => {
+        Commands::Edit { file, entity, kind, ordinal, content, content_file, old, new, all, after, before, append, delete, allow_signature_change, rename, scope, dry_run, json } => {
             commands::edit::run(commands::edit::Args {
                 file_or_batch: file,
-                single: weave_cli::edit::Edit { file: String::new(), entity: entity.map(|e| weave_cli::edit::EntityRef::from(e.as_str())), op: None, kind, ordinal, content, old, new, all, after, before, append, delete, allow_signature_change },
+                single: weave_cli::edit::Edit { file: String::new(), entity: entity.map(|e| weave_cli::edit::EntityRef::from(e.as_str())), op: None, kind, ordinal, content, old, new, all, after, before, append, into: None, delete, allow_signature_change, rename, scope },
                 content_file,
                 dry_run,
                 json,
