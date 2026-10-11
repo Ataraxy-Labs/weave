@@ -231,6 +231,7 @@ pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditErr
     let _lock = if dry_run { None } else { lock(root) };
     let mut by_file: BTreeMap<String, Vec<(usize, Plain)>> = BTreeMap::new();
     let mut notes = Vec::new();
+    let mut renamed: Vec<String> = Vec::new();
     for (index, e) in edits.iter().enumerate() {
         let fail = |message: String| EditError { index, file: e.file.clone(), message, candidates: vec![] };
         let path = normalize(root, &e.file).map_err(fail)?;
@@ -241,6 +242,7 @@ pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditErr
             if !is_identifier(to) {
                 return Err(fail(format!("{to:?} is not an identifier")));
             }
+            renamed.push(from.clone());
             let (code, other) = mentions(root, &from, &e.scope);
             let mut files: Vec<String> = code;
             if !files.contains(&path) {
@@ -273,6 +275,29 @@ pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditErr
     let files: Vec<(String, Option<String>, String)> = planned.into_iter().filter_map(Result::ok).filter(|(_, disk, now)| disk.as_deref() != Some(now.as_str())).collect();
 
     let reports: Vec<FileReport> = files.iter().map(|(path, disk, now)| report(path, disk.as_deref(), now)).collect();
+    // what a rename left behind, so the agent need not grep to find out:
+    // the old name in strings, comments and docs, or another entity's name
+    for from in &renamed {
+        let word = |line: &str| line.match_indices(from.as_str()).any(|(i, _)| {
+            let before = line[..i].chars().next_back();
+            let after = line[i + from.len()..].chars().next();
+            !before.is_some_and(|c| c.is_alphanumeric() || c == '_') && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+        });
+        let mut left: Vec<String> = Vec::new();
+        for (path, _, now) in &files {
+            for (i, line) in now.lines().enumerate() {
+                if word(line) {
+                    left.push(format!("{path}:{}: {}", i + 1, line.trim()));
+                }
+            }
+        }
+        if !left.is_empty() {
+            let more = left.len().saturating_sub(12);
+            left.truncate(12);
+            let tail = if more > 0 { format!("\n  ... and {more} more") } else { String::new() };
+            notes.push(format!("{from} is still spelled out here, in strings, comments, docs or as a different entity's name (left as they are):\n  {}{tail}", left.join("\n  ")));
+        }
+    }
     if !dry_run {
         for (path, _, now) in &files {
             let abs = root.join(path);
