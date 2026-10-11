@@ -3,6 +3,7 @@ pub(crate) mod bench;
 pub(crate) mod bench_repo;
 pub(crate) mod check;
 pub(crate) mod claim;
+pub(crate) mod edit;
 pub(crate) mod explain;
 pub(crate) mod land;
 pub(crate) mod patch;

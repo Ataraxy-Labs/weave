@@ -9,6 +9,10 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+### Added
+
+- **`weave edit` and the `weave_edit` MCP tool change code by entity and write it to disk.** An edit names a file and an entity (`Class.method` for a member, or pi-sem's `{name, entity_type, parent_name, ordinal}`) and says what becomes of it: new content, a text replacement inside it that must match once, a new entity before or after it, or deletion. Without an entity, `old`/`new` edits the whole file (imports, configs, any text file), and content alone creates a file. Nothing has to be read first, and other entities in the file are left as they are on disk. A batch is all or nothing; files are planned in parallel; an edit that leaves a file unparseable, or that renames an entity or changes its kind or visibility without `allow_signature_change`, is refused.
+
 ### Changed — seven commands, variations as flags
 
 `weave --help` lists `setup`, `land`, `explain`, `check`, `preview`, `patch`

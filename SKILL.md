@@ -90,7 +90,7 @@ Or any MCP client, via stdio:
 `weave-mcp` discovers the repo from the first tool call's file path, the
 `WEAVE_REPO` env var, or its working directory — set `WEAVE_REPO` if you
 launch it from outside the repo. It lists one tool per command:
-`weave_preview`, `weave_explain`, `weave_check`, `weave_land` and `weave_patch`.
+`weave_edit`, `weave_preview`, `weave_explain`, `weave_check`, `weave_land` and `weave_patch`.
 For callers and blast radius use sem's MCP server. The live claim/release CRDT
 layer (`weave_claim_entity`, `weave_status`, ...) is listed only with
 `WEAVE_EXPERIMENTAL=1`. Each tool's description says when to call it and what an
