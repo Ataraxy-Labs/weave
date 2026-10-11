@@ -482,7 +482,11 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
             let end = line_end(src, end);
             format!("{}{gap}{indent}{body}{}", &src[..end], &src[end..])
         } else {
-            format!("{}{body}{gap}{indent}{}", &src[..start], &src[start..])
+            // before the anchor's doc comments and attributes, not between
+            // them and the definition they document
+            let lead = leading_start(src, start);
+            let at = if lead < start { lead + (src[lead..].len() - src[lead..].trim_start_matches([' ', '\t']).len()) } else { start };
+            format!("{}{body}{gap}{indent}{}", &src[..at], &src[at..])
         };
         let all = entities(path, src);
         let parent = target.parent_id.as_ref().and_then(|id| all.iter().find(|p| &p.id == id)).map(|p| p.name.clone());
@@ -505,8 +509,9 @@ fn apply_one(path: &str, src: &str, exists: bool, e: &Plain) -> Result<String, F
         let target = find(path, src, name, e.kind.as_deref(), e.ordinal)?;
         let (start, end) = span(src, &target);
         check_version(name, &src[start..end], e.expect.as_deref())?;
-        let mut from = line_start(src, start);
-        if src[from..start].trim().is_empty() {
+        let lead = leading_start(src, start);
+        let mut from = line_start(src, lead);
+        if src[from..lead].trim().is_empty() {
             // whole lines: drop the entity's lines and one blank line around it
             let mut to = line_end(src, end);
             if to < src.len() {
@@ -563,14 +568,28 @@ fn fit(content: &str, indent: &str) -> String {
     let base = width(lines[first]);
     let target = indent.len();
     let unit = if indent.contains('\t') { "\t" } else { " " };
-    // relative form: a body line no deeper than where the entity will stand
-    let relative = base == 0 && target > 0 && lines.iter().skip(first + 1).find(|l| !l.trim().is_empty()).is_some_and(|l| width(l) <= target);
+    // Which form, when the first line is not indented: the last line tells.
+    // A closing line (`}`, `)`, `end`) stands at the entity's own depth, so
+    // at the target it is the final form and at zero the relative one; a
+    // body line is in its final form only when deeper than the target.
+    let last = lines.iter().rev().find(|l| !l.trim().is_empty()).copied().unwrap_or("");
+    let closing = matches!(last.trim(), "}" | "};" | "})" | ")" | "]" | "end" | "});" | "},");
+    let relative = base == 0
+        && target > 0
+        && lines.len() > first + 1
+        && if closing { width(last) < target } else { width(last) <= target };
+    // in the final form, lines written at column zero after the first are the
+    // entity's own header (a signature after its doc comment): bring them to
+    // the target depth
+    let final_form = base == 0 && !relative;
     let mut out = Vec::with_capacity(lines.len());
     for (i, l) in lines.iter().enumerate() {
         if i == first {
             out.push(l.trim_start().to_string());
         } else if l.trim().is_empty() {
             out.push(String::new());
+        } else if final_form && width(l) == 0 {
+            out.push(format!("{indent}{}", l.trim_start()));
         } else {
             let w = width(l) as isize;
             // relative: shift by the depth; every line at its final depth:
@@ -841,6 +860,27 @@ fn span(src: &str, e: &SemanticEntity) -> (usize, usize) {
     let s = s + (src[s..].len() - src[s..].trim_start_matches([' ', '\t']).len());
     let t = starts.get(e.end_line).map(|i| i - 1).unwrap_or(src.len());
     (s, t.max(s))
+}
+
+/// Where an entity's leading doc comments, attributes and decorators begin:
+/// the lines directly above `start` (no blank line between) that belong to
+/// it. Inserting before an entity, or deleting it, must not split them off.
+fn leading_start(src: &str, start: usize) -> usize {
+    let mut at = line_start(src, start);
+    if !src[at..start].trim().is_empty() {
+        return start;
+    }
+    while at > 0 {
+        let prev = line_start(src, at - 1);
+        let t = src[prev..at].trim();
+        let owned = t.starts_with("///") || t.starts_with("//!") || t.starts_with("#[") || t.starts_with("#![") || t.starts_with('@')
+            || t.starts_with("/**") || t.starts_with("* ") || t == "*" || t.starts_with("*/") || t.starts_with("//") || t.starts_with("# ") && false;
+        if t.is_empty() || !owned {
+            break;
+        }
+        at = prev;
+    }
+    at
 }
 
 fn line_start(src: &str, at: usize) -> usize {
@@ -1114,5 +1154,20 @@ mod tests {
         let e: Vec<Edit> = serde_json::from_str(r#"[{"file":"x.py","entity":"area","content":"def area(n):\n    return n"}]"#).unwrap();
         let r = run(&d, &e, false).unwrap();
         assert!(r.review.len() == 1 && r.review[0].contains("y.py:3: print(area())") && r.review[0].contains("x.py:6: return area() (file edited in this batch)"), "{:?}", r.review);
+    }
+
+    #[test]
+    fn insert_before_and_delete_keep_doc_comments_with_their_entity() {
+        let rs = "impl V {\n    /// Is it an array?\n    #[inline]\n    pub fn is_array(&self) -> bool {\n        true\n    }\n}\n";
+        let d = scratch();
+        std::fs::write(d.join("v.rs"), rs).unwrap();
+        let e: Vec<Edit> = serde_json::from_str(r#"[{"file":"v.rs","before":"is_array","content":"/// Its length.\npub fn len(&self) -> usize {\n        0\n    }"}]"#).unwrap();
+        run(&d, &e, false).unwrap();
+        let out = std::fs::read_to_string(d.join("v.rs")).unwrap();
+        assert!(out.contains("    /// Its length.\n    pub fn len(&self) -> usize {\n        0\n    }\n\n    /// Is it an array?\n    #[inline]\n    pub fn is_array"), "{out}");
+        let e: Vec<Edit> = serde_json::from_str(r#"[{"file":"v.rs","entity":"is_array","delete":true}]"#).unwrap();
+        run(&d, &e, false).unwrap();
+        let out = std::fs::read_to_string(d.join("v.rs")).unwrap();
+        assert!(!out.contains("Is it an array") && !out.contains("#[inline]") && out.contains("pub fn len"), "{out}");
     }
 }
