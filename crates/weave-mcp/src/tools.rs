@@ -494,6 +494,9 @@ pub(crate) struct EditSpec {
     #[schemars(description = "With rename: only in files matching these globs, e.g. [\"src/**\", \"tests/**\"]. Default: the whole repository")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scope: Vec<String>,
+    #[schemars(description = "Put entity back the way it was at this git ref (e.g. \"HEAD~3\", a branch or commit): only that entity changes, through the same guards as a replace. Refused if the entity did not exist at that ref")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revert: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

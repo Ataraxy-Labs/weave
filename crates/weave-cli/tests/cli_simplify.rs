@@ -315,7 +315,7 @@ fn old_names_note_the_new_spelling_at_a_terminal() {
 }
 
 #[test]
-fn help_lists_the_seven_commands() {
+fn help_lists_the_eight_commands() {
     let out = Command::new(env!("CARGO_BIN_EXE_weave"))
         .arg("--help")
         .output()
@@ -330,7 +330,7 @@ fn help_lists_the_seven_commands() {
         .collect();
     assert_eq!(
         listed,
-        ["setup", "land", "explain", "check", "preview", "patch", "stats", "help"]
+        ["setup", "land", "explain", "check", "edit", "preview", "patch", "stats", "help"]
     );
     assert!(help.contains("QUICKSTART"));
 }

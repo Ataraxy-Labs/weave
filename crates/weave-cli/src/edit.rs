@@ -99,6 +99,12 @@ pub struct Edit {
     /// (`src/**`, `*.py`). Default: the whole repository.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scope: Vec<String>,
+    /// Put `entity` back the way it was at this git ref (`HEAD~3`, a branch,
+    /// a commit): its text at that ref replaces its text now, and nothing else
+    /// in the file moves. A revert is a replace whose content comes from
+    /// history, so every replace guard still applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revert: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -255,7 +261,10 @@ pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditErr
     for (index, e) in edits.iter().enumerate() {
         let fail = |message: String| EditError { index, file: e.file.clone(), message, candidates: vec![] };
         let path = normalize(root, &e.file).map_err(fail)?;
-        let plain = e.plain().map_err(fail)?;
+        let mut plain = e.plain().map_err(fail)?;
+        if let Some(rev) = &e.revert {
+            plain.content = Some(reverted(root, &path, rev, &plain).map_err(|(m, c)| EditError { index, file: e.file.clone(), message: m, candidates: c })?);
+        }
         if let Some(to) = &e.rename {
             let entity = plain.entity.clone().ok_or_else(|| fail("rename needs the entity to rename".into()))?;
             let from = entity.rsplit(['.', ':']).next().unwrap_or(&entity).to_string();
@@ -964,6 +973,36 @@ fn label(e: &SemanticEntity, all: &[SemanticEntity]) -> String {
     format!("{} {parent}{} (line {})", e.entity_type, e.name, e.start_line)
 }
 
+/// The text `plain`'s entity had at git ref `rev`: what a revert writes back.
+///
+/// History is read, never trusted to still line up with the file: the entity
+/// is found by name in the file as it was at `rev`, so a function that moved
+/// within the file since is still reverted to the right text. The result goes
+/// through the ordinary replace path, so the identity guard (same name, kind
+/// and visibility unless `allow_signature_change`), `expect`, the parse guard
+/// and the review of stranded callers all apply to a revert as they would to
+/// a hand-written replace.
+fn reverted(root: &Path, path: &str, rev: &str, plain: &Plain) -> Result<String, Fail> {
+    let name = plain.entity.as_deref().ok_or_else(|| ("revert needs the entity to put back".to_string(), vec![]))?;
+    if plain.content.is_some() || plain.old.is_some() || plain.delete || plain.after.is_some() || plain.before.is_some() || plain.into.is_some() || plain.append {
+        return Err(("revert replaces the entity with its text at that ref: drop content, old/new, delete and the insert options".to_string(), vec![]));
+    }
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["show", &format!("{rev}:./{path}")])
+        .output()
+        .map_err(|e| (format!("could not run git to read {path} at {rev}: {e}"), vec![]))?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        return Err((format!("{path} does not exist at {rev}: {}", why.trim()), vec![]));
+    }
+    let then = String::from_utf8_lossy(&out.stdout);
+    find(path, &then, name, plain.kind.as_deref(), plain.ordinal)
+        .map(|e| e.content)
+        .map_err(|(m, c)| (format!("{name} did not exist in {path} at {rev} ({m})"), c))
+}
+
 fn find(path: &str, src: &str, name: &str, kind: Option<&str>, ordinal: Option<usize>) -> Result<SemanticEntity, Fail> {
     let all = entities(path, src);
     if all.is_empty() {
@@ -1202,6 +1241,31 @@ mod tests {
         }
         let r = run(&d, &edits, false)?;
         Ok((std::fs::read_to_string(d.join("x.py")).unwrap_or_default(), r))
+    }
+
+    /// A revert puts one entity back as it was at a ref and leaves every
+    /// other entity — including ones edited since — as it is now.
+    #[test]
+    fn revert_restores_one_entity_from_history() {
+        let d = scratch();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").arg("-C").arg(&d).args(args).output().unwrap().status.success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(d.join("x.py"), PY).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let now = PY.replace("return 1\n", "return 10\n").replace("return a()", "return a() + 1");
+        std::fs::write(d.join("x.py"), &now).unwrap();
+        let r = run(&d, &[edit(|e| { e.entity = Some(EntityRef::from("a")); e.revert = Some("HEAD".into()); })], false).unwrap();
+        let out = std::fs::read_to_string(d.join("x.py")).unwrap();
+        assert_eq!(out, PY.replace("return a()", "return a() + 1"), "only `a` goes back");
+        assert_eq!(r.files[0].modified, vec!["a"]);
+        let err = run(&d, &[edit(|e| { e.entity = Some(EntityRef::from("nope")); e.revert = Some("HEAD".into()); })], false).unwrap_err();
+        assert!(err.message.contains("did not exist in x.py at HEAD"), "{}", err.message);
     }
 
     #[test]

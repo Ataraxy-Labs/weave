@@ -374,6 +374,9 @@ enum Commands {
         /// With --rename: only in files matching these globs (repeatable). Example: --scope 'src/**'
         #[arg(long)]
         scope: Vec<String>,
+        /// Put --entity back the way it was at this git ref, leaving the rest of the file alone. Example: --revert HEAD~3
+        #[arg(long, requires = "entity")]
+        revert: Option<String>,
         /// Report what would change, write nothing
         #[arg(long)]
         dry_run: bool,
@@ -674,14 +677,14 @@ fn main() {
                 &host,
             ),
         },
-        Commands::Edit { file, entity, kind, ordinal, content, content_file, old, new, all, after, before, append, delete, allow_signature_change, rename, scope, dry_run, json, review } if !review.is_empty() => {
-            let _ = (file, entity, kind, ordinal, content, content_file, old, new, all, after, before, append, delete, allow_signature_change, rename, scope, dry_run, json);
+        Commands::Edit { file, entity, kind, ordinal, content, content_file, old, new, all, after, before, append, delete, allow_signature_change, rename, scope, revert, dry_run, json, review } if !review.is_empty() => {
+            let _ = (file, entity, kind, ordinal, content, content_file, old, new, all, after, before, append, delete, allow_signature_change, rename, scope, revert, dry_run, json);
             commands::edit::review(&review)
         }
-        Commands::Edit { file, entity, kind, ordinal, content, content_file, old, new, all, after, before, append, delete, allow_signature_change, rename, scope, dry_run, json, .. } => {
+        Commands::Edit { file, entity, kind, ordinal, content, content_file, old, new, all, after, before, append, delete, allow_signature_change, rename, scope, revert, dry_run, json, .. } => {
             commands::edit::run(commands::edit::Args {
                 file_or_batch: file,
-                single: weave_cli::edit::Edit { file: String::new(), entity: entity.map(|e| weave_cli::edit::EntityRef::from(e.as_str())), op: None, kind, ordinal, content, old, new, all, after, before, append, into: None, delete, allow_signature_change, rename, expect: None, everywhere: false, scope },
+                single: weave_cli::edit::Edit { file: String::new(), entity: entity.map(|e| weave_cli::edit::EntityRef::from(e.as_str())), op: None, kind, ordinal, content, old, new, all, after, before, append, into: None, delete, allow_signature_change, rename, expect: None, everywhere: false, scope, revert },
                 content_file,
                 dry_run,
                 json,
