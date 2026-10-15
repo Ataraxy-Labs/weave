@@ -94,7 +94,11 @@ pub(crate) fn params(path: &str, name: &str, content: &str) -> Option<Signature>
                 return None
             }
             // TypeScript `x?: T` / `x?` — optional.
-            "js" if a.split(':').next().is_some_and(|n| n.trim_end().ends_with('?')) => {
+            "js" if a
+                .split(':')
+                .next()
+                .is_some_and(|n| n.trim_end().ends_with('?')) =>
+            {
                 return None
             }
             _ => {}
@@ -184,12 +188,7 @@ fn close_of(bytes: &[u8], open: usize) -> Option<usize> {
 /// matching `)`, plus the index of that `)`. `angles` also nests `<…>`, which a
 /// parameter list needs (`HashMap<K, V>`) and a call must not (`a < b, c > d`).
 /// `None` when the list never closes or a string in it never ends.
-fn split_args(
-    content: &str,
-    open: usize,
-    angles: bool,
-    rust: bool,
-) -> Option<(Vec<&str>, usize)> {
+fn split_args(content: &str, open: usize, angles: bool, rust: bool) -> Option<(Vec<&str>, usize)> {
     let bytes = content.as_bytes();
     let mut depth = 0i32;
     let mut seg = open + 1;
@@ -200,9 +199,12 @@ fn split_args(
         match b {
             // A Rust lifetime (`&'a str`) opens no string; a char literal
             // (`'a'`) closes two bytes later.
-            b'\'' if rust
-                && bytes.get(k + 1).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
-                && bytes.get(k + 2) != Some(&b'\'') => {}
+            b'\''
+                if rust
+                    && bytes
+                        .get(k + 1)
+                        .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+                    && bytes.get(k + 2) != Some(&b'\'') => {}
             b'"' | b'\'' | b'`' => {
                 k = string_end(bytes, k)?;
             }
@@ -284,7 +286,10 @@ pub(crate) fn call_sites(path: &str, content: &str, name: &str) -> Vec<CallSite>
                 .is_none_or(|c| !ident(c) && c != '.');
             // Inside a string literal on this line: an odd number of quotes
             // before it. Not a call.
-            let quotes = line[..i].bytes().filter(|b| matches!(b, b'"' | b'\'' | b'`')).count();
+            let quotes = line[..i]
+                .bytes()
+                .filter(|b| matches!(b, b'"' | b'\'' | b'`'))
+                .count();
             let after = i + name.len();
             let rest = &line[after..];
             let paren = rest.len() - rest.trim_start().len();
@@ -345,11 +350,35 @@ mod tests {
         assert_eq!(p("a.py", "f", "def f():\n    pass\n"), Some(0));
         assert_eq!(p("a.py", "f", "def f(a, b=1):\n    pass\n"), None);
         assert_eq!(p("a.py", "f", "def f(a, *rest):\n    pass\n"), None);
-        assert_eq!(p("a.ts", "f", "export function f(a: Map<K, V>, b?: number) {}"), None);
-        assert_eq!(p("a.ts", "f", "const f = async (a: Map<K, V>, b: number) => a;"), Some(2));
-        assert_eq!(p("a.rs", "f", "pub fn f<T: Fn(u8, u8) -> u8>(a: T, b: Vec<(u8, u8)>) {}"), Some(2));
+        assert_eq!(
+            p(
+                "a.ts",
+                "f",
+                "export function f(a: Map<K, V>, b?: number) {}"
+            ),
+            None
+        );
+        assert_eq!(
+            p(
+                "a.ts",
+                "f",
+                "const f = async (a: Map<K, V>, b: number) => a;"
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            p(
+                "a.rs",
+                "f",
+                "pub fn f<T: Fn(u8, u8) -> u8>(a: T, b: Vec<(u8, u8)>) {}"
+            ),
+            Some(2)
+        );
         assert_eq!(p("a.go", "f", "func f(a, b int, c ...string) {}"), None);
-        assert_eq!(p("a.go", "f", "func f(a, b int) error { return nil }"), Some(2));
+        assert_eq!(
+            p("a.go", "f", "func f(a, b int) error { return nil }"),
+            Some(2)
+        );
         assert_eq!(p("a.rb", "f", "def f(a)\nend\n"), None);
     }
 

@@ -22,7 +22,8 @@ pub(crate) struct Args {
 
 /// `weave edit --review file[=before]...`: review edits another tool made.
 pub(crate) fn review(specs: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let root = weave_core::git::find_repo_root(std::path::Path::new(".")).unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let root = weave_core::git::find_repo_root(std::path::Path::new("."))
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let files: Vec<(String, Option<String>)> = specs
         .iter()
         .map(|s| match s.split_once('=') {
@@ -58,9 +59,12 @@ pub(crate) fn run(mut a: Args) -> Result<(), Box<dyn std::error::Error>> {
             }
             vec![a.single]
         }
-        None => return Err("name a file, or pass a JSON batch (or - to read one from stdin)".into()),
+        None => {
+            return Err("name a file, or pass a JSON batch (or - to read one from stdin)".into())
+        }
     };
-    let root = weave_core::git::find_repo_root(std::path::Path::new(".")).unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let root = weave_core::git::find_repo_root(std::path::Path::new("."))
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
     match edit::run(&root, &edits, a.dry_run) {
         Ok(r) => {
             if r.written {
@@ -73,12 +77,20 @@ pub(crate) fn run(mut a: Args) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 for f in &r.files {
                     let mut parts = Vec::new();
-                    for (verb, names) in [("added", &f.added), ("modified", &f.modified), ("deleted", &f.deleted)] {
+                    for (verb, names) in [
+                        ("added", &f.added),
+                        ("modified", &f.modified),
+                        ("deleted", &f.deleted),
+                    ] {
                         if !names.is_empty() {
                             parts.push(format!("{verb} {}", names.join(", ")));
                         }
                     }
-                    let what = if parts.is_empty() { "changed".to_string() } else { parts.join("; ") };
+                    let what = if parts.is_empty() {
+                        "changed".to_string()
+                    } else {
+                        parts.join("; ")
+                    };
                     let created = if f.created { " (new file)" } else { "" };
                     let dry = if a.dry_run { " [dry run]" } else { "" };
                     println!("{}{created}: {what}{dry}", f.file);
@@ -88,7 +100,12 @@ pub(crate) fn run(mut a: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => {
             if a.json {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "written": false, "error": e }))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({ "written": false, "error": e })
+                    )?
+                );
             } else {
                 eprintln!("weave edit: {e}");
                 for c in &e.candidates {

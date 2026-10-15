@@ -816,7 +816,10 @@ mod tests {
         assert_eq!(f.ours.as_deref(), Some("def fetch_user(uid, tenant)"));
         let s = f.suggestion.as_ref().unwrap();
         assert!(s.contains("line 2: `fetch_user(1)`"), "{s}");
-        assert!(!s.contains("fetch_user(1, 2)"), "a call already at the new arity is fine");
+        assert!(
+            !s.contains("fetch_user(1, 2)"),
+            "a call already at the new arity is fine"
+        );
     }
 
     /// A default makes the old call still correct: refuse to count it.
@@ -827,7 +830,10 @@ mod tests {
             ("b.py", "def report():\n    return 1\n"),
         ]);
         let ours = tree(&[
-            ("a.py", "def fetch_user(uid, tenant=None):\n    return uid\n"),
+            (
+                "a.py",
+                "def fetch_user(uid, tenant=None):\n    return uid\n",
+            ),
             ("b.py", "def report():\n    return 1\n"),
         ]);
         let theirs = tree(&[

@@ -1927,22 +1927,31 @@ impl WeaveServer {
         let edits: Vec<weave_cli::edit::Edit> = serde_json::to_value(&params.edits)
             .and_then(serde_json::from_value)
             .map_err(|e| rmcp::ErrorData::invalid_params(format!("edits: {e}"), None))?;
-        let out = match weave_cli::edit::run(&ctx.repo_root, &edits, params.dry_run.unwrap_or(false)) {
-            Ok(mut r) => {
-                match params.then.as_deref().filter(|c| !c.trim().is_empty() && r.written) {
-                    // the edit's own check is the run: no speculative one beside it
-                    Some(cmd) => {
-                        let root = ctx.repo_root.clone();
-                        let cmd = cmd.to_string();
-                        r.then = tokio::task::spawn_blocking(move || weave_cli::edit::then(&root, &cmd)).await.ok();
+        let out =
+            match weave_cli::edit::run(&ctx.repo_root, &edits, params.dry_run.unwrap_or(false)) {
+                Ok(mut r) => {
+                    match params
+                        .then
+                        .as_deref()
+                        .filter(|c| !c.trim().is_empty() && r.written)
+                    {
+                        // the edit's own check is the run: no speculative one beside it
+                        Some(cmd) => {
+                            let root = ctx.repo_root.clone();
+                            let cmd = cmd.to_string();
+                            r.then = tokio::task::spawn_blocking(move || {
+                                weave_cli::edit::then(&root, &cmd)
+                            })
+                            .await
+                            .ok();
+                        }
+                        None if r.written => weave_cli::edit::speculate(&ctx.repo_root),
+                        None => {}
                     }
-                    None if r.written => weave_cli::edit::speculate(&ctx.repo_root),
-                    None => {}
+                    serde_json::to_value(&r).unwrap_or_default()
                 }
-                serde_json::to_value(&r).unwrap_or_default()
-            }
-            Err(e) => serde_json::json!({ "written": false, "error": e }),
-        };
+                Err(e) => serde_json::json!({ "written": false, "error": e }),
+            };
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
