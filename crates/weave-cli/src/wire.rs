@@ -19,6 +19,9 @@ use weave_core::conflict::{ConflictKind, EntityConflict};
 /// The version a document that uses a 1.1 field must declare.
 pub const SCHEMA_VERSION_1_1: &str = "1.1.0";
 
+/// The version a document that carries an `ARITY` finding must declare.
+pub const SCHEMA_VERSION_1_4: &str = "1.4.0";
+
 // ---------------------------------------------------------------------------
 // Conflict repair lines — one owner for both producers
 // ---------------------------------------------------------------------------

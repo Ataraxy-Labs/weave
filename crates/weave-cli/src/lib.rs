@@ -6,6 +6,7 @@
 //! cannot call into a binary. They therefore live in a library target rather
 //! than under `src/commands/`, which stays the thin argument-parsing shell.
 
+pub(crate) mod arity;
 pub mod edit;
 pub mod gitscan;
 pub mod land;

@@ -895,7 +895,7 @@ mod tests {
         "moved",
     ];
 
-    const FINDING_CLASSES: [&str; 9] = [
+    const FINDING_CLASSES: [&str; 10] = [
         "CONFLICT",
         "LOSS",
         "DUP",
@@ -905,6 +905,7 @@ mod tests {
         "INTERLEAVE",
         "ASYM",
         "COOCCUPANCY",
+        "ARITY",
     ];
 
     /// Every ResolutionStrategy variant, exhaustively. If weave-core adds one,

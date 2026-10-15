@@ -1341,7 +1341,7 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Is my conflict resolution right? Call after resolving a merge, before committing. With no arguments, verifies the working tree against the merge in progress (HEAD x MERGE_HEAD): markers left behind, lines both sides kept that went missing, anything stated more often than either side stated it, plus repo-wide cross-file breakage (DANGLING, SHADOW) a per-file merge driver cannot see, like a rename in a.py whose surviving caller lives in b.py. `resolution.files` holds one verdict per file; `results` holds the cross-file weave-findings documents (scope=repo, schema 1.1.0). Pass base/ours/theirs to run only the cross-file pass between two revisions before merging. `files_with_findings: 0` means nothing cross-file broke, not that nothing was checked."
+        description = "Is my conflict resolution right? Call after resolving a merge, before committing. With no arguments, verifies the working tree against the merge in progress (HEAD x MERGE_HEAD): markers left behind, lines both sides kept that went missing, anything stated more often than either side stated it, plus repo-wide cross-file breakage (DANGLING, SHADOW, ARITY) a per-file merge driver cannot see, like a rename in a.py whose surviving caller lives in b.py, or a parameter added in a.py while b.py still calls with the old count. `resolution.files` holds one verdict per file; `results` holds the cross-file weave-findings documents (scope=repo, schema 1.1.0). Pass base/ours/theirs to run only the cross-file pass between two revisions before merging. `files_with_findings: 0` means nothing cross-file broke, not that nothing was checked."
     )]
     async fn weave_check(
         &self,
