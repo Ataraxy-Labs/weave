@@ -153,6 +153,47 @@ pub(crate) fn union(
     union_with(base, ours, theirs, path, l, &scope)
 }
 
+/// The union, admitted only where no top-level statement was rewritten by both
+/// sides: every version has the same statements, of the same kinds, in the
+/// same order, and each one is changed by at most one side. That is the shape
+/// of two edits to two different statements that diff3 refuses only because
+/// the statements sit on neighbouring lines (#187), and the one shape where
+/// composing them needs no reading of what the statements mean.
+///
+/// Top-level code that is not an entity is merged under the file's own rules
+/// (`determinate`), which are stricter than a body's about a collection both
+/// sides grew; so a statement both sides touched is never descended into here,
+/// and the conflict stays for those rules to decide.
+pub(crate) fn disjoint_statements(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    path: &str,
+    host: &Host,
+) -> Option<String> {
+    lang(path)?;
+    let trees: Vec<Tree> = [base, ours, theirs]
+        .iter()
+        .map(|t| parse(path, t))
+        .collect::<Option<Vec<_>>>()?;
+    let srcs = [base, ours, theirs];
+    let tops: [Vec<Node>; 3] = std::array::from_fn(|v| kids(trees[v].root_node()));
+    if tops[0].is_empty() || tops[0].len() != tops[1].len() || tops[0].len() != tops[2].len() {
+        return why(|| "the top-level statements differ in number".into());
+    }
+    for i in 0..tops[0].len() {
+        let k: [&str; 3] = std::array::from_fn(|v| tops[v][i].kind());
+        if k[0] != k[1] || k[0] != k[2] {
+            return why(|| "a top-level statement changed kind".into());
+        }
+        let t: [&str; 3] = std::array::from_fn(|v| &srcs[v][tops[v][i].byte_range()]);
+        if t[1] != t[0] && t[2] != t[0] && t[1] != t[2] {
+            return why(|| "both sides rewrote one top-level statement".into());
+        }
+    }
+    union(base, ours, theirs, path, host)
+}
+
 fn union_with(
     base: &str,
     ours: &str,
