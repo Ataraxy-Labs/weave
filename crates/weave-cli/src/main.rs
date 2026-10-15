@@ -319,6 +319,76 @@ enum Commands {
         #[arg(long, default_value_t = 7200, value_name = "SECS")]
         queue_timeout: u64,
     },
+    /// Change code by entity: replace, edit inside, add, delete, or create a file
+    ///
+    /// Name a function, class or method and say what becomes of it. The edit is
+    /// resolved against the file as it is now, so nothing needs reading first and
+    /// no other entity is touched. A JSON batch is all or nothing.
+    #[command(display_order = 5)]
+    Edit {
+        /// The file to edit, or a JSON batch of edits (`-` reads one from stdin).
+        /// Example: weave edit '[{"file":"a.py","entity":"f","old":"1","new":"2"}]'
+        file: Option<String>,
+        /// The entity: a function, class, method or key; `Class.method` for a member. Example: --entity Parser.parse
+        #[arg(long)]
+        entity: Option<String>,
+        /// The entity's kind, when names collide. Example: --kind method
+        #[arg(long)]
+        kind: Option<String>,
+        /// Which match, 0-based, when several remain. Example: --ordinal 1
+        #[arg(long)]
+        ordinal: Option<usize>,
+        /// New source: the entity's whole new text, the entity to add, or a new file. Example: --content 'def f(): ...'
+        #[arg(long, conflicts_with = "content_file")]
+        content: Option<String>,
+        /// Read the new source from a file (`-`: stdin). Example: --content-file new.py
+        #[arg(long)]
+        content_file: Option<String>,
+        /// Text to replace, inside --entity or else in the whole file; must match once. Example: --old 'retries = 3'
+        #[arg(long, requires = "new")]
+        old: Option<String>,
+        /// What --old becomes. Example: --new 'retries = 5'
+        #[arg(long, requires = "old")]
+        new: Option<String>,
+        /// Replace every match of --old
+        #[arg(long)]
+        all: bool,
+        /// Add the new entity after this one. Example: --after parse
+        #[arg(long)]
+        after: Option<String>,
+        /// Add the new entity before this one. Example: --before parse
+        #[arg(long)]
+        before: Option<String>,
+        /// Add the new entity at the end of the file
+        #[arg(long)]
+        append: bool,
+        /// Delete --entity
+        #[arg(long)]
+        delete: bool,
+        /// Let a replace rename the entity or change its kind or visibility
+        #[arg(long)]
+        allow_signature_change: bool,
+        /// Rename --entity to this name, with every identifier spelled like it in the code. Example: --rename cell_width
+        #[arg(long, requires = "entity")]
+        rename: Option<String>,
+        /// With --rename: only in files matching these globs (repeatable). Example: --scope 'src/**'
+        #[arg(long)]
+        scope: Vec<String>,
+        /// Put --entity back the way it was at this git ref, leaving the rest of the file alone. Example: --revert HEAD~3
+        #[arg(long, requires = "entity")]
+        revert: Option<String>,
+        /// Report what would change, write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Review edits another tool already made instead of editing: the files
+        /// (each `path` or `path=file-holding-its-content-before`); reports a broken
+        /// parse and stranded callers, and starts the last test command
+        #[arg(long, num_args = 1.., value_name = "FILE[=BEFORE]")]
+        review: Vec<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Apply an edit to a file that drifted: typed entity ops, merged three-way
     ///
     /// Typed entity ops: the write side of the agent contract. Extract the ops
@@ -607,6 +677,100 @@ fn main() {
                 &host,
             ),
         },
+        Commands::Edit {
+            file,
+            entity,
+            kind,
+            ordinal,
+            content,
+            content_file,
+            old,
+            new,
+            all,
+            after,
+            before,
+            append,
+            delete,
+            allow_signature_change,
+            rename,
+            scope,
+            revert,
+            dry_run,
+            json,
+            review,
+        } if !review.is_empty() => {
+            let _ = (
+                file,
+                entity,
+                kind,
+                ordinal,
+                content,
+                content_file,
+                old,
+                new,
+                all,
+                after,
+                before,
+                append,
+                delete,
+                allow_signature_change,
+                rename,
+                scope,
+                revert,
+                dry_run,
+                json,
+            );
+            commands::edit::review(&review)
+        }
+        Commands::Edit {
+            file,
+            entity,
+            kind,
+            ordinal,
+            content,
+            content_file,
+            old,
+            new,
+            all,
+            after,
+            before,
+            append,
+            delete,
+            allow_signature_change,
+            rename,
+            scope,
+            revert,
+            dry_run,
+            json,
+            ..
+        } => commands::edit::run(commands::edit::Args {
+            file_or_batch: file,
+            single: weave_cli::edit::Edit {
+                file: String::new(),
+                entity: entity.map(|e| weave_cli::edit::EntityRef::from(e.as_str())),
+                op: None,
+                kind,
+                ordinal,
+                content,
+                old,
+                new,
+                all,
+                after,
+                before,
+                append,
+                into: None,
+                delete,
+                allow_signature_change,
+                rename,
+                expect: None,
+                everywhere: false,
+                scope,
+                revert,
+            },
+            content_file,
+            dry_run,
+            json,
+        }),
         Commands::Patch { ref command } => match command {
             PatchCommands::Extract {
                 ref base_file,

@@ -89,6 +89,7 @@ Cargo workspace with 6 crates:
 ## MCP Tools
 
 Listed, one per weave command:
+- weave_edit: change code by entity, written to disk; edits=[{file, entity, op|content|old/new|after|before|append|delete}], all or nothing, refuses edits that break the parse or rename an entity (allow_signature_change)
 - weave_preview: dry-run a merge of two branches; detail summary (default) | findings | entities
 - weave_explain: why a file conflicted, from the merge's three stages; markers=true summarizes weave markers in the file
 - weave_check: verify the resolution in the working tree plus cross-file breakage (DANGLING, SHADOW); base/ours/theirs for two revisions

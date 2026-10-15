@@ -1341,7 +1341,7 @@ impl WeaveServer {
     }
 
     #[tool(
-        description = "Is my conflict resolution right? Call after resolving a merge, before committing. With no arguments, verifies the working tree against the merge in progress (HEAD x MERGE_HEAD): markers left behind, lines both sides kept that went missing, anything stated more often than either side stated it, plus repo-wide cross-file breakage (DANGLING, SHADOW) a per-file merge driver cannot see, like a rename in a.py whose surviving caller lives in b.py. `resolution.files` holds one verdict per file; `results` holds the cross-file weave-findings documents (scope=repo, schema 1.1.0). Pass base/ours/theirs to run only the cross-file pass between two revisions before merging. `files_with_findings: 0` means nothing cross-file broke, not that nothing was checked."
+        description = "Is my conflict resolution right? Call after resolving a merge, before committing. With no arguments, verifies the working tree against the merge in progress (HEAD x MERGE_HEAD): markers left behind, lines both sides kept that went missing, anything stated more often than either side stated it, plus repo-wide cross-file breakage (DANGLING, SHADOW, ARITY) a per-file merge driver cannot see, like a rename in a.py whose surviving caller lives in b.py, or a parameter added in a.py while b.py still calls with the old count. `resolution.files` holds one verdict per file; `results` holds the cross-file weave-findings documents (scope=repo, schema 1.1.0). Pass base/ours/theirs to run only the cross-file pass between two revisions before merging. `files_with_findings: 0` means nothing cross-file broke, not that nothing was checked."
     )]
     async fn weave_check(
         &self,
@@ -1916,6 +1916,48 @@ impl WeaveServer {
     }
 
     #[tool(
+        description = "Change code by entity, written straight to disk: no Read first. Each edit names a file and an entity (function, class, method or key; `Class.method` for a member) and one action: content replaces the entity; old/new replaces text inside it (must match once); after/before/append with content adds a new entity, into: \"Class\" adds it as the class's last member; delete removes it; rename renames it and every reference across the repository in one edit. Without entity, old/new edits the whole file (imports, configs, any text file), and content alone creates a file that does not exist. Resolved against the file as it is now, so other agents' changes elsewhere are kept. A batch is all or nothing. Returns which entities were added, modified and deleted. then: \"<test command>\" runs it right after writing and returns its result in this response (edit and check in one call). Edits are refused, never half-applied, so a dry run first is rarely worth a turn. Use it for every code change instead of reading the file and editing lines."
+    )]
+    async fn weave_edit(
+        &self,
+        Parameters(params): Parameters<EditParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let first = params.edits.first().map(|e| e.file.clone());
+        let ctx = self.get_context(first.as_deref()).await?;
+        let edits: Vec<weave_cli::edit::Edit> = serde_json::to_value(&params.edits)
+            .and_then(serde_json::from_value)
+            .map_err(|e| rmcp::ErrorData::invalid_params(format!("edits: {e}"), None))?;
+        let out =
+            match weave_cli::edit::run(&ctx.repo_root, &edits, params.dry_run.unwrap_or(false)) {
+                Ok(mut r) => {
+                    match params
+                        .then
+                        .as_deref()
+                        .filter(|c| !c.trim().is_empty() && r.written)
+                    {
+                        // the edit's own check is the run: no speculative one beside it
+                        Some(cmd) => {
+                            let root = ctx.repo_root.clone();
+                            let cmd = cmd.to_string();
+                            r.then = tokio::task::spawn_blocking(move || {
+                                weave_cli::edit::then(&root, &cmd)
+                            })
+                            .await
+                            .ok();
+                        }
+                        None if r.written => weave_cli::edit::speculate(&ctx.repo_root),
+                        None => {}
+                    }
+                    serde_json::to_value(&r).unwrap_or_default()
+                }
+                Err(e) => serde_json::json!({ "written": false, "error": e }),
+            };
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&out).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(
         description = "Typed entity patches: carry an edit to a file that may have drifted, as a three-way entity merge instead of a fuzzy text patch. Without ops: extract the ops that turn base_content into file_path's content (or changed_content). With ops: apply them to file_path; a target that drifted since base is merged entity by entity, and conflicts come back as markers plus findings. Returns the content; write=true writes a clean result to file_path. Use instead of re-applying a stale edit by hand."
     )]
     async fn weave_patch(
@@ -1994,8 +2036,9 @@ impl ServerHandler for WeaveServer {
 
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Weave: entity-level semantic merge for Git. One tool per `weave` command: \
-                 weave_preview (dry-run a merge of two branches: go/no-go, findings, or per-entity \
+            "Weave: entity-level edits and semantic merge for Git. One tool per `weave` command: \
+                 weave_edit (change code by entity, written to disk: replace, edit inside, add, \
+                 delete, create a file), weave_preview (dry-run a merge of two branches: go/no-go, findings, or per-entity \
                  strategy), weave_explain (why a file conflicted), weave_check (is the resolution \
                  right, plus cross-file breakage a per-file merge can't see), weave_land (label and \
                  land a stopped merge: PROVEN / VERIFIED / REFUSED), weave_patch (carry an edit to a \
@@ -2007,7 +2050,8 @@ impl ServerHandler for WeaveServer {
 
 /// The tools `tools/list` shows: one per `weave` command. Every other tool
 /// stays callable by name for older clients, but is not listed.
-pub(crate) const LISTED_TOOLS: [&str; 5] = [
+pub(crate) const LISTED_TOOLS: [&str; 6] = [
+    "weave_edit",
     "weave_preview",
     "weave_explain",
     "weave_check",
@@ -2341,7 +2385,7 @@ mod description_tests {
         let names: Vec<String> = catalog().into_iter().map(|(n, _)| n).collect();
         assert_eq!(
             names.len(),
-            26,
+            27,
             "tool count changed ({names:?}) — update SKILL.md/README/docs/llms.txt in the same commit"
         );
     }

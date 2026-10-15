@@ -20,7 +20,9 @@
 //!
 //! What it does **not** do: it never resolves, rewrites or merges anything. It
 //! is a read-side pass and emits findings only — `DANGLING` (a use lost its
-//! definition) and `SHADOW` (a use may rebind to a different definition).
+//! definition), `SHADOW` (a use may rebind to a different definition) and
+//! `ARITY` (a use still passes the argument count a definition no longer
+//! takes; see [`crate::arity`]).
 //! `DUP` and `ORDER` need a module/import model this pass does not have,
 //! so it does not emit them.
 
@@ -30,8 +32,12 @@ use sem_core::model::change::ChangeType;
 use sem_core::model::entity::SemanticEntity;
 use sem_core::model::identity::match_entities;
 
+use crate::arity::{self, CallSite, Signature};
 use crate::parsers::entities_of;
-use crate::wire::{Bindings, Finding, Findings, Reference, RelatedRef, Rename, SCHEMA_VERSION_1_1};
+use crate::wire::{
+    Bindings, Finding, Findings, Reference, RelatedRef, Rename, SCHEMA_VERSION_1_1,
+    SCHEMA_VERSION_1_4,
+};
 use weave_core::binding::{has_call_reference, has_definition};
 
 /// One version of the repository: path → content. Only files that survived
@@ -65,6 +71,9 @@ impl Side {
 struct Def {
     name: String,
     entity_type: String,
+    /// The exact parameter count and signature line, for a function in a
+    /// language [`arity`] reads; `None` whenever the count is not exact.
+    signature: Option<Signature>,
 }
 
 /// Per-file, per-version def sets plus the raw text (the text is what the
@@ -108,12 +117,15 @@ impl FileVersions {
     }
 }
 
-fn defs_of(entities: &[SemanticEntity]) -> Vec<Def> {
+fn defs_of(entities: &[SemanticEntity], path: &str) -> Vec<Def> {
     entities
         .iter()
         .map(|e| Def {
             name: e.name.clone(),
             entity_type: e.entity_type.clone(),
+            signature: (e.entity_type == "function")
+                .then(|| arity::params(path, &e.name, &e.content))
+                .flatten(),
         })
         .collect()
 }
@@ -171,9 +183,9 @@ pub fn check(base: &Tree, ours: &Tree, theirs: &Tree) -> Vec<Findings> {
         let theirs_e = entities_of(path, fv.theirs.as_deref().unwrap_or(""));
         fv.ours_renames = rename_map(&base_e, &ours_e, path);
         fv.theirs_renames = rename_map(&base_e, &theirs_e, path);
-        fv.base_defs = defs_of(&base_e);
-        fv.ours_defs = defs_of(&ours_e);
-        fv.theirs_defs = defs_of(&theirs_e);
+        fv.base_defs = defs_of(&base_e, path);
+        fv.ours_defs = defs_of(&ours_e, path);
+        fv.theirs_defs = defs_of(&theirs_e, path);
         files.insert(path.clone(), fv);
     }
 
@@ -331,7 +343,136 @@ pub fn check(base: &Tree, ours: &Tree, theirs: &Tree) -> Vec<Findings> {
         }
     }
 
+    // ---- 5. ARITY: one side changed how many parameters a function takes, and
+    //         the other side's changed code calls it with the OLD count from a
+    //         file the first side never touched. The name still binds, so
+    //         DANGLING is silent; the call is wrong all the same.
+    //
+    // Every condition below exists to keep the count exact and the binding
+    // unambiguous, because a wrong ARITY finding would send an agent to "fix"
+    // a correct call:
+    //   * the definition file was changed by the actor ONLY, so its merged
+    //     version is the actor's and the new count is the one that ships;
+    //   * the name is defined in exactly one file of the base repo, so a bare
+    //     call cannot be reaching some other definition;
+    //   * both counts are exact (no defaults, variadics, receivers — see
+    //     [`arity::params`]) and differ;
+    //   * the caller file is in the same language, was changed by the other
+    //     side, does not define the name itself, and the call's own argument
+    //     count is exact and equals the OLD count.
+    let mut defined_in: BTreeMap<&str, usize> = BTreeMap::new();
+    for fv in files.values() {
+        let mut names: HashSet<&str> = HashSet::new();
+        for d in &fv.base_defs {
+            names.insert(d.name.as_str());
+        }
+        for n in names {
+            *defined_in.entry(n).or_default() += 1;
+        }
+    }
+    for actor in [Side::Ours, Side::Theirs] {
+        let other = actor.other();
+        for (path, fv) in &files {
+            if !fv.touched(actor) || fv.touched(other) || fv.base.is_none() {
+                continue;
+            }
+            for d in fv.defs(actor) {
+                let Some(new) = &d.signature else { continue };
+                if defined_in.get(d.name.as_str()) != Some(&1) {
+                    continue;
+                }
+                let Some(old) = fv
+                    .base_defs
+                    .iter()
+                    .find(|b| b.name == d.name)
+                    .and_then(|b| b.signature.as_ref())
+                else {
+                    continue;
+                };
+                if old.params == new.params {
+                    continue;
+                }
+                for (other_path, other_fv) in &files {
+                    if other_path == path
+                        || !other_fv.touched(other)
+                        || !arity::same_family(path, other_path)
+                    {
+                        continue;
+                    }
+                    let Some(content) = other_fv.version(other) else {
+                        continue;
+                    };
+                    if has_definition(content, &d.name) {
+                        continue;
+                    }
+                    let stale: Vec<CallSite> = arity::call_sites(other_path, content, &d.name)
+                        .into_iter()
+                        .filter(|c| c.args == Some(old.params))
+                        .collect();
+                    if stale.is_empty() {
+                        continue;
+                    }
+                    out.push(
+                        other_path,
+                        arity_finding(&d.name, &d.entity_type, actor, path, old, new, &stale),
+                        None,
+                        Reference {
+                            entity: d.name.clone(),
+                            defined_in_output: false,
+                            referenced_in_output: true,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     out.into_documents()
+}
+
+fn arity_finding(
+    name: &str,
+    entity_type: &str,
+    actor: Side,
+    defining_file: &str,
+    old: &Signature,
+    new: &Signature,
+    stale: &[CallSite],
+) -> Finding {
+    let mut f = Finding::derived("ARITY", name, entity_type);
+    f.side = Some(actor.wire().to_string());
+    // Both counts are exact and the name binds to one definition repo-wide;
+    // what weave cannot see is a runtime that tolerates the mismatch.
+    f.confidence = Some("high".to_string());
+    // The texts are the signature before and after, on the sides that wrote
+    // them: base is the old one, the actor's side is the new one.
+    f.base = Some(old.text.clone());
+    match actor {
+        Side::Ours => f.ours = Some(new.text.clone()),
+        Side::Theirs => f.theirs = Some(new.text.clone()),
+    }
+    let sites = stale
+        .iter()
+        .map(|c| format!("line {}: `{}`", c.line, c.text))
+        .collect::<Vec<_>>()
+        .join("; ");
+    f.suggestion = Some(format!(
+        "{} changed `{name}` in `{defining_file}` from {} to {} parameter(s) (`{}` → `{}`), \
+         but this file still calls it with {}: {sites}. Update these calls to the new \
+         signature.",
+        actor.wire(),
+        old.params,
+        new.params,
+        old.text,
+        new.text,
+        old.params,
+    ));
+    f.related = vec![RelatedRef {
+        entity: name.to_string(),
+        entity_type: Some(entity_type.to_string()),
+        file: Some(defining_file.to_string()),
+    }];
+    f
 }
 
 fn dangling_finding(
@@ -431,13 +572,24 @@ impl FindingSink {
                 // A repo-scope document never describes a text merge, so
                 // `clean` is about markers and is vacuously true; the whole
                 // point of the schema is that clean and safe differ.
-                let confidence = if parts.findings.iter().any(|f| f.class == "DANGLING") {
+                let confidence = if parts
+                    .findings
+                    .iter()
+                    .any(|f| f.class == "DANGLING" || f.class == "ARITY")
+                {
                     "low"
                 } else {
                     "medium"
                 };
+                // A producer declares the lowest version whose vocabulary it
+                // uses: ARITY is 1.4.0, everything else here is 1.1.0.
+                let version = if parts.findings.iter().any(|f| f.class == "ARITY") {
+                    SCHEMA_VERSION_1_4
+                } else {
+                    SCHEMA_VERSION_1_1
+                };
                 Findings {
-                    schema_version: SCHEMA_VERSION_1_1.to_string(),
+                    schema_version: version.to_string(),
                     file,
                     scope: Some("repo".to_string()),
                     clean: true,
@@ -632,6 +784,63 @@ mod tests {
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].findings[0].class, "SHADOW");
         assert_eq!(docs[0].findings[0].entity, "render");
+    }
+
+    /// The signature blind spot: the name still binds, so DANGLING is silent,
+    /// and the call passes the argument count the definition no longer takes.
+    #[test]
+    fn a_parameter_added_in_one_file_flags_an_old_arity_call_in_another() {
+        let base = tree(&[
+            ("a.py", "def fetch_user(uid):\n    return uid\n"),
+            ("b.py", "def report():\n    return 1\n"),
+        ]);
+        let ours = tree(&[
+            ("a.py", "def fetch_user(uid, tenant):\n    return uid\n"),
+            ("b.py", "def report():\n    return 1\n"),
+        ]);
+        let theirs = tree(&[
+            ("a.py", "def fetch_user(uid):\n    return uid\n"),
+            (
+                "b.py",
+                "def report():\n    return fetch_user(1)\n\n\ndef other():\n    return fetch_user(1, 2)\n",
+            ),
+        ]);
+        let docs = check(&base, &ours, &theirs);
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].file, "b.py");
+        assert_eq!(docs[0].schema_version, "1.4.0");
+        let f = &docs[0].findings[0];
+        assert_eq!(f.class, "ARITY");
+        assert_eq!(f.side.as_deref(), Some("ours"));
+        assert_eq!(f.base.as_deref(), Some("def fetch_user(uid)"));
+        assert_eq!(f.ours.as_deref(), Some("def fetch_user(uid, tenant)"));
+        let s = f.suggestion.as_ref().unwrap();
+        assert!(s.contains("line 2: `fetch_user(1)`"), "{s}");
+        assert!(
+            !s.contains("fetch_user(1, 2)"),
+            "a call already at the new arity is fine"
+        );
+    }
+
+    /// A default makes the old call still correct: refuse to count it.
+    #[test]
+    fn a_defaulted_new_parameter_is_not_an_arity_break() {
+        let base = tree(&[
+            ("a.py", "def fetch_user(uid):\n    return uid\n"),
+            ("b.py", "def report():\n    return 1\n"),
+        ]);
+        let ours = tree(&[
+            (
+                "a.py",
+                "def fetch_user(uid, tenant=None):\n    return uid\n",
+            ),
+            ("b.py", "def report():\n    return 1\n"),
+        ]);
+        let theirs = tree(&[
+            ("a.py", "def fetch_user(uid):\n    return uid\n"),
+            ("b.py", "def report():\n    return fetch_user(1)\n"),
+        ]);
+        assert!(check(&base, &ours, &theirs).is_empty());
     }
 
     #[test]

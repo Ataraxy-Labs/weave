@@ -102,7 +102,7 @@ fn verify(args: Args<'_>) -> R<()> {
     if docs.is_empty() {
         eprintln!(
             "weave check (repo scope): no cross-file binding findings between these two \
-             revisions. That is a statement about DANGLING and SHADOW only — it is not a \
+             revisions. That is a statement about DANGLING, SHADOW and ARITY only — it is not a \
              verification of any file's contents. For that, run `weave check` with no \
              arguments against the working tree."
         );

@@ -8,7 +8,7 @@
 //! caller who wrote `filepath` for `file_path` now gets `invalid_params`
 //! naming the field, instead of a good answer to a question they did not ask.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ── Tool parameter structs ──
 
@@ -433,4 +433,109 @@ pub(crate) struct PatchParams {
         description = "Optional, apply only: write a clean result to file_path (default false: return the content)"
     )]
     pub write: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EditSpec {
+    #[schemars(description = "The file, relative to the repository root")]
+    pub file: String,
+    #[schemars(
+        description = "The entity to change: a name (`Class.method` for a member), or {name, entity_type?, parent_name?, ordinal?}. Omit for a text edit of the whole file or to create a file"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<serde_json::Value>,
+    #[schemars(
+        description = "Optional verb about entity: replace (with content), insert_after / insert_before (content is the new entity), delete"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
+    #[schemars(
+        description = "Optional: the entity's kind (function, method, class...) when names collide"
+    )]
+    #[serde(
+        default,
+        alias = "entity_type",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub kind: Option<String>,
+    #[schemars(description = "Optional: 0-based occurrence among the entities that still match")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<usize>,
+    #[schemars(
+        description = "New source. With entity: its whole new text. With after/before/append: the entity to add. Alone, for a file that does not exist: the new file"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[schemars(
+        description = "Text to replace, inside entity when one is named, else in the whole file. Must match exactly once unless all is true"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old: Option<String>,
+    #[schemars(description = "What old becomes")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new: Option<String>,
+    #[schemars(description = "Optional: replace every match of old")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all: bool,
+    #[schemars(description = "Add content as a new entity right after this one")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    #[schemars(description = "Add content as a new entity right before this one")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    #[schemars(
+        description = "Add content as the last member of this class: a new method needs no anchor and no read"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
+    #[schemars(description = "Add content at the end of the file")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub append: bool,
+    #[schemars(description = "Delete entity")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete: bool,
+    #[schemars(
+        description = "Optional: let a replace rename the entity or change its kind or visibility (refused otherwise)"
+    )]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_signature_change: bool,
+    #[schemars(
+        description = "Rename entity (defined in file) to this name, together with every identifier spelled like it in the repository's code: one edit instead of one per call site. Strings and comments are left alone; files without a grammar that mention it are listed in notes"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename: Option<String>,
+    #[schemars(
+        description = "Optional: the entity's version from sem_find (v:...): the edit is refused if the entity changed since that read, instead of overwriting someone else's change"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<String>,
+    #[schemars(
+        description = "With rename: also rename the name where it appears as a whole word in comments and in docs (Markdown, reStructuredText, text files); strings are left alone"
+    )]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub everywhere: bool,
+    #[schemars(
+        description = "With rename: only in files matching these globs, e.g. [\"src/**\", \"tests/**\"]. Default: the whole repository"
+    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<String>,
+    #[schemars(
+        description = "Put entity back the way it was at this git ref (e.g. \"HEAD~3\", a branch or commit): only that entity changes, through the same guards as a replace. Refused if the entity did not exist at that ref"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revert: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EditParams {
+    #[schemars(description = "The edits, applied in order; all or nothing")]
+    pub edits: Vec<EditSpec>,
+    #[schemars(description = "Optional: report what would change and write nothing")]
+    pub dry_run: Option<bool>,
+    #[schemars(
+        description = "Optional: a build or test command to run once the edits are written (e.g. \"go test ./...\"); its result comes back in this same response, so editing and checking take one call"
+    )]
+    pub then: Option<String>,
 }

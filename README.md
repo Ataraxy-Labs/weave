@@ -432,6 +432,9 @@ empty result means):
 
 - `weave_preview`: dry-run a merge of two branches, as per-file verdicts, a
   findings document, or the strategy weave used on each entity.
+- `weave_edit`: change code by entity, written straight to disk: replace an entity, edit
+  text inside it, add one before or after it, delete it, or create a file. A batch is all or
+  nothing, and an edit that breaks the parse or quietly renames an entity is refused.
 - `weave_explain`: why a file conflicted, from the merge's three stages.
 - `weave_check`: is the resolution right, plus the cross-file breakage a per-file
   merge driver can't see (a rename in `a.py` whose surviving caller lives in `b.py`).
