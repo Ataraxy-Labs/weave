@@ -1512,12 +1512,14 @@ fn find(
             )
         })?,
         (1, None) => matches[0],
-        (n, None) => return Err((
-            format!(
-                "{name} matches {n} entities in {path}: pick one with kind, Parent.name or ordinal"
-            ),
-            matches.iter().map(|e| label(e, &all)).collect(),
-        )),
+        (n, None) => {
+            return Err((
+                format!(
+                    "{name} matches {n} entities in {path}: pick one with kind, Parent.name or ordinal"
+                ),
+                matches.iter().map(|e| label(e, &all)).collect(),
+            ))
+        }
     };
     Ok(pick.clone())
 }
