@@ -622,6 +622,9 @@ fn compose(
     let composed =
         match crate::v2::merge_file(base, ours, theirs, file_path, registry, marker_format, host) {
             Ok(result) => result,
+            Err(crate::v2::Unsupported::NoEntities) => {
+                no_entities_merge(base, ours, theirs, file_path, host)
+            }
             Err(_unsupported) => line_level_fallback(base, ours, theirs, file_path, host),
         };
     fail_closed(
@@ -634,6 +637,44 @@ fn compose(
         marker_format,
         host,
     )
+}
+
+/// A file the grammar reads but finds no entities in: a module of top-level
+/// assignments, a script. diff3 answers first, as it always did. What diff3
+/// refuses is offered to the element union over the whole file, the rung a
+/// function body reaches once diff3 refuses it, but only when no top-level
+/// statement was rewritten by both sides
+/// ([`crate::elements::disjoint_statements`]). Two sides that each rewrote a
+/// different statement then compose instead of conflicting because the
+/// statements sit on neighbouring lines (#187). Anything else (one statement
+/// edited twice, an insertion or a deletion, a language the union has no
+/// reader for) keeps the diff3 conflict, and the file's own rules
+/// (`determinate`) still decide it afterwards.
+fn no_entities_merge(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    file_path: &str,
+    host: &Host,
+) -> MergeResult {
+    let lines = line_level_fallback(base, ours, theirs, file_path, host);
+    if lines.conflicts.is_empty() {
+        return lines;
+    }
+    match crate::elements::disjoint_statements(base, ours, theirs, file_path, host) {
+        Some(content) => MergeResult {
+            content,
+            conflicts: vec![],
+            warnings: vec![],
+            stats: MergeStats::default(),
+            audit: vec![EntityAudit {
+                name: "(file)".to_string(),
+                entity_type: "file".to_string(),
+                resolution: ResolutionStrategy::ElementUnion,
+            }],
+        },
+        None => lines,
+    }
 }
 
 /// The superset side's own file, as the merge — see `subsumption.rs`.
@@ -1062,6 +1103,7 @@ pub(crate) fn merge_interstitials(
     marker_format: &MarkerFormat,
     kept_imports: &[String],
     file_path: &str,
+    host: &Host,
 ) -> (HashMap<String, String>, Vec<EntityConflict>) {
     let base_map: HashMap<&str, &str> = base_regions
         .iter()
@@ -1184,6 +1226,21 @@ pub(crate) fn merge_interstitials(
             }
             if !order_conflicted {
                 if let Ok(text) = diffy::merge(base_content, ours_content, theirs_content) {
+                    ladder.push(text);
+                }
+                // The rung a function body gets after diff3: top-level code
+                // between entities is a statement list too: two sides that
+                // each rewrote a different statement of it compose as they
+                // would inside a body (#187). Only that shape, no statement
+                // touched by both, so a region both sides grew is still left to
+                // the rules above, or stays the conflict diff3 raised.
+                if let Some(text) = crate::elements::disjoint_statements(
+                    base_content,
+                    ours_content,
+                    theirs_content,
+                    file_path,
+                    host,
+                ) {
                     ladder.push(text);
                 }
             }
@@ -4953,5 +5010,26 @@ export function main() { return 1; }
             result.content.contains("unit inference"),
             "Theirs (modified) should be in conflict markers"
         );
+    }
+
+    /// #187: a module of top-level assignments has no entities, so it used to
+    /// get diff3 alone, which refuses two edits on neighbouring lines. One
+    /// side's `A` and the other's `B` compose like the same edits in a body.
+    #[test]
+    fn neighbouring_top_level_edits_compose() {
+        let base = "A = 1\nB = 2\n";
+        let r = entity_merge(base, "A = 2\nB = 2\n", "A = 1\nB = 4\n", "foo.py");
+        assert!(r.conflicts.is_empty(), "{}", r.content);
+        assert_eq!(r.content, "A = 2\nB = 4\n");
+        let r = entity_merge(
+            "config.a = 1;\nconfig.b = 2;\n",
+            "config.a = 2;\nconfig.b = 2;\n",
+            "config.a = 1;\nconfig.b = 4;\n",
+            "config.js",
+        );
+        assert_eq!(r.content, "config.a = 2;\nconfig.b = 4;\n");
+        // The same statement edited two ways is still a conflict.
+        let r = entity_merge(base, "A = 2\nB = 2\n", "A = 3\nB = 2\n", "foo.py");
+        assert!(!r.conflicts.is_empty());
     }
 }
