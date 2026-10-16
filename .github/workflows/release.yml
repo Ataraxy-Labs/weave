@@ -133,7 +133,7 @@ jobs:
           tar -czf dist/weave-mcp-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release weave-mcp.exe
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: binaries-${{ matrix.target }}
           path: dist/
