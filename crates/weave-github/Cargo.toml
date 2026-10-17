@@ -19,7 +19,7 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-jsonwebtoken = "10"
+jsonwebtoken = "11"
 reqwest = { version = "0.13", features = ["json"] }
 hmac = "0.12"
 sha2 = "0.10"
