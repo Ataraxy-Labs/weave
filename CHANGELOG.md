@@ -9,6 +9,12 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+## 0.6.1
+
+### Fixed
+
+- **weave-cli, weave-driver and weave-mcp reach crates.io again.** 0.6.0 published only weave-core and weave-crdt: weave-cli depends on `weave-certify`, which was marked never to publish, so its upload failed and the crates after it were skipped. `weave-certify` is now published alongside the others.
+
 ## 0.6.0
 
 Built on sem-core 0.28.0.
