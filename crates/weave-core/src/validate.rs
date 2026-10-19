@@ -17,6 +17,7 @@
 
 use std::collections::BTreeSet;
 
+use sem_core::model::entity_id::EntityId;
 use sem_core::parser::graph::EntityGraph;
 use sem_core::parser::registry::ParserRegistry;
 
@@ -134,7 +135,7 @@ pub fn validate_merge(
     // and "in what order are the warnings emitted" would otherwise be decided
     // by the process's random hash seed, and the warning list is user-facing
     // output that has to be deterministic.
-    let modified_ids: BTreeSet<String> = modified_entities
+    let modified_ids: BTreeSet<EntityId> = modified_entities
         .iter()
         .filter_map(|me| {
             graph
