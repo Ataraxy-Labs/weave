@@ -2416,9 +2416,9 @@ dependencies = [
 
 [[package]]
 name = "sem-core"
-version = "0.26.0"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef6fdddda79e3fc7771681080f499583b1773d6b9a2b64e5e323a0e4c261ff19"
+checksum = "8330fda0f75c1a41e4bcb86851b3ba0f9ef9444e4174fc0f5bf40ccfc6f88b30"
 dependencies = [
  "ciborium",
  "git2",
@@ -3646,7 +3646,7 @@ dependencies = [
 
 [[package]]
 name = "weave-cli"
-version = "0.5.4"
+version = "0.6.0"
 dependencies = [
  "clap",
  "colored",
@@ -3665,7 +3665,7 @@ dependencies = [
 
 [[package]]
 name = "weave-core"
-version = "0.5.4"
+version = "0.6.0"
 dependencies = [
  "criterion",
  "diffy",
@@ -3683,7 +3683,7 @@ dependencies = [
 
 [[package]]
 name = "weave-crdt"
-version = "0.5.4"
+version = "0.6.0"
 dependencies = [
  "automerge",
  "sem-core",
@@ -3697,7 +3697,7 @@ dependencies = [
 
 [[package]]
 name = "weave-driver"
-version = "0.5.4"
+version = "0.6.0"
 dependencies = [
  "env_logger",
  "sem-core",
@@ -3710,7 +3710,7 @@ dependencies = [
 
 [[package]]
 name = "weave-github"
-version = "0.5.4"
+version = "0.6.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -3731,7 +3731,7 @@ dependencies = [
 
 [[package]]
 name = "weave-mcp"
-version = "0.5.4"
+version = "0.6.0"
 dependencies = [
  "lru",
  "openssl",

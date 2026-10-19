@@ -9,8 +9,14 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+## 0.6.0
+
+Built on sem-core 0.28.0.
+
 ### Added
 
+- **`weave check` reports ARITY when a merge leaves a call with the wrong number of arguments.** If one branch changes a function's parameters and the other adds a call with the old count, both merge cleanly as text, and the finding names the call and the definition it no longer matches.
+- **`weave edit FILE --entity NAME --revert REF` puts one entity back as it was at a revision**, leaving the rest of the file alone. `weave_edit` takes the same `revert`.
 - **`weave edit` and the `weave_edit` MCP tool change code by entity and write it to disk.** An edit names a file and an entity (`Class.method` for a member, or pi-sem's `{name, entity_type, parent_name, ordinal}`) and says what becomes of it: new content, a text replacement inside it that must match once, a new entity before or after it, or deletion. Without an entity, `old`/`new` edits the whole file (imports, configs, any text file), and content alone creates a file. Nothing has to be read first, and other entities in the file are left as they are on disk. A batch is all or nothing; files are planned in parallel; an edit that leaves a file unparseable, or that renames an entity or changes its kind or visibility without `allow_signature_change`, is refused.
 - **An edit that changes a signature or deletes an entity lists every place the name is still used** (`review`), so the agent updates those call sites in its next edit instead of finding them through a failing test. A rename reports the mentions it left (strings, comments, docs, other entities spelled the same), so no grep is needed to check it.
 - **`expect` makes an entity edit compare-and-swap.** Pass the version sem showed (`v:…`) and the edit is refused if the entity changed since, instead of overwriting another agent's change.
@@ -249,6 +255,7 @@ rule (`weave: <file> settled by rule: …`). Otherwise it stays conflicted.
 
 ### Fixed
 
+- **Edits to neighbouring top-level statements no longer conflict.** A file of top-level assignments (or other statements outside any function) used to fall back to git's line merge, which treats edits on adjacent lines as one conflict. Top-level statements now merge statement by statement, like function bodies, so `A = 2` on one side and `B = 4` on the other both land. Two edits to the same statement still conflict. Thanks @Ahajha for the report (#187).
 - A side that moved a declaration it edited could silently win against the
   other side's deletion of it: the subsumption rule read the move as the same
   deletion. It is a modify/delete conflict again (line and declaration guards).
