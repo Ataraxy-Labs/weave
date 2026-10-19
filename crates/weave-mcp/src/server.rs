@@ -354,12 +354,12 @@ impl WeaveServer {
         match candidates.len() {
             0 => resolver_result,
             // Unambiguous repo-wide: keep the historical cross-file lookup.
-            1 => Ok(candidates[0].id.clone()),
+            1 => Ok(candidates[0].id.to_string()),
             _ => {
                 if let Some(o) = ordinal {
                     return candidates
                         .get(o as usize)
-                        .map(|e| e.id.clone())
+                        .map(|e| e.id.to_string())
                         .ok_or_else(|| {
                             Reason::EntityAmbiguous(format!(
                                 "ordinal {} out of range: {} candidates named '{}' outside '{}'",
