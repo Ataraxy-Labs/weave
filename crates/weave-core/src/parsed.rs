@@ -104,3 +104,42 @@ pub(crate) fn parse(registry: &ParserRegistry, path: &str, text: &str) -> Rc<Par
     });
     parsed
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sem_core::parser::plugins::create_default_registry;
+
+    #[test]
+    fn reuse_is_scoped_and_content_sensitive() {
+        let registry = create_default_registry();
+        let text = "fn first() {}";
+        let previous = scope(|| {
+            let first = parse(&registry, "a.rs", text);
+            assert!(Rc::ptr_eq(&first, &parse(&registry, "a.rs", text)));
+            scope(|| assert!(Rc::ptr_eq(&first, &parse(&registry, "a.rs", text))));
+            assert!(!Rc::ptr_eq(&first, &parse(&registry, "b.rs", text)));
+            assert!(!Rc::ptr_eq(
+                &first,
+                &parse(&registry, "a.rs", "fn other() {}")
+            ));
+            first
+        });
+        scope(|| assert!(!Rc::ptr_eq(&previous, &parse(&registry, "a.rs", text))));
+        assert!(RECENT.with(|r| r.borrow().is_empty()));
+    }
+
+    #[test]
+    fn panic_clears_scope() {
+        let result = std::panic::catch_unwind(|| {
+            scope(|| {
+                let registry = create_default_registry();
+                parse(&registry, "a.rs", "fn first() {}");
+                panic!("test unwind");
+            })
+        });
+        assert!(result.is_err());
+        assert_eq!(DEPTH.with(Cell::get), 0);
+        assert!(RECENT.with(|r| r.borrow().is_empty()));
+    }
+}

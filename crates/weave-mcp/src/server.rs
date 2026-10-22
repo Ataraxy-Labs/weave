@@ -30,14 +30,7 @@ use crate::tools::*;
 struct RepoContext {
     state: Mutex<EntityStateDoc>,
     repo_root: PathBuf,
-    /// The last repo-wide entity graph, with the (path, size, mtime) of every
-    /// file it was built from. Rebuilding it cost every claim a parse of the
-    /// whole repository; a stat per file is enough to know it is still the
-    /// graph of the tree on disk.
-    graph: std::sync::Mutex<Option<(Vec<FileStamp>, Arc<EntityGraph>)>>,
 }
-
-type FileStamp = (String, u64, Option<std::time::SystemTime>);
 
 /// Every repository this server has answered for, keyed by canonical root.
 ///
@@ -203,7 +196,6 @@ impl WeaveServer {
                 RepoContext {
                     state: Mutex::new(state),
                     repo_root,
-                    graph: Default::default(),
                 },
             );
         }
@@ -213,47 +205,23 @@ impl WeaveServer {
         }))
     }
 
-    /// The entity graph of every supported file in the repo, rebuilt only when
-    /// a file was added, removed, or rewritten since the last build.
+    /// Read the graph from current source. Metadata alone cannot prove freshness:
+    /// editors can preserve both size and mtime while changing dependencies.
     fn repo_graph(ctx: &RepoContext, registry: &ParserRegistry) -> Arc<EntityGraph> {
-        let stamps = Self::walk_supported_files(&ctx.repo_root, registry, true);
-        let mut cached = ctx.graph.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((built_from, graph)) = cached.as_ref() {
-            if *built_from == stamps {
-                return Arc::clone(graph);
-            }
-        }
-        let file_paths: Vec<String> = stamps.iter().map(|(f, _, _)| f.clone()).collect();
+        let file_paths = Self::find_supported_files(&ctx.repo_root, registry);
         let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, registry);
-        let graph = Arc::new(graph);
-        *cached = Some((stamps, Arc::clone(&graph)));
-        graph
+        Arc::new(graph)
     }
 
     /// Find all files in the repo that have a supported parser.
     fn find_supported_files(root: &Path, registry: &ParserRegistry) -> Vec<String> {
-        Self::walk_supported_files(root, registry, false)
-            .into_iter()
-            .map(|(f, _, _)| f)
-            .collect()
-    }
-
-    /// Every supported file, sorted by path; with `stamp`, each with its size
-    /// and modification time.
-    fn walk_supported_files(root: &Path, registry: &ParserRegistry, stamp: bool) -> Vec<FileStamp> {
         let mut files = Vec::new();
-        Self::walk_dir(root, root, registry, stamp, &mut files);
+        Self::walk_dir(root, root, registry, &mut files);
         files.sort();
         files
     }
 
-    fn walk_dir(
-        dir: &Path,
-        root: &Path,
-        registry: &ParserRegistry,
-        stamp: bool,
-        files: &mut Vec<FileStamp>,
-    ) {
+    fn walk_dir(dir: &Path, root: &Path, registry: &ParserRegistry, files: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -276,13 +244,11 @@ impl WeaveServer {
                 _ => path.is_dir(),
             };
             if is_dir {
-                Self::walk_dir(&path, root, registry, stamp, files);
+                Self::walk_dir(&path, root, registry, files);
             } else if let Ok(rel) = path.strip_prefix(root) {
                 let rel_str = rel.to_string_lossy().to_string();
                 if registry.get_plugin(&rel_str).is_some() {
-                    let meta = stamp.then(|| std::fs::metadata(&path).ok()).flatten();
-                    let len = meta.as_ref().map_or(0, |m| m.len());
-                    files.push((rel_str, len, meta.and_then(|m| m.modified().ok())));
+                    files.push(rel_str);
                 }
             }
         }
@@ -2297,6 +2263,35 @@ fn internal_err(msg: impl ToString) -> rmcp::ErrorData {
 mod resolve_entity_for_graph_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn graph_observes_same_size_edit_with_preserved_mtime() {
+        let root = write_fixture("preserved-mtime", &[("a.ts", "function first() {}\n")]);
+        let path = root.join("a.ts");
+        let before = fs::metadata(&path).unwrap();
+        let registry = create_default_registry();
+        let ctx = RepoContext {
+            state: Mutex::new(EntityStateDoc::open(&root.join("state.automerge")).unwrap()),
+            repo_root: root.clone(),
+        };
+        let first = WeaveServer::repo_graph(&ctx, &registry);
+        assert!(first.entities.values().any(|e| e.name == "first"));
+        fs::write(&path, "function other() {}\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        let second = WeaveServer::repo_graph(&ctx, &registry);
+        assert!(second.entities.values().any(|e| e.name == "other"));
+        assert!(!second.entities.values().any(|e| e.name == "first"));
+        drop(ctx);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     /// Writes `files` (relative path -> content) under a fresh temp dir and
     /// returns the root. Each test gets its own directory (PID + a counter)

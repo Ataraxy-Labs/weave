@@ -17,7 +17,6 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 ### Performance
 
 - **Merges parse each text once.** The merge checks (subsumption, the verify gate, the key backstop, the layout and rule settlers) each re-parsed ours, theirs and the result; they now share one parse per text within a merge. The keyed-element walk no longer asks tree-sitter for each node's parent, which walked down from the root every time. Merge output is unchanged.
-- **`weave_claim_entity` reuses the repo's entity graph** while no supported file has changed (same paths, sizes and modification times), instead of rebuilding it from every file on every claim. `weave_get_dependencies`, `weave_get_dependents` and `weave_impact_analysis` share the same graph.
 - **`weave check --base/--ours/--theirs` reads a file once when the sides left it as base**, and reads files in parallel. Findings are unchanged.
 
 ### Fixed
