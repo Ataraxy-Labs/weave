@@ -81,7 +81,7 @@ Full benchmark suite: 11ms. Individual merges: 65-374us.
 Cargo workspace with 6 crates:
 - weave-core: merge algorithm, entity extraction via sem-core, diffy fallback
 - weave-driver: git merge driver binary (called with %O %A %B %L %P)
-- weave-cli: setup, explain, check, patch, preview, status, bench, summary commands
+- weave-cli: setup, edit, land, explain, check, preview, patch, stats commands (live-editing prototype under `weave experimental claim|release|status|apply`)
 - weave-crdt: Automerge-backed agent coordination state
 - weave-mcp: MCP server, one tool per weave command, for AI agent integration
 - weave-github: GitHub integration

@@ -732,6 +732,10 @@ fn tokens_of<S: AsRef<str>>(lines: &[S]) -> HashMap<&str, usize> {
 /// stdout is the complete resolved file — or one line: `DELETE` / `KEEP`
 /// (modify/delete only: delete the file / keep the modified side as it is) or
 /// `CANNOT[: reason]`. A non-zero exit is a failed call.
+/// How long one resolver call may take by default, in seconds: the CLI's
+/// `--resolver-timeout` and the MCP `weave_land` tool share it.
+pub const DEFAULT_RESOLVER_TIMEOUT_SECS: u64 = 900;
+
 #[derive(Debug, Clone)]
 pub struct Resolver {
     pub command: String,

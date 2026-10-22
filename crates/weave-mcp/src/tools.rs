@@ -107,9 +107,11 @@ pub(crate) struct PotentialConflictsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PreviewMergeParams {
-    #[schemars(description = "Base branch to merge from (e.g. 'main')")]
+    #[schemars(
+        description = "Ours: the branch being merged into, i.e. the one you are on (e.g. 'main')"
+    )]
     pub base_branch: String,
-    #[schemars(description = "Target branch to merge into (e.g. 'feature-x')")]
+    #[schemars(description = "Theirs: the branch being merged in (e.g. 'feature-x')")]
     pub target_branch: String,
     #[schemars(description = "Optional: preview only this file")]
     pub file_path: Option<String>,
@@ -211,9 +213,11 @@ pub(crate) struct DiffParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MergeAuditParams {
-    #[schemars(description = "Base branch to merge from (e.g. 'main')")]
+    #[schemars(
+        description = "Ours: the branch being merged into, i.e. the one you are on (e.g. 'main')"
+    )]
     pub base_branch: String,
-    #[schemars(description = "Target branch to merge into (e.g. 'feature-x')")]
+    #[schemars(description = "Theirs: the branch being merged in (e.g. 'feature-x')")]
     pub target_branch: String,
     #[schemars(description = "Optional: audit only this file")]
     pub file_path: Option<String>,
@@ -289,9 +293,11 @@ pub(crate) struct MergeFileParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FindingsParams {
-    #[schemars(description = "Base branch to merge from (e.g. 'main')")]
+    #[schemars(
+        description = "Ours: the branch being merged into, i.e. the one you are on (e.g. 'main')"
+    )]
     pub base_branch: String,
-    #[schemars(description = "Target branch to merge into (e.g. 'feature-x')")]
+    #[schemars(description = "Theirs: the branch being merged in (e.g. 'feature-x')")]
     pub target_branch: String,
     #[schemars(description = "Optional: analyze only this file")]
     pub file_path: Option<String>,
@@ -356,9 +362,11 @@ pub(crate) enum PreviewDetail {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PreviewParams {
-    #[schemars(description = "Base branch to merge from (e.g. 'main')")]
+    #[schemars(
+        description = "Ours: the branch being merged into, i.e. the one you are on (e.g. 'main')"
+    )]
     pub base_branch: String,
-    #[schemars(description = "Target branch to merge into (e.g. 'feature-x')")]
+    #[schemars(description = "Theirs: the branch being merged in (e.g. 'feature-x')")]
     pub target_branch: String,
     #[schemars(description = "Optional: preview only this file")]
     pub file_path: Option<String>,
@@ -398,7 +406,7 @@ pub(crate) struct LandParams {
         description = "Optional: a command that resolves a file weave cannot. It gets base/ours/theirs/conflicted text as JSON on stdin and prints the resolved file, or DELETE / KEEP / CANNOT[: reason]"
     )]
     pub resolver: Option<String>,
-    #[schemars(description = "Optional: seconds the resolver may take per file (default 120)")]
+    #[schemars(description = "Optional: seconds the resolver may take per file (default 900)")]
     pub resolver_timeout: Option<u64>,
     #[schemars(
         description = "Optional: in the working tree, label every file but write nothing (default false)"
@@ -535,7 +543,7 @@ pub(crate) struct EditParams {
     #[schemars(description = "Optional: report what would change and write nothing")]
     pub dry_run: Option<bool>,
     #[schemars(
-        description = "Optional: a build or test command to run once the edits are written (e.g. \"go test ./...\"); its result comes back in this same response, so editing and checking take one call"
+        description = "Optional: a build or test command to run once the edits are written (e.g. \"go test ./...\"); its exit_code and the last 16KB of its output come back in this same response, so editing and checking take one call. Runs in the repo root, stopped after 10 minutes"
     )]
     pub then: Option<String>,
 }
