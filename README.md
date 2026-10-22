@@ -425,8 +425,8 @@ claude mcp add --scope user weave -- weave-mcp
 { "mcpServers": { "weave": { "command": "weave-mcp" } } }
 ```
 
-The server discovers the repo from the first tool call's file path, the
-`WEAVE_REPO` env var, or its working directory. It lists five tools, one per
+The server discovers the repo from each tool call's absolute file path, else the
+`WEAVE_REPO` env var, or its working directory. It lists six tools, one per
 `weave` command (each tool's own description states when to call it and what an
 empty result means):
 
@@ -499,7 +499,7 @@ Nothing in the merge path depends on the CRDT ever having run.
 - **Crashed agents aren't reaped.** `weave_agent_heartbeat`'s liveness timestamp is informational;
   weave does not currently expire or release a claim automatically when an agent stops
   heartbeating, so a crashed agent's claims stay visible until another call to
-  `weave_release_entity`/`weave release`.
+  `weave_release_entity`/`weave experimental release`.
 - **`weave stats` is empty until you opt in.** Lifetime merge counters are off by default; set
   `WEAVE_STATS=1` in the environment your git/jj merges run in to start accumulating them.
 

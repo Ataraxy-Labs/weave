@@ -136,8 +136,33 @@ pub fn find_repo_root_from_path(path: &Path) -> Result<PathBuf, GitError> {
     Ok(PathBuf::from(root))
 }
 
+/// Check that `rev` names a commit in the named repository.
+///
+/// A mistyped or unfetched ref is the commonest reason a two-ref query fails,
+/// and without asking first it surfaces as whatever the query itself says —
+/// for `merge-base`, a confident "no merge base" about two branches that may
+/// well share history. The refusal names the ref and the likely fix.
+pub fn verify_commit(repo_root: &Path, rev: &str) -> Result<(), GitError> {
+    let spec = format!("{rev}^{{commit}}");
+    let args = ["rev-parse", "--verify", "--quiet", &spec];
+    let output = run(repo_root, &args)?;
+    if !output.status.success() {
+        return Err(GitError::Refused {
+            argv: args.join(" "),
+            status: output.status.code().unwrap_or(-1),
+            stderr: format!("unknown revision '{rev}' (typo, or not fetched? try `git fetch`)"),
+        });
+    }
+    Ok(())
+}
+
 /// Find the merge base between two refs, in the named repository.
+///
+/// Both refs are verified first, so [`GitError::NoMergeBase`] only ever means
+/// two real commits with no common history.
 pub fn find_merge_base(repo_root: &Path, head: &str, branch: &str) -> Result<String, GitError> {
+    verify_commit(repo_root, head)?;
+    verify_commit(repo_root, branch)?;
     let args = ["merge-base", head, branch];
     let output = run(repo_root, &args)?;
     if !output.status.success() {
@@ -235,6 +260,8 @@ pub fn diff_files(
     base_ref: &str,
     target_ref: &str,
 ) -> Result<Vec<String>, GitError> {
+    verify_commit(repo_root, base_ref)?;
+    verify_commit(repo_root, target_ref)?;
     let args = ["diff", "--name-only", base_ref, target_ref];
     let output = run(repo_root, &args)?;
     if !output.status.success() {
@@ -363,14 +390,14 @@ mod tests {
     }
 
     #[test]
-    fn two_unrelated_refs_report_both_operands() {
+    fn a_mistyped_ref_is_an_unknown_revision_not_a_missing_merge_base() {
         match find_merge_base(Path::new("."), "weave-no-such-ref-a", "weave-no-such-ref-b") {
-            Err(GitError::NoMergeBase { head, branch }) => {
-                assert_eq!(head, "weave-no-such-ref-a");
-                assert_eq!(branch, "weave-no-such-ref-b");
+            Err(GitError::Refused { stderr, .. }) => {
+                assert!(stderr.contains("unknown revision 'weave-no-such-ref-a'"));
+                assert!(stderr.contains("git fetch"));
             }
             Err(GitError::NotRunnable { .. }) => {}
-            other => panic!("expected NoMergeBase, got {other:?}"),
+            other => panic!("expected an unknown-revision refusal, got {other:?}"),
         }
     }
 

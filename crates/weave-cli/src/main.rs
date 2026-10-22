@@ -242,7 +242,7 @@ enum Commands {
         #[arg(long, value_name = "CMD")]
         resolver: Option<String>,
         /// Give up on one resolver call after this many seconds. Example: --resolver-timeout 300
-        #[arg(long, default_value_t = 900, value_name = "SECS")]
+        #[arg(long, default_value_t = weave_cli::land::DEFAULT_RESOLVER_TIMEOUT_SECS, value_name = "SECS")]
         resolver_timeout: u64,
         /// Print the report as JSON (the same document --certificate writes). Example: weave land --json
         #[arg(long)]

@@ -37,7 +37,7 @@ impl ToolError {
     /// else is not.
     pub fn is_callers_fault(&self) -> bool {
         match &self.reason {
-            Reason::NoRepository
+            Reason::NoRepository { .. }
             | Reason::EntityNotFound { .. }
             | Reason::EntityAmbiguous(_)
             | Reason::Unreadable { .. } => true,
@@ -60,13 +60,10 @@ impl ToolError {
 #[derive(Debug, thiserror::Error)]
 pub enum Reason {
     /// No repository could be found by any of the three strategies.
-    #[error(
-        "cannot find a git repository. Either:\n\
-         - pass an absolute file path (e.g. /Users/you/project/src/lib.ts)\n\
-         - set WEAVE_REPO to the repo root\n\
-         - run weave-mcp from inside a git repo"
-    )]
-    NoRepository,
+    /// `takes_path` is whether the failing tool accepts a file path, so the
+    /// message only suggests passing one where the caller can.
+    #[error("{}", no_repository_hint(*takes_path))]
+    NoRepository { takes_path: bool },
 
     /// A `git` query failed for a reason git itself named.
     ///
@@ -104,6 +101,22 @@ pub enum Reason {
     /// [`weave_crdt::Resolution::describe_failure`].
     #[error("{0}")]
     EntityAmbiguous(String),
+}
+
+/// The next step for [`Reason::NoRepository`], for a tool that does or does
+/// not take a file path.
+fn no_repository_hint(takes_path: bool) -> &'static str {
+    if takes_path {
+        "cannot find a git repository. Either:\n\
+         - pass an absolute file path (e.g. /Users/you/project/src/lib.ts)\n\
+         - set WEAVE_REPO to the repo root\n\
+         - run weave-mcp from inside a git repo"
+    } else {
+        "cannot find a git repository, and this tool takes no file path. Either:\n\
+         - set WEAVE_REPO to the repo root\n\
+         - run weave-mcp from inside a git repo\n\
+         - first call a tool that takes a file path with an absolute path in the repo"
+    }
 }
 
 impl Reason {

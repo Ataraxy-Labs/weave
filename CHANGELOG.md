@@ -9,6 +9,21 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+### Changed
+
+- **`weave_edit`'s `then` returns `{exit_code, output, truncated}`** instead of a plain string. It runs through `sem check --run` when sem is installed and through `sh -c` in the repo root when it is not, stops after 600 s, and keeps the last 16 KB of output.
+- **`weave_patch` returns `content_bytes` instead of the file once it has written a clean result**, so a large file is not sent back to the agent.
+
+### Fixed
+
+- **`weave_check` with no arguments answers when no merge is in progress.** It returns `NOTHING_TO_CHECK` instead of an error, and right after a merge commit it checks that merge (HEAD^1 against HEAD^2), as `weave check` does.
+- **A mistyped or unfetched branch is reported as such**: "unknown revision 'X' (typo, or not fetched? try `git fetch`)", not "no merge base", and as a refusal the agent can fix rather than a server fault.
+- **The MCP server follows the repository each call names.** A call with an absolute path in another repo or worktree uses that repo instead of the first one the server saw; `WEAVE_REPO` sets the default.
+- **`weave_preview` no longer reports a clean merge when nothing was compared.** A file that exists at none of base, ours and theirs is refused, an empty result says `nothing_to_compare`, and `weave preview --file` accepts paths relative to the current directory.
+- **Errors an agent can fix say how**: an unregistered agent is told to call `weave_agent_register`, and explain, land and parser errors name the next step instead of reading as internal faults.
+- **`resolver_timeout` is documented with its real default, 900 s**, and `weave_who_is_editing` is listed with the other experimental tools.
+- **Hints name the current commands** (`weave setup --off`, `weave experimental status`, `apply`, `release`), and `docs/llms.txt` lists the visible commands.
+
 ## 0.6.1
 
 ### Fixed

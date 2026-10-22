@@ -68,7 +68,7 @@ pub(crate) fn run(
             );
         }
     } else {
-        println!("Usage: weave status --file <path> or --agent <id>");
+        println!("Usage: weave experimental status --file <path> or --agent <id>");
     }
 
     Ok(())
