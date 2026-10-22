@@ -18,6 +18,7 @@ pub mod host;
 pub(crate) mod insertion;
 pub mod layout;
 pub mod merge;
+pub(crate) mod parsed;
 pub mod region;
 pub(crate) mod statement;
 pub mod stats;
