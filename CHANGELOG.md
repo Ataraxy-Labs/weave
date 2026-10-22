@@ -14,6 +14,11 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 - **`weave_edit`'s `then` returns `{exit_code, output, truncated}`** instead of a plain string. It runs through `sem check --run` when sem is installed and through `sh -c` in the repo root when it is not, stops after 600 s, and keeps the last 16 KB of output.
 - **`weave_patch` returns `content_bytes` instead of the file once it has written a clean result**, so a large file is not sent back to the agent.
 
+### Performance
+
+- **Merges parse each text once.** The merge checks (subsumption, the verify gate, the key backstop, the layout and rule settlers) each re-parsed ours, theirs and the result; they now share one parse per text within a merge. The keyed-element walk no longer asks tree-sitter for each node's parent, which walked down from the root every time. Merge output is unchanged.
+- **`weave check --base/--ours/--theirs` reads a file once when the sides left it as base**, and reads files in parallel. Findings are unchanged.
+
 ### Fixed
 
 - **`weave_check` with no arguments answers when no merge is in progress.** It returns `NOTHING_TO_CHECK` instead of an error, and right after a merge commit it checks that merge (HEAD^1 against HEAD^2), as `weave check` does.

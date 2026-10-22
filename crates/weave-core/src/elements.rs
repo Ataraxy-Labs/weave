@@ -244,8 +244,9 @@ fn why<T>(reason: impl FnOnce() -> String) -> Option<T> {
 }
 
 fn parse(path: &str, text: &str) -> Option<Tree> {
-    let (_, tree) = PARSER_REGISTRY.extract_entities_with_tree(path, text)?;
-    let tree = tree?;
+    let tree = crate::parsed::parse(&PARSER_REGISTRY, path, text)
+        .tree
+        .clone()?;
     (!tree.root_node().has_error()).then_some(tree)
 }
 

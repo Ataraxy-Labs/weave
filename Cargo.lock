@@ -3652,6 +3652,7 @@ dependencies = [
  "colored",
  "diffy",
  "openssl",
+ "rayon",
  "sem-core",
  "serde",
  "serde_json",

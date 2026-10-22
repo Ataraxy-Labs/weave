@@ -214,8 +214,8 @@ pub(crate) fn settle(
         .filter(|l| !l.is_empty())
         .collect();
     let parses = |text: &str| -> Option<bool> {
-        let (_, tree) = registry.extract_entities_with_tree(path, text)?;
-        tree.map(|t| !t.root_node().has_error())
+        let parsed = crate::parsed::parse(registry, path, text);
+        parsed.tree.as_ref().map(|t| !t.root_node().has_error())
     };
     let (ours_parses, theirs_parses) = (parses(ours), parses(theirs));
     // A side whose file does not parse, where the other side's does, is never
@@ -481,18 +481,16 @@ pub(crate) fn has_modify_delete(
     type Key = (String, String);
     let read = |text: &str| -> HashMap<Key, Vec<String>> {
         let mut out: HashMap<Key, Vec<String>> = HashMap::new();
-        let entities = registry
-            .extract_entities_with_tree(path, text)
-            .map(|(e, _)| e)
-            .unwrap_or_default();
+        let parsed = crate::parsed::parse(registry, path, text);
         // A fallback `chunk` is a slice of lines named by position.
-        for e in entities
-            .into_iter()
+        for e in parsed
+            .entities
+            .iter()
             .filter(|e| e.parent_id.is_none() && e.entity_type != "chunk")
         {
-            out.entry((e.entity_type, e.name))
+            out.entry((e.entity_type.clone(), e.name.clone()))
                 .or_default()
-                .push(e.content);
+                .push(e.content.clone());
         }
         out
     };

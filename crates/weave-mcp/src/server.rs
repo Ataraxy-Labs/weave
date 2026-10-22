@@ -205,6 +205,14 @@ impl WeaveServer {
         }))
     }
 
+    /// Read the graph from current source. Metadata alone cannot prove freshness:
+    /// editors can preserve both size and mtime while changing dependencies.
+    fn repo_graph(ctx: &RepoContext, registry: &ParserRegistry) -> Arc<EntityGraph> {
+        let file_paths = Self::find_supported_files(&ctx.repo_root, registry);
+        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, registry);
+        Arc::new(graph)
+    }
+
     /// Find all files in the repo that have a supported parser.
     fn find_supported_files(root: &Path, registry: &ParserRegistry) -> Vec<String> {
         let mut files = Vec::new();
@@ -229,7 +237,13 @@ impl WeaveServer {
                     continue;
                 }
             }
-            if path.is_dir() {
+            // The entry's own type costs no syscall; only a symlink needs a
+            // stat to say what it points at.
+            let is_dir = match entry.file_type() {
+                Ok(t) if !t.is_symlink() => t.is_dir(),
+                _ => path.is_dir(),
+            };
+            if is_dir {
                 Self::walk_dir(&path, root, registry, files);
             } else if let Ok(rel) = path.strip_prefix(root) {
                 let rel_str = rel.to_string_lossy().to_string();
@@ -582,8 +596,7 @@ impl WeaveServer {
         // Predictive conflict detection: check if any entity in the
         // dependency chain is claimed by another agent
         let mut dep_warnings: Vec<serde_json::Value> = Vec::new();
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let graph = Self::repo_graph(&ctx, &self.registry);
 
         // Find graph entity matching our claimed entity
         if let Some(graph_entity) = graph
@@ -979,9 +992,7 @@ impl WeaveServer {
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
 
-        // Build graph from all supported files in the repo
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let graph = Self::repo_graph(&ctx, &self.registry);
 
         // Shared typed resolver; falls back to a filtered, never-pick-first
         // repo-wide scan (see resolve_entity_for_graph).
@@ -1030,8 +1041,7 @@ impl WeaveServer {
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
 
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let graph = Self::repo_graph(&ctx, &self.registry);
 
         // Shared typed resolver; falls back to a filtered, never-pick-first
         // repo-wide scan (see resolve_entity_for_graph).
@@ -1080,8 +1090,7 @@ impl WeaveServer {
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
 
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let graph = Self::repo_graph(&ctx, &self.registry);
 
         // Shared typed resolver; falls back to a filtered, never-pick-first
         // repo-wide scan (see resolve_entity_for_graph).
@@ -2254,6 +2263,35 @@ fn internal_err(msg: impl ToString) -> rmcp::ErrorData {
 mod resolve_entity_for_graph_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn graph_observes_same_size_edit_with_preserved_mtime() {
+        let root = write_fixture("preserved-mtime", &[("a.ts", "function first() {}\n")]);
+        let path = root.join("a.ts");
+        let before = fs::metadata(&path).unwrap();
+        let registry = create_default_registry();
+        let ctx = RepoContext {
+            state: Mutex::new(EntityStateDoc::open(&root.join("state.automerge")).unwrap()),
+            repo_root: root.clone(),
+        };
+        let first = WeaveServer::repo_graph(&ctx, &registry);
+        assert!(first.entities.values().any(|e| e.name == "first"));
+        fs::write(&path, "function other() {}\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        let second = WeaveServer::repo_graph(&ctx, &registry);
+        assert!(second.entities.values().any(|e| e.name == "other"));
+        assert!(!second.entities.values().any(|e| e.name == "first"));
+        drop(ctx);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     /// Writes `files` (relative path -> content) under a fresh temp dir and
     /// returns the root. Each test gets its own directory (PID + a counter)

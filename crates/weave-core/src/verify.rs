@@ -980,23 +980,16 @@ fn declarations(
     // had to recover from an error. `None` = no tree (not a tree-sitter
     // language), which says nothing either way.
     let parse = |text: &str| {
-        let (entities, tree) = registry
-            .extract_entities_with_tree(file_path, text)
-            .unwrap_or_default();
+        let parsed = crate::parsed::parse(registry, file_path, text);
+        let tree = parsed.tree.as_ref();
         let arms = tree
-            .as_ref()
             .map(|t| arm_keys(text, t.root_node()))
             .unwrap_or_default();
         let keyed = tree
-            .as_ref()
             .map(|t| keyed_elements(file_path, text, t.root_node()))
             .unwrap_or_default();
-        (
-            entities,
-            tree.map(|t| t.root_node().has_error()),
-            arms,
-            keyed,
-        )
+        let broken = tree.map(|t| t.root_node().has_error());
+        (parsed, broken, arms, keyed)
     };
     let (merged_entities, merged_broken, merged_arms, merged_keyed) = parse(merged);
     let (ours_entities, ours_broken, ours_arms, ours_keyed) = parse(ours);
@@ -1018,9 +1011,9 @@ fn declarations(
         tally(all)
     };
     over_either(
-        &names(&ours_entities, ours),
-        &names(&theirs_entities, theirs),
-        &names(&merged_entities, merged),
+        &names(&ours_entities.entities, ours),
+        &names(&theirs_entities.entities, theirs),
+        &names(&merged_entities.entities, merged),
     )
     .map(|(name, m, o, t)| Unverified {
         check: "bindings",
@@ -1043,10 +1036,10 @@ fn declarations(
             file_path,
             [base, ours, theirs, merged],
             [
-                &base_entities,
-                &ours_entities,
-                &theirs_entities,
-                &merged_entities,
+                &base_entities.entities,
+                &ours_entities.entities,
+                &theirs_entities.entities,
+                &merged_entities.entities,
             ],
         )
         .map(|n| Unverified {
@@ -1200,9 +1193,10 @@ pub fn keyed_elements(path: &str, text: &str, root: tree_sitter::Node) -> Vec<Ke
             key,
         });
     };
-    let mut stack = vec![root];
-    while let Some(n) = stack.pop() {
-        let parent = n.parent();
+    // Each node travels with its parent: `Node::parent` walks down from the
+    // root every time it is asked, which made this walk quadratic in depth.
+    let mut stack = vec![(root, root.parent())];
+    while let Some((n, parent)) = stack.pop() {
         match (n.kind(), parent) {
             // Go: `case a, b:` — each expression is its own key.
             ("expression_case", Some(p)) => {
@@ -1298,7 +1292,7 @@ pub fn keyed_elements(path: &str, text: &str, root: tree_sitter::Node) -> Vec<Ke
             _ => {}
         }
         let mut cursor = n.walk();
-        stack.extend(n.children(&mut cursor));
+        stack.extend(n.children(&mut cursor).map(|c| (c, Some(n))));
     }
     out
 }
@@ -1390,8 +1384,8 @@ pub fn duplicate_keys(
     registry: &ParserRegistry,
 ) -> Option<Unverified> {
     let keyed = |text: &str| -> Option<Vec<Keyed>> {
-        let (_, tree) = registry.extract_entities_with_tree(file_path, text)?;
-        let tree = tree?;
+        let parsed = crate::parsed::parse(registry, file_path, text);
+        let tree = parsed.tree.as_ref()?;
         Some(keyed_elements(file_path, text, tree.root_node()))
     };
     let merged = keyed(merged)?;
