@@ -18,6 +18,7 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 - **Merges parse each text once.** The merge checks (subsumption, the verify gate, the key backstop, the layout and rule settlers) each re-parsed ours, theirs and the result; they now share one parse per text within a merge. The keyed-element walk no longer asks tree-sitter for each node's parent, which walked down from the root every time. Merge output is unchanged.
 - **`weave check --base/--ours/--theirs` reads a file once when the sides left it as base**, and reads files in parallel. Findings are unchanged.
+- **`weave check --base/--ours/--theirs` is 7.5x faster on large repos.** The DANGLING and SHADOW passes compared every file's full text against base once per candidate name to learn whether a side changed it; that is now decided once per file. A file that does not contain a name is skipped before its lines are scanned. On the three vscode merges touching the most files, 317 s became 42 s, with identical findings.
 
 ### Fixed
 

@@ -91,6 +91,10 @@ struct FileVersions {
     /// base name → new name, per side, from sem-core's matcher.
     ours_renames: BTreeMap<String, String>,
     theirs_renames: BTreeMap<String, String>,
+    /// Whether each side changed (or added) the file, decided once: the
+    /// passes below ask it for every file per definition.
+    ours_touched: bool,
+    theirs_touched: bool,
 }
 
 impl FileVersions {
@@ -114,7 +118,10 @@ impl FileVersions {
     }
     /// Did `side` change (or add) this file relative to base?
     fn touched(&self, side: Side) -> bool {
-        self.version(side) != self.base.as_ref()
+        match side {
+            Side::Ours => self.ours_touched,
+            Side::Theirs => self.theirs_touched,
+        }
     }
 }
 
@@ -201,6 +208,8 @@ pub fn check(base: &Tree, ours: &Tree, theirs: &Tree) -> Vec<Findings> {
                 side(&t)
             };
             fv.base_defs = base_defs;
+            fv.ours_touched = fv.ours != fv.base;
+            fv.theirs_touched = fv.theirs != fv.base;
             (path.clone(), fv)
         })
         .collect();
