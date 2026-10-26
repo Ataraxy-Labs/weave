@@ -7,6 +7,12 @@ on:
     paths:
       - "crates/weave-core/Cargo.toml"
   workflow_dispatch:
+    inputs:
+      publish_crates_only:
+        description: Retry crates.io publishing for the existing release tag
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -188,103 +194,25 @@ jobs:
 
   publish-crates:
     needs: [check-version, create-tag]
-    if: needs.check-version.outputs.should_release == 'true'
+    if: >-
+      always() && needs.check-version.result == 'success' &&
+      ((needs.check-version.outputs.should_release == 'true' && needs.create-tag.result == 'success') ||
+      (inputs.publish_crates_only == true && needs.check-version.outputs.should_release == 'false'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
+      - name: Preserve publishing helper
+        run: cp scripts/publish-crates.sh "$RUNNER_TEMP/publish-crates.sh"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: v${{ needs.check-version.outputs.version }}
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Publish weave-core
-        run: |
-          cargo publish -p weave-core --no-verify 2>&1 | tee pub.log
-          status=${PIPESTATUS[0]}
-          if [ $status -ne 0 ]; then
-            if grep -qi "already exists\|already uploaded" pub.log; then
-              echo "weave-core already on crates.io, continuing"
-            else
-              echo "::error::cargo publish failed for weave-core"; exit $status
-            fi
-          fi
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish weave-crdt
-        run: |
-          cargo publish -p weave-crdt --no-verify 2>&1 | tee pub.log
-          status=${PIPESTATUS[0]}
-          if [ $status -ne 0 ]; then
-            if grep -qi "already exists\|already uploaded" pub.log; then
-              echo "weave-crdt already on crates.io, continuing"
-            else
-              echo "::error::cargo publish failed for weave-crdt"; exit $status
-            fi
-          fi
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish weave-certify
-        run: |
-          cargo publish -p weave-certify --no-verify 2>&1 | tee pub.log
-          status=${PIPESTATUS[0]}
-          if [ $status -ne 0 ]; then
-            if grep -qi "already exists\|already uploaded" pub.log; then
-              echo "weave-certify already on crates.io, continuing"
-            else
-              echo "::error::cargo publish failed for weave-certify"; exit $status
-            fi
-          fi
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish weave-cli
-        run: |
-          cargo publish -p weave-cli --no-verify 2>&1 | tee pub.log
-          status=${PIPESTATUS[0]}
-          if [ $status -ne 0 ]; then
-            if grep -qi "already exists\|already uploaded" pub.log; then
-              echo "weave-cli already on crates.io, continuing"
-            else
-              echo "::error::cargo publish failed for weave-cli"; exit $status
-            fi
-          fi
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish weave-driver
-        run: |
-          cargo publish -p weave-driver --no-verify 2>&1 | tee pub.log
-          status=${PIPESTATUS[0]}
-          if [ $status -ne 0 ]; then
-            if grep -qi "already exists\|already uploaded" pub.log; then
-              echo "weave-driver already on crates.io, continuing"
-            else
-              echo "::error::cargo publish failed for weave-driver"; exit $status
-            fi
-          fi
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish weave-mcp
-        run: |
-          cargo publish -p weave-mcp --no-verify 2>&1 | tee pub.log
-          status=${PIPESTATUS[0]}
-          if [ $status -ne 0 ]; then
-            if grep -qi "already exists\|already uploaded" pub.log; then
-              echo "weave-mcp already on crates.io, continuing"
-            else
-              echo "::error::cargo publish failed for weave-mcp"; exit $status
-            fi
-          fi
+      - name: Publish crates in dependency order
+        run: bash "$RUNNER_TEMP/publish-crates.sh"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
