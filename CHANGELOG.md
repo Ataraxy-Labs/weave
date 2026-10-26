@@ -9,6 +9,8 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+## [0.6.2] - 2026-10-25
+
 ### Changed
 
 - Update the GitHub App JWT signing dependency to jsonwebtoken 11.1.0.

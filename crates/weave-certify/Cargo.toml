@@ -1,6 +1,6 @@
 [package]
 name = "weave-certify"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Independent merge certificate: checks a three-way merge result against the per-region selection (pushout) rule. Shares only entity extraction (sem-core) with weave; no weave merge code."
