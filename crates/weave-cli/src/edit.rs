@@ -252,10 +252,29 @@ pub struct Report {
     /// edit rather than discover from a failing test.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub review: Vec<String>,
-    /// The output of the `then` command, run once the edits were written.
+    /// The result of the `then` command, run once the edits were written.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub then: Option<String>,
+    pub then: Option<Then>,
 }
+
+/// What the `then` command did.
+#[derive(Debug, Clone, Serialize)]
+pub struct Then {
+    /// Its exit code; absent when it could not be run or did not finish.
+    pub exit_code: Option<i32>,
+    /// Its stdout then stderr, or why it did not run: the last
+    /// [`THEN_OUTPUT_CAP`] bytes, since a failure is reported at the end.
+    pub output: String,
+    /// Whether `output` was cut to its tail.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// How much of a `then` command's output comes back.
+pub const THEN_OUTPUT_CAP: usize = 16 * 1024;
+
+/// How long a `then` command may run before it is stopped.
+const THEN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Why a batch was refused. Nothing was written.
 #[derive(Debug, Clone, Serialize, thiserror::Error)]
@@ -598,21 +617,58 @@ pub fn speculate(root: &Path) {
         .status();
 }
 
-/// Run `cmd` through `sem check --run` once the edits are written, so an edit
-/// and its check take one call; it joins the speculative run if there is one.
-pub fn then(root: &Path, cmd: &str) -> String {
-    match std::process::Command::new(sem_bin())
-        .args(["check", "--run", cmd])
-        .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .output()
-    {
-        Ok(o) => format!(
-            "{}{}",
-            String::from_utf8_lossy(&o.stdout),
-            String::from_utf8_lossy(&o.stderr)
+/// Whether `bin` names a program that exists: a path as given, else a
+/// lookup on `PATH`.
+fn on_path(bin: &str) -> bool {
+    if bin.contains('/') {
+        return Path::new(bin).is_file();
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|d| d.join(bin).is_file()))
+}
+
+/// Run `cmd` once the edits are written, so an edit and its check take one
+/// call: through `sem check --run` when sem is installed (it joins the
+/// speculative run if there is one), else with `sh -c` in the repo root.
+/// Bounded by [`THEN_DEADLINE`]; output is kept to its last
+/// [`THEN_OUTPUT_CAP`] bytes.
+pub fn then(root: &Path, cmd: &str) -> Then {
+    let sem = sem_bin();
+    let (mut command, what) = if on_path(&sem) {
+        let mut c = std::process::Command::new(&sem);
+        c.args(["check", "--run", cmd]);
+        (c, "sem check --run")
+    } else {
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", cmd]);
+        (c, "sh -c")
+    };
+    command.current_dir(root);
+    let (exit_code, text) = match crate::gitscan::run_bounded(command, what, None, THEN_DEADLINE) {
+        Ok((status, stdout, stderr)) => (
+            status.code(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            ),
         ),
-        Err(e) => format!("could not run sem check --run: {e} (set SEM_BIN)"),
+        Err(e) => (None, e.to_string()),
+    };
+    let truncated = text.len() > THEN_OUTPUT_CAP;
+    let output = if truncated {
+        let mut start = text.len() - THEN_OUTPUT_CAP;
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        text[start..].to_string()
+    } else {
+        text
+    };
+    Then {
+        exit_code,
+        output,
+        truncated,
     }
 }
 

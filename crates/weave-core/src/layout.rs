@@ -86,7 +86,8 @@ enum Syntax {
 }
 
 fn syntax(text: &str, path: &str) -> Syntax {
-    let Some((_, Some(tree))) = PARSER_REGISTRY.extract_entities_with_tree(path, text) else {
+    let parsed = crate::parsed::parse(&PARSER_REGISTRY, path, text);
+    let Some(tree) = parsed.tree.as_ref() else {
         return Syntax::NoGrammar;
     };
     if tree.root_node().has_error() {

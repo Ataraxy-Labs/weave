@@ -28,6 +28,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use rayon::prelude::*;
 use sem_core::model::change::ChangeType;
 use sem_core::model::entity::SemanticEntity;
 use sem_core::model::identity::match_entities;
@@ -90,6 +91,10 @@ struct FileVersions {
     /// base name → new name, per side, from sem-core's matcher.
     ours_renames: BTreeMap<String, String>,
     theirs_renames: BTreeMap<String, String>,
+    /// Whether each side changed (or added) the file, decided once: the
+    /// passes below ask it for every file per definition.
+    ours_touched: bool,
+    theirs_touched: bool,
 }
 
 impl FileVersions {
@@ -113,7 +118,10 @@ impl FileVersions {
     }
     /// Did `side` change (or add) this file relative to base?
     fn touched(&self, side: Side) -> bool {
-        self.version(side) != self.base.as_ref()
+        match side {
+            Side::Ours => self.ours_touched,
+            Side::Theirs => self.theirs_touched,
+        }
     }
 }
 
@@ -167,27 +175,44 @@ pub fn check(base: &Tree, ours: &Tree, theirs: &Tree) -> Vec<Findings> {
     paths.extend(ours.keys());
     paths.extend(theirs.keys());
 
-    let mut files: BTreeMap<String, FileVersions> = BTreeMap::new();
-    for path in paths {
-        if !is_supported(path) {
-            continue;
-        }
-        let mut fv = FileVersions {
-            base: base.get(path).cloned(),
-            ours: ours.get(path).cloned(),
-            theirs: theirs.get(path).cloned(),
-            ..Default::default()
-        };
-        let base_e = entities_of(path, fv.base.as_deref().unwrap_or(""));
-        let ours_e = entities_of(path, fv.ours.as_deref().unwrap_or(""));
-        let theirs_e = entities_of(path, fv.theirs.as_deref().unwrap_or(""));
-        fv.ours_renames = rename_map(&base_e, &ours_e, path);
-        fv.theirs_renames = rename_map(&base_e, &theirs_e, path);
-        fv.base_defs = defs_of(&base_e, path);
-        fv.ours_defs = defs_of(&ours_e, path);
-        fv.theirs_defs = defs_of(&theirs_e, path);
-        files.insert(path.clone(), fv);
-    }
+    //
+    // Most of a repository is a file neither side touched, whose three
+    // versions are one text: it is read once, and a side that left a file as
+    // base has no renames in it. Files are independent of each other, so they
+    // are read in parallel; the map they land in keeps the order.
+    let paths: Vec<&String> = paths.into_iter().filter(|p| is_supported(p)).collect();
+    let files: BTreeMap<String, FileVersions> = paths
+        .par_iter()
+        .map(|&path| {
+            let mut fv = FileVersions {
+                base: base.get(path).cloned(),
+                ours: ours.get(path).cloned(),
+                theirs: theirs.get(path).cloned(),
+                ..Default::default()
+            };
+            let text = |v: &Option<String>| v.as_deref().unwrap_or("").to_string();
+            let (b, o, t) = (text(&fv.base), text(&fv.ours), text(&fv.theirs));
+            let base_e = entities_of(path, &b);
+            let base_defs = defs_of(&base_e, path);
+            let side = |side: &str| -> (BTreeMap<String, String>, Vec<Def>) {
+                if side == b {
+                    return (BTreeMap::new(), base_defs.clone());
+                }
+                let e = entities_of(path, side);
+                (rename_map(&base_e, &e, path), defs_of(&e, path))
+            };
+            (fv.ours_renames, fv.ours_defs) = side(&o);
+            (fv.theirs_renames, fv.theirs_defs) = if t == o {
+                (fv.ours_renames.clone(), fv.ours_defs.clone())
+            } else {
+                side(&t)
+            };
+            fv.base_defs = base_defs;
+            fv.ours_touched = fv.ours != fv.base;
+            fv.theirs_touched = fv.theirs != fv.base;
+            (path.clone(), fv)
+        })
+        .collect();
 
     // ---- 2. The post-merge definition set, repo-wide.
     //

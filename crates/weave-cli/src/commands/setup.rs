@@ -34,10 +34,9 @@ pub(crate) fn run(
     // Global setup configures git itself, so it doesn't need to run inside a
     // repo. Per-repo setup does.
     if !global {
-        let git_dir = Path::new(".git");
-        if !git_dir.exists() {
-            return Err("Not in a git repository. Run `weave setup` from the repo root, or `weave setup --global` to configure git for every repo.".into());
-        }
+        enter_repo_root().map_err(|_| {
+            "Not in a git repository. Run `weave setup` inside the repo, or `weave setup --global` to configure git for every repo."
+        })?;
     }
 
     // Resolve driver binary path
@@ -128,11 +127,18 @@ pub(crate) fn run(
     Ok(())
 }
 
+/// Move to the repository's root, so the `.gitattributes` and `git config`
+/// below are the repository's own wherever in it this was run (a subdirectory,
+/// or a worktree, whose `.git` is a file).
+fn enter_repo_root() -> Result<(), Box<dyn std::error::Error>> {
+    let root = weave_core::git::find_repo_root(Path::new("."))?;
+    std::env::set_current_dir(root)?;
+    Ok(())
+}
+
 pub(crate) fn unsetup() -> Result<(), Box<dyn std::error::Error>> {
-    let git_dir = Path::new(".git");
-    if !git_dir.exists() {
-        return Err("Not in a git repository. Run `weave unsetup` from the repo root.".into());
-    }
+    enter_repo_root()
+        .map_err(|_| "Not in a git repository. Run `weave setup --off` inside the repo.")?;
 
     // Remove git config for weave merge driver
     let _ = Command::new("git")

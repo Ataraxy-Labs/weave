@@ -300,21 +300,23 @@ pub fn entity_merge_with_registry(
     marker_format: &MarkerFormat,
     host: &Host,
 ) -> MergeResult {
-    let composed = compose(base, ours, theirs, file_path, registry, marker_format, host);
-    let result = if composed.is_clean() {
-        composed
-    } else {
-        settle(composed, base, ours, theirs, file_path, registry, host)
-    };
-    keys_hold(
-        result,
-        base,
-        ours,
-        theirs,
-        file_path,
-        registry,
-        marker_format,
-    )
+    crate::parsed::scope(|| {
+        let composed = compose(base, ours, theirs, file_path, registry, marker_format, host);
+        let result = if composed.is_clean() {
+            composed
+        } else {
+            settle(composed, base, ours, theirs, file_path, registry, host)
+        };
+        keys_hold(
+            result,
+            base,
+            ours,
+            theirs,
+            file_path,
+            registry,
+            marker_format,
+        )
+    })
 }
 
 /// The last check on every clean answer, whatever rung wrote it: no switch,
@@ -769,13 +771,12 @@ fn superset_is_sound(
         return false;
     }
     let parse = |text: &str| {
-        let (entities, tree) = registry
-            .extract_entities_with_tree(file_path, text)
-            .unwrap_or_default();
-        let broken = tree.map(|t| t.root_node().has_error());
+        let parsed = crate::parsed::parse(registry, file_path, text);
+        let broken = parsed.tree.as_ref().map(|t| t.root_node().has_error());
         let mut names: HashMap<(String, String), usize> = HashMap::new();
         // A fallback `chunk` is named by its line range, not declared.
-        for e in entities
+        for e in parsed
+            .entities
             .iter()
             .filter(|e| e.parent_id.is_none() && e.entity_type != "chunk")
         {

@@ -417,7 +417,10 @@ fn replay_base(dir: &Path, theirs_rev: &str) -> R<String> {
 /// against it (issue #157). `base` defaults to the merge base of the two for a
 /// merge or revert, and to the replayed commit's parent for a rebase or
 /// cherry-pick: a replay applies one commit as a patch, and the merge base
-/// would smear the whole branch divergence into the context.
+/// would smear the whole branch divergence into the context. With none of
+/// those in progress, a `HEAD` that is itself a merge commit is the merge just
+/// committed: ours defaults to `HEAD^1` and theirs to `HEAD^2`, the same shape
+/// [`merge_scope`] verifies.
 pub(crate) fn resolve_revs(
     dir: &Path,
     base: Option<&str>,
@@ -426,13 +429,15 @@ pub(crate) fn resolve_revs(
 ) -> R<(String, String, String)> {
     if !rev_exists(dir, "HEAD") {
         return Err(
-            "not a git repository (or no commits yet) — use the directory mode instead".into(),
+            "not a git repository (or no commits yet) — run inside a git repository with at \
+             least one commit"
+                .into(),
         );
     }
-    let ours = ours.unwrap_or("HEAD").to_string();
+    let mut ours_default = "HEAD";
     let theirs = match theirs {
         Some(t) => t.to_string(),
-        None => [
+        None => match [
             "MERGE_HEAD",
             "REBASE_HEAD",
             "CHERRY_PICK_HEAD",
@@ -440,12 +445,23 @@ pub(crate) fn resolve_revs(
         ]
         .into_iter()
         .find(|r| rev_exists(dir, r))
-        .map(str::to_string)
-        .ok_or(
-            "no --theirs given and no merge, rebase, cherry-pick or revert in progress \
-                 (no MERGE_HEAD / REBASE_HEAD / CHERRY_PICK_HEAD / REVERT_HEAD)",
-        )?,
+        {
+            Some(r) => r.to_string(),
+            None if rev_exists(dir, "HEAD^2") => {
+                ours_default = "HEAD^1";
+                "HEAD^2".to_string()
+            }
+            None => {
+                return Err(
+                    "no theirs revision given (`--theirs`, or `theirs` over MCP) and no \
+                     merge, rebase, cherry-pick or revert in progress, and HEAD is not a merge \
+                     commit"
+                        .into(),
+                )
+            }
+        },
     };
+    let ours = ours.unwrap_or(ours_default).to_string();
     let base = match base {
         Some(b) => b.to_string(),
         None if theirs == "REBASE_HEAD" || theirs == "CHERRY_PICK_HEAD" => {
@@ -1070,5 +1086,55 @@ mod tests {
         .expect_err("a stalled git must not succeed");
         assert!(err.contains("did not finish within 1s"), "{err}");
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    /// With no merge in progress, a merge commit at HEAD is the merge just
+    /// committed: the revisions default to its two parents, as `merge_scope`
+    /// reads them, instead of failing for want of a MERGE_HEAD.
+    #[test]
+    fn resolve_revs_defaults_to_a_committed_merge() {
+        let root = git_fixture("committed-merge");
+        let commit = |msg: &str| {
+            git_ok(
+                &root,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "-qm",
+                    msg,
+                ],
+            );
+        };
+        fs::write(root.join("a.py"), "x = 1\n").expect("write");
+        git_ok(&root, &["add", "."]);
+        commit("base");
+        git_ok(&root, &["checkout", "-qb", "side"]);
+        fs::write(root.join("b.py"), "y = 1\n").expect("write");
+        git_ok(&root, &["add", "."]);
+        commit("side");
+        git_ok(&root, &["checkout", "-q", "main"]);
+        fs::write(root.join("c.py"), "z = 1\n").expect("write");
+        git_ok(&root, &["add", "."]);
+        commit("main");
+        git_ok(
+            &root,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "merge",
+                "-q",
+                "--no-edit",
+                "side",
+            ],
+        );
+
+        let (_, ours, theirs) = resolve_revs(&root, None, None, None).expect("committed merge");
+        assert_eq!((ours.as_str(), theirs.as_str()), ("HEAD^1", "HEAD^2"));
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -126,14 +126,17 @@ pub(crate) fn is_definition_line(line: &str, name: &str) -> bool {
 
 /// Does `content` define `name` anywhere?
 pub fn has_definition(content: &str, name: &str) -> bool {
-    !name.is_empty() && content.lines().any(|l| is_definition_line(l, name))
+    // A definition line states the name, so text without it has none.
+    !name.is_empty()
+        && content.contains(name)
+        && content.lines().any(|l| is_definition_line(l, name))
 }
 
 /// Does `content` call `name`? The identifier at a word boundary, not preceded
 /// by `.` (attribute access binds elsewhere), followed by `(` — and never on a
 /// line that defines it.
 pub fn has_call_reference(content: &str, name: &str) -> bool {
-    if name.is_empty() {
+    if name.is_empty() || !content.contains(name) {
         return false;
     }
     // A rejected match is retried one *char* later, not one byte later: with a

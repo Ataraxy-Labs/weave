@@ -831,8 +831,7 @@ fn parse<'a>(l: Lang, text: &'a str, path: &str, registry: &ParserRegistry) -> O
     match l {
         Lang::Ini => Some(Parsed::Ini(text)),
         Lang::Py | Lang::Js => {
-            let (_, tree) = registry.extract_entities_with_tree(path, text)?;
-            let tree = tree?;
+            let tree = crate::parsed::parse(registry, path, text).tree.clone()?;
             (!tree.root_node().has_error()).then_some(Parsed::Tree(text, tree))
         }
     }

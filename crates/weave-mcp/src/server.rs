@@ -25,10 +25,26 @@ use weave_crdt::{
 use crate::error::{Reason, ToolError};
 use crate::tools::*;
 
-/// Lazily-initialized repo context. Created on first tool call.
+/// Lazily-initialized repo context. Created on the first tool call that
+/// lands in its repository.
 struct RepoContext {
     state: Mutex<EntityStateDoc>,
     repo_root: PathBuf,
+}
+
+/// Every repository this server has answered for, keyed by canonical root.
+///
+/// One server can be asked about more than one checkout (a second worktree, a
+/// sibling repo named by absolute path); caching a single context forever
+/// answered all of them from whichever came first.
+#[derive(Default)]
+struct Contexts {
+    by_root: std::collections::HashMap<PathBuf, RepoContext>,
+    /// The repository WEAVE_REPO or the working directory names, once found.
+    default_root: Option<PathBuf>,
+    /// The repository the last successful call used: what a call with no
+    /// path of its own falls back to when there is no default.
+    last_root: Option<PathBuf>,
 }
 
 /// LRU cache for parsed entities keyed on (file_path, content_hash).
@@ -43,7 +59,7 @@ fn content_hash_u64(content: &str) -> u64 {
 
 #[derive(Clone)]
 pub(crate) struct WeaveServer {
-    context: Arc<Mutex<Option<RepoContext>>>,
+    context: Arc<Mutex<Contexts>>,
     registry: Arc<ParserRegistry>,
     entity_cache: Arc<Mutex<EntityCache>>,
     /// What a merge run by this server may reach outside itself. Granted once,
@@ -63,7 +79,10 @@ impl WeaveServer {
     /// 1. If file_path is absolute, derive repo from that path
     /// 2. WEAVE_REPO env var
     /// 3. CWD-based git discovery
-    fn discover_repo_root(file_path_hint: Option<&str>) -> Result<PathBuf, ToolError> {
+    fn discover_repo_root(
+        file_path_hint: Option<&str>,
+        takes_path: bool,
+    ) -> Result<PathBuf, ToolError> {
         // Strategy 1: Absolute file path -> git -C <parent> rev-parse
         if let Some(fp) = file_path_hint {
             let p = Path::new(fp);
@@ -93,7 +112,7 @@ impl WeaveServer {
             Err(_) => {}
         }
 
-        Err(Reason::NoRepository.into())
+        Err(Reason::NoRepository { takes_path }.into())
     }
 
     /// Resolve a file path to (repo_root-relative path, absolute path).
@@ -127,28 +146,71 @@ impl WeaveServer {
         }
     }
 
-    /// Lazily initialize repo context, using file_path as a hint for repo discovery.
+    /// The repo context for a tool that takes a file path, using it as a hint
+    /// for repo discovery: an absolute path is answered from the repository
+    /// that contains it, whichever repository earlier calls used.
     async fn get_context(
         &self,
         file_path_hint: Option<&str>,
     ) -> Result<tokio::sync::MappedMutexGuard<'_, RepoContext>, ToolError> {
-        {
-            let mut guard = self.context.lock().await;
-            if guard.is_none() {
-                let repo_root = Self::discover_repo_root(file_path_hint)?;
-                let state_path = repo_root.join(".weave").join("state.automerge");
-                let state =
-                    EntityStateDoc::open(&state_path).map_err(|e| Reason::state(&state_path, e))?;
-                *guard = Some(RepoContext {
+        self.context_for(file_path_hint, true).await
+    }
+
+    /// The repo context for a tool that takes no file path.
+    async fn get_repo_context(
+        &self,
+    ) -> Result<tokio::sync::MappedMutexGuard<'_, RepoContext>, ToolError> {
+        self.context_for(None, false).await
+    }
+
+    async fn context_for(
+        &self,
+        file_path_hint: Option<&str>,
+        takes_path: bool,
+    ) -> Result<tokio::sync::MappedMutexGuard<'_, RepoContext>, ToolError> {
+        let mut guard = self.context.lock().await;
+        let absolute = file_path_hint.filter(|fp| Path::new(fp).is_absolute());
+        let repo_root = match (absolute, &guard.default_root, &guard.last_root) {
+            (Some(_), _, _) => Self::discover_repo_root(absolute, takes_path)?,
+            (None, Some(root), _) => root.clone(),
+            (None, None, last) => match Self::discover_repo_root(None, takes_path) {
+                Ok(root) => {
+                    guard.default_root = Some(root.clone());
+                    root
+                }
+                Err(e) => match last {
+                    Some(root) if matches!(e.reason, Reason::NoRepository { .. }) => root.clone(),
+                    _ => return Err(e),
+                },
+            },
+        };
+        // Keyed canonically, so a symlinked spelling of a repository already
+        // open does not open its state file a second time.
+        let key = std::fs::canonicalize(&repo_root).unwrap_or_else(|_| repo_root.clone());
+        if !guard.by_root.contains_key(&key) {
+            let state_path = repo_root.join(".weave").join("state.automerge");
+            let state =
+                EntityStateDoc::open(&state_path).map_err(|e| Reason::state(&state_path, e))?;
+            guard.by_root.insert(
+                key.clone(),
+                RepoContext {
                     state: Mutex::new(state),
                     repo_root,
-                });
-            }
+                },
+            );
         }
-        let guard = self.context.lock().await;
-        Ok(tokio::sync::MutexGuard::map(guard, |opt| {
-            opt.as_mut().unwrap()
+        guard.last_root = Some(key.clone());
+        Ok(tokio::sync::MutexGuard::map(guard, |c| {
+            c.by_root.get_mut(&key).unwrap()
         }))
+    }
+
+    /// Read the graph from current source. Metadata alone cannot prove freshness:
+    /// editors can preserve both size and mtime while changing dependencies.
+    fn repo_graph(ctx: &RepoContext, registry: &ParserRegistry) -> Arc<EntityGraph> {
+        let file_paths = Self::find_supported_files(&ctx.repo_root, registry);
+        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, registry);
+        Arc::new(graph)
     }
 
     /// Find all files in the repo that have a supported parser.
@@ -175,7 +237,13 @@ impl WeaveServer {
                     continue;
                 }
             }
-            if path.is_dir() {
+            // The entry's own type costs no syscall; only a symlink needs a
+            // stat to say what it points at.
+            let is_dir = match entry.file_type() {
+                Ok(t) if !t.is_symlink() => t.is_dir(),
+                _ => path.is_dir(),
+            };
+            if is_dir {
                 Self::walk_dir(&path, root, registry, files);
             } else if let Ok(rel) = path.strip_prefix(root) {
                 let rel_str = rel.to_string_lossy().to_string();
@@ -354,12 +422,12 @@ impl WeaveServer {
         match candidates.len() {
             0 => resolver_result,
             // Unambiguous repo-wide: keep the historical cross-file lookup.
-            1 => Ok(candidates[0].id.clone()),
+            1 => Ok(candidates[0].id.to_string()),
             _ => {
                 if let Some(o) = ordinal {
                     return candidates
                         .get(o as usize)
-                        .map(|e| e.id.clone())
+                        .map(|e| e.id.to_string())
                         .ok_or_else(|| {
                             Reason::EntityAmbiguous(format!(
                                 "ordinal {} out of range: {} candidates named '{}' outside '{}'",
@@ -436,7 +504,7 @@ impl WeaveServer {
 impl WeaveServer {
     pub(crate) fn new() -> Self {
         Self {
-            context: Arc::new(Mutex::new(None)),
+            context: Arc::new(Mutex::new(Contexts::default())),
             registry: Arc::new(create_default_registry()),
             entity_cache: Arc::new(Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(500).unwrap(),
@@ -462,7 +530,13 @@ impl WeaveServer {
 
         let entities = self.cached_extract_entities(&content, &rel_path).await;
         if entities.is_empty() && self.registry.get_plugin(&rel_path).is_none() {
-            return Err(internal_err(format!("No parser for file: {}", rel_path)));
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "no parser for `{rel_path}`: weave has no grammar for this file type, so it \
+                     has no entities. Pass a source file in a supported language"
+                ),
+                None,
+            ));
         }
         let result: Vec<serde_json::Value> = entities
             .iter()
@@ -515,16 +589,14 @@ impl WeaveServer {
             );
         }
 
-        let result =
-            claim_entity(&mut state, &params.agent_id, &entity_id).map_err(internal_err)?;
+        let result = claim_entity(&mut state, &params.agent_id, &entity_id).map_err(crdt_err)?;
 
         let _ = state.save();
 
         // Predictive conflict detection: check if any entity in the
         // dependency chain is claimed by another agent
         let mut dep_warnings: Vec<serde_json::Value> = Vec::new();
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let graph = Self::repo_graph(&ctx, &self.registry);
 
         // Find graph entity matching our claimed entity
         if let Some(graph_entity) = graph
@@ -621,7 +693,7 @@ impl WeaveServer {
         };
 
         let mut state = ctx.state.lock().await;
-        release_entity(&mut state, &params.agent_id, &entity_id).map_err(internal_err)?;
+        release_entity(&mut state, &params.agent_id, &entity_id).map_err(crdt_err)?;
         let _ = state.save();
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -648,7 +720,7 @@ impl WeaveServer {
             &self.registry,
         );
 
-        let entities = get_entities_for_file(&state, &rel_path).map_err(internal_err)?;
+        let entities = get_entities_for_file(&state, &rel_path).map_err(crdt_err)?;
 
         let file_entities = self.cached_extract_entities(&content, &rel_path).await;
 
@@ -727,9 +799,9 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<PotentialConflictsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context(None).await?;
+        let ctx = self.get_repo_context().await?;
         let state = ctx.state.lock().await;
-        let mut conflicts = detect_potential_conflicts(&state).map_err(internal_err)?;
+        let mut conflicts = detect_potential_conflicts(&state).map_err(crdt_err)?;
 
         if let Some(ref agent_id) = params.agent_id {
             conflicts.retain(|c| c.agents.contains(agent_id));
@@ -774,7 +846,7 @@ impl WeaveServer {
         // Run git commands from the repo root
         let merge_base =
             git::find_merge_base(&ctx.repo_root, &params.base_branch, &params.target_branch)
-                .map_err(internal_err)?;
+                .map_err(ToolError::from)?;
 
         let files = if let Some(ref fp) = params.file_path {
             let (rel, _) = Self::resolve_file_path(&ctx.repo_root, fp);
@@ -786,20 +858,32 @@ impl WeaveServer {
                 &params.base_branch,
                 &params.target_branch,
             )
-            .map_err(internal_err)?
+            .map_err(ToolError::from)?
         };
 
         let mut results = Vec::new();
         for file in &files {
             let base = git::git_show_optional(&ctx.repo_root, &merge_base, file)
-                .map_err(ToolError::from)?
-                .unwrap_or_default();
+                .map_err(ToolError::from)?;
             let ours = git::git_show_optional(&ctx.repo_root, &params.base_branch, file)
-                .map_err(ToolError::from)?
-                .unwrap_or_default();
+                .map_err(ToolError::from)?;
             let theirs = git::git_show_optional(&ctx.repo_root, &params.target_branch, file)
-                .map_err(ToolError::from)?
-                .unwrap_or_default();
+                .map_err(ToolError::from)?;
+            // A named file on no side is a wrong path, not a clean merge.
+            if params.file_path.is_some() && base.is_none() && ours.is_none() && theirs.is_none() {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!(
+                        "`{file}` exists at none of base/ours/theirs (paths are relative to \
+                         the repo root, or pass an absolute path)"
+                    ),
+                    None,
+                ));
+            }
+            let (base, ours, theirs) = (
+                base.unwrap_or_default(),
+                ours.unwrap_or_default(),
+                theirs.unwrap_or_default(),
+            );
 
             if ours == theirs || base == ours || base == theirs {
                 continue;
@@ -860,7 +944,9 @@ impl WeaveServer {
             .filter(|r| r["clean"].as_bool().unwrap_or(true))
             .count();
         let conflict_count = results.len() - clean_count;
-        let overall_confidence = if conflict_count > 0 {
+        let overall_confidence = if results.is_empty() {
+            "nothing_to_compare"
+        } else if conflict_count > 0 {
             "conflict"
         } else if results
             .iter()
@@ -876,13 +962,19 @@ impl WeaveServer {
             "very_high"
         };
 
-        let summary = serde_json::json!({
+        let mut summary = serde_json::json!({
             "files_analyzed": results.len(),
             "files_clean": clean_count,
             "files_with_conflicts": conflict_count,
             "overall_confidence": overall_confidence,
             "results": results,
         });
+        if results.is_empty() {
+            summary["note"] = serde_json::json!(
+                "no file needed a three-way merge (each was changed on one side only, or \
+                 identically on both), so weave compared nothing"
+            );
+        }
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&summary).unwrap_or_default(),
@@ -900,9 +992,7 @@ impl WeaveServer {
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
 
-        // Build graph from all supported files in the repo
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let graph = Self::repo_graph(&ctx, &self.registry);
 
         // Shared typed resolver; falls back to a filtered, never-pick-first
         // repo-wide scan (see resolve_entity_for_graph).
@@ -951,8 +1041,7 @@ impl WeaveServer {
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
 
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let graph = Self::repo_graph(&ctx, &self.registry);
 
         // Shared typed resolver; falls back to a filtered, never-pick-first
         // repo-wide scan (see resolve_entity_for_graph).
@@ -1001,8 +1090,7 @@ impl WeaveServer {
         let (rel_path, abs_path) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
         let content = Self::read_file_at(&abs_path, &rel_path)?;
 
-        let file_paths = Self::find_supported_files(&ctx.repo_root, &self.registry);
-        let (graph, _entities) = EntityGraph::build(&ctx.repo_root, &file_paths, &self.registry);
+        let graph = Self::repo_graph(&ctx, &self.registry);
 
         // Shared typed resolver; falls back to a filtered, never-pick-first
         // repo-wide scan (see resolve_entity_for_graph).
@@ -1048,7 +1136,7 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<AgentRegisterParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context(None).await?;
+        let ctx = self.get_repo_context().await?;
         let mut state = ctx.state.lock().await;
         register_agent(
             &mut state,
@@ -1056,7 +1144,7 @@ impl WeaveServer {
             &params.agent_id,
             &params.branch,
         )
-        .map_err(internal_err)?;
+        .map_err(crdt_err)?;
         let _ = state.save();
 
         Ok(CallToolResult::success(vec![Content::text(format!(
@@ -1072,10 +1160,10 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<AgentHeartbeatParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context(None).await?;
+        let ctx = self.get_repo_context().await?;
         let mut state = ctx.state.lock().await;
         weave_crdt::agent_heartbeat(&mut state, &params.agent_id, &params.working_on)
-            .map_err(internal_err)?;
+            .map_err(crdt_err)?;
         let _ = state.save();
 
         Ok(CallToolResult::success(vec![Content::text("OK")]))
@@ -1099,7 +1187,8 @@ impl WeaveServer {
             let (rel, _) = Self::resolve_file_path(&ctx.repo_root, fp);
             vec![rel]
         } else {
-            git::diff_files(&ctx.repo_root, &params.base_ref, target_ref).map_err(internal_err)?
+            git::diff_files(&ctx.repo_root, &params.base_ref, target_ref)
+                .map_err(ToolError::from)?
         };
 
         let mut all_changes = Vec::new();
@@ -1199,7 +1288,7 @@ impl WeaveServer {
 
         let merge_base =
             git::find_merge_base(&ctx.repo_root, &params.base_branch, &params.target_branch)
-                .map_err(internal_err)?;
+                .map_err(ToolError::from)?;
 
         let files = if let Some(ref fp) = params.file_path {
             let (rel, _) = Self::resolve_file_path(&ctx.repo_root, fp);
@@ -1211,7 +1300,7 @@ impl WeaveServer {
                 &params.base_branch,
                 &params.target_branch,
             )
-            .map_err(internal_err)?
+            .map_err(ToolError::from)?
         };
 
         let mut results = Vec::new();
@@ -1276,7 +1365,7 @@ impl WeaveServer {
 
         let merge_base =
             git::find_merge_base(&ctx.repo_root, &params.base_branch, &params.target_branch)
-                .map_err(internal_err)?;
+                .map_err(ToolError::from)?;
 
         let files = if let Some(ref fp) = params.file_path {
             let (rel, _) = Self::resolve_file_path(&ctx.repo_root, fp);
@@ -1288,7 +1377,7 @@ impl WeaveServer {
                 &params.base_branch,
                 &params.target_branch,
             )
-            .map_err(internal_err)?
+            .map_err(ToolError::from)?
         };
 
         let mut documents = Vec::new();
@@ -1347,16 +1436,43 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<CheckParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context(None).await?;
+        let ctx = self.get_repo_context().await?;
         let root = ctx.repo_root.clone();
 
+        // No revisions named: the merge in progress (or just committed), so
+        // verify what is on disk too, exactly as `weave check` does. Asked
+        // first, because with no merge at all there are no revisions to
+        // default to, and that is a sentence, not an error.
+        let no_revs = params.base.is_none() && params.ours.is_none() && params.theirs.is_none();
+        let resolution = if no_revs {
+            match weave_cli::worktree::check_in_progress(&root).map_err(internal_err)? {
+                Some(report) => Some(report.to_json()),
+                None => {
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "resolution": {
+                                "scope": weave_cli::worktree::NOTHING_TO_CHECK,
+                                "files": [],
+                            },
+                            "results": [],
+                        }))
+                        .unwrap_or_default(),
+                    )]));
+                }
+            }
+        } else {
+            None
+        };
+
+        // Every failure here is about a revision the caller named (or left
+        // to default): a typo or an unfetched ref, fixable by asking again.
         let (base, ours, theirs) = weave_cli::gitscan::trees(
             &root,
             params.base.as_deref(),
             params.ours.as_deref(),
             params.theirs.as_deref(),
         )
-        .map_err(internal_err)?;
+        .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))?;
 
         let documents = weave_cli::repo_scope::check(&base, &ours, &theirs);
         let total = weave_cli::repo_scope::total_findings(&documents);
@@ -1369,17 +1485,8 @@ impl WeaveServer {
             "findings_total": total,
             "results": documents,
         });
-        // No revisions named: the merge in progress, so verify what is on
-        // disk too, exactly as `weave check` does.
-        if params.base.is_none() && params.ours.is_none() && params.theirs.is_none() {
-            out["resolution"] = match weave_cli::worktree::check_in_progress(&root)
-                .map_err(internal_err)?
-            {
-                Some(report) => report.to_json(),
-                None => {
-                    serde_json::json!({ "scope": weave_cli::worktree::NOTHING_TO_CHECK, "files": [] })
-                }
-            };
+        if let Some(resolution) = resolution {
+            out["resolution"] = resolution;
         }
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -1398,7 +1505,7 @@ impl WeaveServer {
 
         let merge_base =
             git::find_merge_base(&ctx.repo_root, &params.base_branch, &params.target_branch)
-                .map_err(internal_err)?;
+                .map_err(ToolError::from)?;
 
         let files = if let Some(ref fp) = params.file_path {
             let (rel, _) = Self::resolve_file_path(&ctx.repo_root, fp);
@@ -1410,7 +1517,7 @@ impl WeaveServer {
                 &params.base_branch,
                 &params.target_branch,
             )
-            .map_err(internal_err)?
+            .map_err(ToolError::from)?
         };
 
         // Collect modified entities from both branches
@@ -1653,10 +1760,10 @@ impl WeaveServer {
             &params.content,
             &hash,
         )
-        .map_err(internal_err)?;
+        .map_err(crdt_err)?;
         let _ = state.save();
 
-        let status = get_entity_content(&state, &entity_id).map_err(internal_err)?;
+        let status = get_entity_content(&state, &entity_id).map_err(crdt_err)?;
 
         let mut response = serde_json::json!({
             "entity": params.entity_name,
@@ -1761,7 +1868,7 @@ impl WeaveServer {
             &self.registry,
         );
 
-        let result = merge_file_entities(&state, &rel_path).map_err(internal_err)?;
+        let result = merge_file_entities(&state, &rel_path).map_err(crdt_err)?;
         let _ = state.save();
 
         let response = serde_json::json!({
@@ -1807,7 +1914,7 @@ impl WeaveServer {
             &params.resolved_content,
             &hash,
         )
-        .map_err(internal_err)?;
+        .map_err(crdt_err)?;
         let _ = state.save();
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -1879,8 +1986,18 @@ impl WeaveServer {
         }
         let ctx = self.get_context(Some(&params.file_path)).await?;
         let (rel_path, _abs) = Self::resolve_file_path(&ctx.repo_root, &params.file_path);
-        let (base, ours, theirs) =
-            weave_cli::gitscan::file_stages(&ctx.repo_root, &rel_path).map_err(internal_err)?;
+        let (base, ours, theirs) = weave_cli::gitscan::file_stages(&ctx.repo_root, &rel_path)
+            .map_err(|e| {
+                rmcp::ErrorData::invalid_params(
+                    format!(
+                        "{e}. Call weave_explain during a merge, rebase, cherry-pick or revert \
+                         (or right after committing a merge) with a repo-relative or absolute \
+                         file_path, or pass markers: true to read the conflict markers in the \
+                         file instead"
+                    ),
+                    None,
+                )
+            })?;
         let doc = weave_core::explain::explain(&base, &ours, &theirs, &rel_path, &self.host);
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&doc).unwrap_or_default(),
@@ -1894,7 +2011,7 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<LandParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ctx = self.get_context(None).await?;
+        let ctx = self.get_repo_context().await?;
         let run = weave_cli::land::Run {
             base: params.base.as_deref(),
             ours: params.ours.as_deref(),
@@ -1902,12 +2019,24 @@ impl WeaveServer {
             result: params.result.as_deref(),
             resolver: params.resolver.map(|command| weave_cli::land::Resolver {
                 command,
-                timeout: std::time::Duration::from_secs(params.resolver_timeout.unwrap_or(900)),
+                timeout: std::time::Duration::from_secs(
+                    params
+                        .resolver_timeout
+                        .unwrap_or(weave_cli::land::DEFAULT_RESOLVER_TIMEOUT_SECS),
+                ),
             }),
             dry_run: params.dry_run.unwrap_or(false),
         };
-        let landing =
-            weave_cli::land::run(&ctx.repo_root, &run, &self.host).map_err(internal_err)?;
+        let landing = weave_cli::land::run(&ctx.repo_root, &run, &self.host).map_err(|e| {
+            rmcp::ErrorData::invalid_params(
+                format!(
+                    "{e}. Call weave_land while a merge, rebase, cherry-pick or revert is \
+                     stopped, or pass base/ours/theirs naming revisions that exist (try \
+                     `git fetch` for a remote branch)"
+                ),
+                None,
+            )
+        })?;
         let mut doc = landing.doc;
         doc["refused"] = serde_json::json!(landing.refused);
         Ok(CallToolResult::success(vec![Content::text(
@@ -1922,6 +2051,9 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<EditParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if params.edits.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params("edits must not be empty", None));
+        }
         let first = params.edits.first().map(|e| e.file.clone());
         let ctx = self.get_context(first.as_deref()).await?;
         let edits: Vec<weave_cli::edit::Edit> = serde_json::to_value(&params.edits)
@@ -1952,13 +2084,18 @@ impl WeaveServer {
                 }
                 Err(e) => serde_json::json!({ "written": false, "error": e }),
             };
-        Ok(CallToolResult::success(vec![Content::text(
+        let content = vec![Content::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
+        )];
+        Ok(if out.get("error").is_some() {
+            CallToolResult::error(content)
+        } else {
+            CallToolResult::success(content)
+        })
     }
 
     #[tool(
-        description = "Typed entity patches: carry an edit to a file that may have drifted, as a three-way entity merge instead of a fuzzy text patch. Without ops: extract the ops that turn base_content into file_path's content (or changed_content). With ops: apply them to file_path; a target that drifted since base is merged entity by entity, and conflicts come back as markers plus findings. Returns the content; write=true writes a clean result to file_path. Use instead of re-applying a stale edit by hand."
+        description = "Typed entity patches: carry an edit to a file that may have drifted, as a three-way entity merge instead of a fuzzy text patch. Without ops: extract the ops that turn base_content into file_path's content (or changed_content). With ops: apply them to file_path; a target that drifted since base is merged entity by entity, and conflicts come back as markers plus findings. Returns the content; write=true writes a clean result to file_path and returns content_bytes instead. Use instead of re-applying a stale edit by hand."
     )]
     async fn weave_patch(
         &self,
@@ -2005,17 +2142,23 @@ impl WeaveServer {
         if written {
             std::fs::write(&abs_path, &report.content).map_err(internal_err)?;
         }
+        let mut out = serde_json::json!({
+            "file": rel_path,
+            "clean": report.clean,
+            "mode": report.mode.wire(),
+            "written": written,
+            "unapplied": report.unapplied,
+            "findings": report.findings,
+        });
+        // Once written, the file on disk is the content: echoing it back
+        // only spends the caller's context on bytes it already has.
+        if written {
+            out["content_bytes"] = serde_json::json!(report.content.len());
+        } else {
+            out["content"] = serde_json::json!(report.content);
+        }
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "file": rel_path,
-                "clean": report.clean,
-                "mode": report.mode.wire(),
-                "written": written,
-                "unapplied": report.unapplied,
-                "findings": report.findings,
-                "content": report.content,
-            }))
-            .unwrap_or_default(),
+            serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
 }
@@ -2061,12 +2204,13 @@ pub(crate) const LISTED_TOOLS: [&str; 6] = [
 
 /// Listed too with `WEAVE_EXPERIMENTAL=1`: the live multi-agent CRDT layer
 /// (`weave experimental` on the CLI).
-pub(crate) const EXPERIMENTAL_TOOLS: [&str; 11] = [
+pub(crate) const EXPERIMENTAL_TOOLS: [&str; 12] = [
     "weave_agent_register",
     "weave_agent_heartbeat",
     "weave_claim_entity",
     "weave_release_entity",
     "weave_status",
+    "weave_who_is_editing",
     "weave_potential_conflicts",
     "weave_get_entity_content",
     "weave_update_entity_content",
@@ -2095,6 +2239,30 @@ pub(crate) fn listed_tools(experimental: bool) -> Vec<rmcp::model::Tool> {
     tools
 }
 
+/// A coordination-state failure: an unknown agent or entity is the caller's
+/// to fix, with the call that fixes it named; anything else is ours.
+fn crdt_err(e: weave_crdt::WeaveError) -> rmcp::ErrorData {
+    use weave_crdt::WeaveError;
+    match e {
+        WeaveError::AgentNotFound(agent) => rmcp::ErrorData::invalid_params(
+            format!("agent '{agent}' is not registered — call weave_agent_register first"),
+            None,
+        ),
+        WeaveError::EntityNotFound(entity) => rmcp::ErrorData::invalid_params(
+            format!(
+                "entity '{entity}' is not in the coordination state — check the name with \
+                 weave_extract_entities"
+            ),
+            None,
+        ),
+        e @ WeaveError::NotInConflict(_) => rmcp::ErrorData::invalid_params(
+            format!("{e}, so there is nothing to resolve — weave_potential_conflicts lists the entities that are"),
+            None,
+        ),
+        e => internal_err(e),
+    }
+}
+
 fn internal_err(msg: impl ToString) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(msg.to_string(), None)
 }
@@ -2103,6 +2271,59 @@ fn internal_err(msg: impl ToString) -> rmcp::ErrorData {
 mod resolve_entity_for_graph_tests {
     use super::*;
     use std::fs;
+
+    #[tokio::test]
+    async fn empty_edit_batch_is_invalid_before_repository_lookup() {
+        let params: EditParams = serde_json::from_value(serde_json::json!({"edits": []})).unwrap();
+        let error = WeaveServer::new().weave_edit(Parameters(params)).await.unwrap_err();
+        assert_eq!(error.message, "edits must not be empty");
+    }
+
+    #[tokio::test]
+    async fn rejected_edit_sets_mcp_error_without_changing_source() {
+        let source = "function original() {}\n";
+        let root = write_fixture("rejected-edit", &[("a.ts", source)]);
+        assert!(std::process::Command::new("git").arg("init").arg("-q")
+            .arg(&root).status().unwrap().success());
+        let params: EditParams = serde_json::from_value(serde_json::json!({
+            "edits": [{"file": root.join("a.ts"), "old": "not present", "new": "replacement"}]
+        })).unwrap();
+        let server = WeaveServer::new();
+        let result = server.weave_edit(Parameters(params)).await.unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(fs::read_to_string(root.join("a.ts")).unwrap(), source);
+        drop(server);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn graph_observes_same_size_edit_with_preserved_mtime() {
+        let root = write_fixture("preserved-mtime", &[("a.ts", "function first() {}\n")]);
+        let path = root.join("a.ts");
+        let before = fs::metadata(&path).unwrap();
+        let registry = create_default_registry();
+        let ctx = RepoContext {
+            state: Mutex::new(EntityStateDoc::open(&root.join("state.automerge")).unwrap()),
+            repo_root: root.clone(),
+        };
+        let first = WeaveServer::repo_graph(&ctx, &registry);
+        assert!(first.entities.values().any(|e| e.name == "first"));
+        fs::write(&path, "function other() {}\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        let second = WeaveServer::repo_graph(&ctx, &registry);
+        assert!(second.entities.values().any(|e| e.name == "other"));
+        assert!(!second.entities.values().any(|e| e.name == "first"));
+        drop(ctx);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     /// Writes `files` (relative path -> content) under a fresh temp dir and
     /// returns the root. Each test gets its own directory (PID + a counter)
@@ -2390,7 +2611,7 @@ mod description_tests {
         );
     }
 
-    /// What an agent sees is the five verbs, one per `weave` command; the
+    /// What an agent sees is the six verbs, one per `weave` command; the
     /// CRDT layer joins them only behind `WEAVE_EXPERIMENTAL`, and every
     /// listed name is a real tool.
     #[test]

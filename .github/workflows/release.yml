@@ -230,6 +230,23 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
 
+      - name: Publish weave-certify
+        run: |
+          cargo publish -p weave-certify --no-verify 2>&1 | tee pub.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            if grep -qi "already exists\|already uploaded" pub.log; then
+              echo "weave-certify already on crates.io, continuing"
+            else
+              echo "::error::cargo publish failed for weave-certify"; exit $status
+            fi
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
       - name: Publish weave-cli
         run: |
           cargo publish -p weave-cli --no-verify 2>&1 | tee pub.log

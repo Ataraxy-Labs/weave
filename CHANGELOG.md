@@ -9,8 +9,41 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+### Changed
+
+- **`weave_edit`'s `then` returns `{exit_code, output, truncated}`** instead of a plain string. It runs through `sem check --run` when sem is installed and through `sh -c` in the repo root when it is not, stops after 600 s, and keeps the last 16 KB of output.
+- **`weave_patch` returns `content_bytes` instead of the file once it has written a clean result**, so a large file is not sent back to the agent.
+
+### Performance
+
+- **Merges parse each text once.** The merge checks (subsumption, the verify gate, the key backstop, the layout and rule settlers) each re-parsed ours, theirs and the result; they now share one parse per text within a merge. The keyed-element walk no longer asks tree-sitter for each node's parent, which walked down from the root every time. Merge output is unchanged.
+- **`weave check --base/--ours/--theirs` reads a file once when the sides left it as base**, and reads files in parallel. Findings are unchanged.
+- **`weave check --base/--ours/--theirs` is 7.5x faster on large repos.** The DANGLING and SHADOW passes compared every file's full text against base once per candidate name to learn whether a side changed it; that is now decided once per file. A file that does not contain a name is skipped before its lines are scanned. On the three vscode merges touching the most files, 317 s became 42 s, with identical findings.
+
+### Fixed
+
+- **`weave_check` with no arguments answers when no merge is in progress.** It returns `NOTHING_TO_CHECK` instead of an error, and right after a merge commit it checks that merge (HEAD^1 against HEAD^2), as `weave check` does.
+- **A mistyped or unfetched branch is reported as such**: "unknown revision 'X' (typo, or not fetched? try `git fetch`)", not "no merge base", and as a refusal the agent can fix rather than a server fault.
+- **The MCP server follows the repository each call names.** A call with an absolute path in another repo or worktree uses that repo instead of the first one the server saw; `WEAVE_REPO` sets the default.
+- **`weave_preview` no longer reports a clean merge when nothing was compared.** A file that exists at none of base, ours and theirs is refused, an empty result says `nothing_to_compare`, and `weave preview --file` accepts paths relative to the current directory.
+- **Errors an agent can fix say how**: an unregistered agent is told to call `weave_agent_register`, and explain, land and parser errors name the next step instead of reading as internal faults.
+- **`resolver_timeout` is documented with its real default, 900 s**, and `weave_who_is_editing` is listed with the other experimental tools.
+- **Hints name the current commands** (`weave setup --off`, `weave experimental status`, `apply`, `release`), and `docs/llms.txt` lists the visible commands.
+
+## 0.6.1
+
+### Fixed
+
+- **weave-cli, weave-driver and weave-mcp reach crates.io again.** 0.6.0 published only weave-core and weave-crdt: weave-cli depends on `weave-certify`, which was marked never to publish, so its upload failed and the crates after it were skipped. `weave-certify` is now published alongside the others.
+
+## 0.6.0
+
+Built on sem-core 0.28.0.
+
 ### Added
 
+- **`weave check` reports ARITY when a merge leaves a call with the wrong number of arguments.** If one branch changes a function's parameters and the other adds a call with the old count, both merge cleanly as text, and the finding names the call and the definition it no longer matches.
+- **`weave edit FILE --entity NAME --revert REF` puts one entity back as it was at a revision**, leaving the rest of the file alone. `weave_edit` takes the same `revert`.
 - **`weave edit` and the `weave_edit` MCP tool change code by entity and write it to disk.** An edit names a file and an entity (`Class.method` for a member, or pi-sem's `{name, entity_type, parent_name, ordinal}`) and says what becomes of it: new content, a text replacement inside it that must match once, a new entity before or after it, or deletion. Without an entity, `old`/`new` edits the whole file (imports, configs, any text file), and content alone creates a file. Nothing has to be read first, and other entities in the file are left as they are on disk. A batch is all or nothing; files are planned in parallel; an edit that leaves a file unparseable, or that renames an entity or changes its kind or visibility without `allow_signature_change`, is refused.
 - **An edit that changes a signature or deletes an entity lists every place the name is still used** (`review`), so the agent updates those call sites in its next edit instead of finding them through a failing test. A rename reports the mentions it left (strings, comments, docs, other entities spelled the same), so no grep is needed to check it.
 - **`expect` makes an entity edit compare-and-swap.** Pass the version sem showed (`v:…`) and the edit is refused if the entity changed since, instead of overwriting another agent's change.
@@ -249,6 +282,7 @@ rule (`weave: <file> settled by rule: …`). Otherwise it stays conflicted.
 
 ### Fixed
 
+- **Edits to neighbouring top-level statements no longer conflict.** A file of top-level assignments (or other statements outside any function) used to fall back to git's line merge, which treats edits on adjacent lines as one conflict. Top-level statements now merge statement by statement, like function bodies, so `A = 2` on one side and `B = 4` on the other both land. Two edits to the same statement still conflict. Thanks @Ahajha for the report (#187).
 - A side that moved a declaration it edited could silently win against the
   other side's deletion of it: the subsumption rule read the move as the same
   deletion. It is a modify/delete conflict again (line and declaration guards).
