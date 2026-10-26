@@ -11,6 +11,11 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ### Fixed
 
+- Crate publishing checks accepted uploads separately from sparse-index availability, waits before publishing dependents, and resumes from the immutable release tag without re-uploading accepted versions.
+
+
+### Fixed
+
 - Release publishing waits for each crate to be available before publishing dependents and can retry crates.io publication from the original release tag.
 
 ## [0.6.2] - 2026-10-25
