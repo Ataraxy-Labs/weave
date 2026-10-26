@@ -2052,7 +2052,10 @@ impl WeaveServer {
         Parameters(params): Parameters<EditParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         if params.edits.is_empty() {
-            return Err(rmcp::ErrorData::invalid_params("edits must not be empty", None));
+            return Err(rmcp::ErrorData::invalid_params(
+                "edits must not be empty",
+                None,
+            ));
         }
         let first = params.edits.first().map(|e| e.file.clone());
         let ctx = self.get_context(first.as_deref()).await?;
@@ -2275,7 +2278,10 @@ mod resolve_entity_for_graph_tests {
     #[tokio::test]
     async fn empty_edit_batch_is_invalid_before_repository_lookup() {
         let params: EditParams = serde_json::from_value(serde_json::json!({"edits": []})).unwrap();
-        let error = WeaveServer::new().weave_edit(Parameters(params)).await.unwrap_err();
+        let error = WeaveServer::new()
+            .weave_edit(Parameters(params))
+            .await
+            .unwrap_err();
         assert_eq!(error.message, "edits must not be empty");
     }
 
@@ -2283,11 +2289,17 @@ mod resolve_entity_for_graph_tests {
     async fn rejected_edit_sets_mcp_error_without_changing_source() {
         let source = "function original() {}\n";
         let root = write_fixture("rejected-edit", &[("a.ts", source)]);
-        assert!(std::process::Command::new("git").arg("init").arg("-q")
-            .arg(&root).status().unwrap().success());
+        assert!(std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(&root)
+            .status()
+            .unwrap()
+            .success());
         let params: EditParams = serde_json::from_value(serde_json::json!({
             "edits": [{"file": root.join("a.ts"), "old": "not present", "new": "replacement"}]
-        })).unwrap();
+        }))
+        .unwrap();
         let server = WeaveServer::new();
         let result = server.weave_edit(Parameters(params)).await.unwrap();
         assert_eq!(result.is_error, Some(true));

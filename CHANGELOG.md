@@ -11,6 +11,8 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ### Changed
 
+- Update the GitHub App JWT signing dependency to jsonwebtoken 11.1.0.
+
 - **`weave_edit`'s `then` returns `{exit_code, output, truncated}`** instead of a plain string. It runs through `sem check --run` when sem is installed and through `sh -c` in the repo root when it is not, stops after 600 s, and keeps the last 16 KB of output.
 - **`weave_patch` returns `content_bytes` instead of the file once it has written a clean result**, so a large file is not sent back to the agent.
 
