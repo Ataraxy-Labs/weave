@@ -2051,6 +2051,9 @@ impl WeaveServer {
         &self,
         Parameters(params): Parameters<EditParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if params.edits.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params("edits must not be empty", None));
+        }
         let first = params.edits.first().map(|e| e.file.clone());
         let ctx = self.get_context(first.as_deref()).await?;
         let edits: Vec<weave_cli::edit::Edit> = serde_json::to_value(&params.edits)
@@ -2081,9 +2084,14 @@ impl WeaveServer {
                 }
                 Err(e) => serde_json::json!({ "written": false, "error": e }),
             };
-        Ok(CallToolResult::success(vec![Content::text(
+        let content = vec![Content::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
+        )];
+        Ok(if out.get("error").is_some() {
+            CallToolResult::error(content)
+        } else {
+            CallToolResult::success(content)
+        })
     }
 
     #[tool(
@@ -2263,6 +2271,30 @@ fn internal_err(msg: impl ToString) -> rmcp::ErrorData {
 mod resolve_entity_for_graph_tests {
     use super::*;
     use std::fs;
+
+    #[tokio::test]
+    async fn empty_edit_batch_is_invalid_before_repository_lookup() {
+        let params: EditParams = serde_json::from_value(serde_json::json!({"edits": []})).unwrap();
+        let error = WeaveServer::new().weave_edit(Parameters(params)).await.unwrap_err();
+        assert_eq!(error.message, "edits must not be empty");
+    }
+
+    #[tokio::test]
+    async fn rejected_edit_sets_mcp_error_without_changing_source() {
+        let source = "function original() {}\n";
+        let root = write_fixture("rejected-edit", &[("a.ts", source)]);
+        assert!(std::process::Command::new("git").arg("init").arg("-q")
+            .arg(&root).status().unwrap().success());
+        let params: EditParams = serde_json::from_value(serde_json::json!({
+            "edits": [{"file": root.join("a.ts"), "old": "not present", "new": "replacement"}]
+        })).unwrap();
+        let server = WeaveServer::new();
+        let result = server.weave_edit(Parameters(params)).await.unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(fs::read_to_string(root.join("a.ts")).unwrap(), source);
+        drop(server);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn graph_observes_same_size_edit_with_preserved_mtime() {
