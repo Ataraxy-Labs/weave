@@ -6,7 +6,7 @@ use std::sync::Arc;
 use lru::LruCache;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use sem_core::model::entity::SemanticEntity;
 use sem_core::parser::graph::{EntityGraph, EntityInfo};
@@ -551,7 +551,7 @@ impl WeaveServer {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -660,7 +660,7 @@ impl WeaveServer {
             "dependency_warnings": dep_warnings,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&response).unwrap_or_default(),
         )]))
     }
@@ -696,7 +696,7 @@ impl WeaveServer {
         release_entity(&mut state, &params.agent_id, &entity_id).map_err(crdt_err)?;
         let _ = state.save();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             "Released successfully",
         )]))
     }
@@ -742,7 +742,7 @@ impl WeaveServer {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -776,11 +776,11 @@ impl WeaveServer {
                     "last_modified_by": status.last_modified_by,
                     "version": status.version,
                 });
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(CallToolResult::success(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&result).unwrap_or_default(),
                 )]))
             }
-            Err(_) => Ok(CallToolResult::success(vec![Content::text(
+            Err(_) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::json!({
                     "entity": params.entity_name,
                     "claimed_by": null,
@@ -829,7 +829,7 @@ impl WeaveServer {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -976,7 +976,7 @@ impl WeaveServer {
             );
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&summary).unwrap_or_default(),
         )]))
     }
@@ -1020,7 +1020,7 @@ impl WeaveServer {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "entity": params.entity_name,
                 "file": rel_path,
@@ -1069,7 +1069,7 @@ impl WeaveServer {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "entity": params.entity_name,
                 "file": rel_path,
@@ -1118,7 +1118,7 @@ impl WeaveServer {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "entity": params.entity_name,
                 "file": rel_path,
@@ -1147,7 +1147,7 @@ impl WeaveServer {
         .map_err(crdt_err)?;
         let _ = state.save();
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Agent '{}' registered on branch '{}'",
             params.agent_id, params.branch
         ))]))
@@ -1166,7 +1166,7 @@ impl WeaveServer {
             .map_err(crdt_err)?;
         let _ = state.save();
 
-        Ok(CallToolResult::success(vec![Content::text("OK")]))
+        Ok(CallToolResult::success(vec![ContentBlock::text("OK")]))
     }
 
     #[tool(
@@ -1228,7 +1228,7 @@ impl WeaveServer {
             }
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "base_ref": params.base_ref,
                 "target_ref": target_ref,
@@ -1272,7 +1272,7 @@ impl WeaveServer {
             "conflicts": json_conflicts,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -1349,7 +1349,7 @@ impl WeaveServer {
             "results": results,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&summary).unwrap_or_default(),
         )]))
     }
@@ -1424,7 +1424,7 @@ impl WeaveServer {
             "results": documents,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
@@ -1448,7 +1448,7 @@ impl WeaveServer {
             match weave_cli::worktree::check_in_progress(&root).map_err(internal_err)? {
                 Some(report) => Some(report.to_json()),
                 None => {
-                    return Ok(CallToolResult::success(vec![Content::text(
+                    return Ok(CallToolResult::success(vec![ContentBlock::text(
                         serde_json::to_string_pretty(&serde_json::json!({
                             "resolution": {
                                 "scope": weave_cli::worktree::NOTHING_TO_CHECK,
@@ -1489,7 +1489,7 @@ impl WeaveServer {
             out["resolution"] = resolution;
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
@@ -1587,7 +1587,7 @@ impl WeaveServer {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "modified_entities": modified_entities.len(),
                 "warnings": result.len(),
@@ -1714,7 +1714,7 @@ impl WeaveServer {
                             })
                         })
                         .collect();
-                    return Ok(CallToolResult::success(vec![Content::text(
+                    return Ok(CallToolResult::success(vec![ContentBlock::text(
                         serde_json::to_string_pretty(&serde_json::json!({
                             "entity": params.entity_name,
                             "drift_detected": true,
@@ -1793,7 +1793,7 @@ impl WeaveServer {
             response["merged_over"] = serde_json::json!(merged_over);
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&response).unwrap_or_default(),
         )]))
     }
@@ -1832,11 +1832,11 @@ impl WeaveServer {
                     "conflict_theirs": status.conflict_theirs,
                     "conflict_base": status.conflict_base,
                 });
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(CallToolResult::success(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&response).unwrap_or_default(),
                 )]))
             }
-            Err(_) => Ok(CallToolResult::success(vec![Content::text(
+            Err(_) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::json!({
                     "entity": params.entity_name,
                     "content": "",
@@ -1879,7 +1879,7 @@ impl WeaveServer {
             "merged_content": result.merged_content,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&response).unwrap_or_default(),
         )]))
     }
@@ -1917,7 +1917,7 @@ impl WeaveServer {
         .map_err(crdt_err)?;
         let _ = state.save();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::json!({
                 "entity": params.entity_name,
                 "resolved": true,
@@ -1999,7 +1999,7 @@ impl WeaveServer {
                 )
             })?;
         let doc = weave_core::explain::explain(&base, &ours, &theirs, &rel_path, &self.host);
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&doc).unwrap_or_default(),
         )]))
     }
@@ -2039,7 +2039,7 @@ impl WeaveServer {
         })?;
         let mut doc = landing.doc;
         doc["refused"] = serde_json::json!(landing.refused);
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&doc).unwrap_or_default(),
         )]))
     }
@@ -2087,7 +2087,7 @@ impl WeaveServer {
                 }
                 Err(e) => serde_json::json!({ "written": false, "error": e }),
             };
-        let content = vec![Content::text(
+        let content = vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )];
         Ok(if out.get("error").is_some() {
@@ -2125,7 +2125,7 @@ impl WeaveServer {
                 &changed,
                 params.embed_base.unwrap_or(true),
             );
-            return Ok(CallToolResult::success(vec![Content::text(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&doc).unwrap_or_default(),
             )]));
         };
@@ -2160,7 +2160,7 @@ impl WeaveServer {
         } else {
             out["content"] = serde_json::json!(report.content);
         }
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
@@ -2173,15 +2173,13 @@ impl ServerHandler for WeaveServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
-        Ok(rmcp::model::ListToolsResult {
-            tools: listed_tools(experimental()),
-            meta: None,
-            next_cursor: None,
-        })
+        Ok(rmcp::model::ListToolsResult::with_all_items(listed_tools(
+            experimental(),
+        )))
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Weave: entity-level edits and semantic merge for Git. One tool per `weave` command: \
                  weave_edit (change code by entity, written to disk: replace, edit inside, add, \
                  delete, create a file), weave_preview (dry-run a merge of two branches: go/no-go, findings, or per-entity \
