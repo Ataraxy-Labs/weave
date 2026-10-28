@@ -46,7 +46,11 @@ pub(crate) fn is_ident_char(b: u8) -> bool {
 /// and, when a scan then advances by one byte, slices inside a character and
 /// panics.
 pub(crate) fn is_ident_char_c(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '$'
+    if c.is_ascii() {
+        is_ident_char(c as u8)
+    } else {
+        c.is_alphanumeric()
+    }
 }
 
 /// Every maximal identifier in `content`, split exactly where
@@ -118,7 +122,7 @@ pub(crate) fn is_definition_line(line: &str, name: &str) -> bool {
                 && rest[name.len()..]
                     .chars()
                     .next()
-                    .is_none_or(|c| !is_ident_char(c as u8));
+                    .is_none_or(|c| !is_ident_char_c(c));
         }
     }
     false
@@ -311,7 +315,7 @@ pub(crate) fn defined_name(line: &str) -> Option<String> {
     let rest = DEFINERS.iter().find_map(|kw| t.strip_prefix(kw))?;
     let rest = rest.trim_start();
     let end = rest
-        .find(|c: char| !is_ident_char(c as u8))
+        .find(|c: char| !is_ident_char_c(c))
         .unwrap_or(rest.len());
     let name = &rest[..end];
     (!name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit())).then(|| name.to_string())
@@ -334,18 +338,16 @@ pub(crate) fn is_trivia_line(line: &str) -> bool {
 /// Maximal runs of identifier characters — `b(2);` is `b`, `2`, not `b(2);`.
 pub(crate) fn word_tokens(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    let bytes = s.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
-            let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                i += 1;
-            }
+    let mut token_start = None;
+    for (i, c) in s.char_indices() {
+        if is_ident_char_c(c) {
+            token_start.get_or_insert(i);
+        } else if let Some(start) = token_start.take() {
             out.push(&s[start..i]);
-        } else {
-            i += 1;
         }
+    }
+    if let Some(start) = token_start {
+        out.push(&s[start..]);
     }
     out
 }
@@ -1016,6 +1018,20 @@ mod tests {
         assert!(has_call_reference("total = 获取积分(2)\n", "获取积分"));
         // `积分` is a suffix of `获取积分`, not a call on its own.
         assert!(!has_call_reference("total = 获取积分(2)\n", "积分"));
+        // A longer CJK definition name must not hide a call to its prefix later
+        // on the same line.
+        assert!(has_call_reference(
+            "def 积分缓存(): return 积分()\n",
+            "积分"
+        ));
+        assert_eq!(
+            defined_name("def 积分缓存():"),
+            Some("积分缓存".to_string())
+        );
+        let producer = footprint("def 获取积分():\n    return 1\n").unwrap();
+        let consumer = footprint("def 汇总():\n    return 获取积分()\n").unwrap();
+        assert!(consumer.uses.contains("获取积分"));
+        assert!(!footprints_disjoint(&producer, &consumer));
     }
 
     /// The call index sees non-ASCII call sites too, so rename repair no longer
