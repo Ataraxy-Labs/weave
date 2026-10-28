@@ -552,7 +552,13 @@ fn parses_worse(path: &str, before: &str, after: &str) -> Option<String> {
         lines.sort_unstable();
         lines
     };
-    let (b, a) = (errors(before), errors(after));
+    // A clean result cannot introduce more parse errors, regardless of the
+    // original file. Avoid parsing the old source on the common clean path.
+    let a = errors(after);
+    if a.is_empty() {
+        return None;
+    }
+    let b = errors(before);
     if a.len() <= b.len() {
         return None;
     }
@@ -1880,6 +1886,16 @@ fn report(path: &str, before: Option<&str>, after: &str) -> FileReport {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clean_parse_guard_preserves_repair_and_rejection() {
+        let clean = "def f():\n    return 1\n";
+        let broken = "def f(:\n    return 1\n";
+        assert!(super::parses_worse("a.py", clean, clean).is_none());
+        assert!(super::parses_worse("a.py", broken, clean).is_none());
+        assert!(super::parses_worse("a.py", clean, broken).is_some());
+        assert!(super::parses_worse("a.py", broken, broken).is_none());
+    }
+
     use super::*;
 
     const PY: &str = "import os\n\n\ndef a():\n    return 1\n\n\nclass K:\n    def m(self):\n        return 2\n\n    def n(self):\n        return 3\n\n\ndef b():\n    return a()\n";

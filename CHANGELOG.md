@@ -9,6 +9,10 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+### Performance
+
+- Clean edits skip parsing the original source in the parse-regression guard. Results containing syntax errors still compare both versions before deciding whether to reject the edit.
+
 ### Fixed
 
 - Crate publishing checks accepted uploads separately from sparse-index availability, waits before publishing dependents, and resumes from the immutable release tag without re-uploading accepted versions.
