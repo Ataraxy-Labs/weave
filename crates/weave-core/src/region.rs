@@ -61,6 +61,14 @@ pub struct InterstitialRegion {
 /// alternating interstitial and entity regions based on line ranges.
 /// Empty interstitials between adjacent entities preserve the distinction
 /// between a known zero-width gap and a boundary absent from this version.
+///
+/// The split is lossless: concatenating every region's content gives back
+/// `content` byte for byte. Regions are sliced out of the original text, so
+/// CRLF line endings and a missing final newline survive. An entity whose
+/// lines were already emitted by the entity before it (two entities with the
+/// same span, or one that starts on a line the previous one already covers)
+/// gets only the lines not yet emitted, possibly none, instead of a second
+/// copy of shared text.
 pub fn extract_regions(content: &str, entities: &[SemanticEntity]) -> Vec<FileRegion> {
     if entities.is_empty() {
         // Entire file is one interstitial region
@@ -72,6 +80,24 @@ pub fn extract_regions(content: &str, entities: &[SemanticEntity]) -> Vec<FileRe
 
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
+    // Byte offset where each line starts; a line past the end starts at EOF.
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(content.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let offset = |line: usize| -> usize {
+        if line >= total_lines {
+            content.len()
+        } else {
+            line_starts[line]
+        }
+    };
+    let slice = |from: usize, to: usize| -> String {
+        if from >= to {
+            String::new()
+        } else {
+            content[offset(from)..offset(to)].to_string()
+        }
+    };
 
     // Sort entities by start_line (they should already be sorted, but be safe)
     let mut sorted_entities: Vec<&SemanticEntity> = entities.iter().collect();
@@ -83,19 +109,20 @@ pub fn extract_regions(content: &str, entities: &[SemanticEntity]) -> Vec<FileRe
     for (i, entity) in sorted_entities.iter().enumerate() {
         // Entity start_line and end_line are 1-based from sem-core
         let entity_start = entity.start_line.saturating_sub(1); // convert to 0-based
-        let entity_end = entity.end_line; // end_line is inclusive, so this is exclusive in 0-based
+        let entity_end = entity.end_line.min(total_lines); // inclusive 1-based == exclusive 0-based
 
         // Comment bundling: scan backwards from entity_start to find leading doc comments.
         // These comments (JSDoc, Rust ///, Python docstrings, Java /** */) should be part
-        // of the entity region, not the interstitial gap.
-        let bundled_start = find_leading_comment_start(&lines, entity_start, current_line);
+        // of the entity region, not the interstitial gap. Never reach back into
+        // lines a previous region already holds.
+        let bundled_start =
+            find_leading_comment_start(&lines, entity_start, current_line).max(current_line);
 
         // Interstitial before this entity (excluding bundled comments).
         // Adjacent entities still have a boundary: its content is empty, not
         // unknown. Omitting it lets rendering invent the file's dominant gap
         // between declarations that every input kept together (#169).
         if current_line < bundled_start || (i > 0 && current_line == bundled_start) {
-            let interstitial_content = join_lines(&lines[current_line..bundled_start]);
             let position_key = if i == 0 {
                 "file_header".to_string()
             } else {
@@ -103,50 +130,31 @@ pub fn extract_regions(content: &str, entities: &[SemanticEntity]) -> Vec<FileRe
             };
             regions.push(FileRegion::Interstitial(InterstitialRegion {
                 position_key,
-                content: interstitial_content,
+                content: slice(current_line, bundled_start),
             }));
         }
 
-        // Entity region — includes bundled leading comments
-        let entity_end_clamped = entity_end.min(total_lines);
-        let entity_content = if bundled_start < entity_end_clamped {
-            join_lines(&lines[bundled_start..entity_end_clamped])
-        } else {
-            entity.content.clone()
-        };
-
+        // Entity region: includes bundled leading comments, and only lines no
+        // earlier region holds.
+        let region_end = entity_end.max(bundled_start);
         regions.push(FileRegion::Entity(EntityRegion {
             entity_id: entity.id.clone(),
             entity_name: entity.name.clone(),
             entity_type: entity.entity_type.clone(),
-            content: entity_content,
+            content: slice(bundled_start, region_end),
             start_line: entity.start_line,
             end_line: entity.end_line,
         }));
 
-        current_line = entity_end_clamped;
+        current_line = region_end;
     }
 
     // Interstitial after last entity (file footer)
     if current_line < total_lines {
-        let footer_content = join_lines(&lines[current_line..total_lines]);
         regions.push(FileRegion::Interstitial(InterstitialRegion {
             position_key: "file_footer".to_string(),
-            content: footer_content,
+            content: slice(current_line, total_lines),
         }));
-    }
-
-    // Handle trailing newline — if original content ends with newline and our last region doesn't
-    if content.ends_with('\n') {
-        if let Some(last) = regions.last() {
-            if !last.content().ends_with('\n') {
-                match regions.last_mut() {
-                    Some(FileRegion::Entity(e)) => e.content.push('\n'),
-                    Some(FileRegion::Interstitial(i)) => i.content.push('\n'),
-                    None => {}
-                }
-            }
-        }
     }
 
     regions
@@ -228,15 +236,6 @@ fn find_leading_comment_start(lines: &[&str], entity_start: usize, min_line: usi
     }
 
     comment_start
-}
-
-fn join_lines(lines: &[&str]) -> String {
-    if lines.is_empty() {
-        return String::new();
-    }
-    let mut result = lines.join("\n");
-    result.push('\n');
-    result
 }
 
 #[cfg(test)]
@@ -441,5 +440,31 @@ fn subtract(a: i32, b: i32) -> i32 {
         assert_eq!(regions.len(), 1);
         assert!(!regions[0].is_entity());
         assert_eq!(regions[0].content(), content);
+    }
+
+    /// Concatenating the regions must give back the file byte for byte:
+    /// CRLF endings, a missing final newline, and entities that share lines
+    /// (same span, or one starting where the previous ends) must not lose or
+    /// repeat any text.
+    #[test]
+    fn regions_reassemble_the_file_byte_for_byte() {
+        let registry = create_default_registry();
+        let cases = [
+            ("a.ts", "const first = 1;\r\nfunction f() {\r\n  return 1;\r\n}\r\n"),
+            ("b.ts", "const first = 1;\nfunction f() {\n  return 1;\n}"),
+            ("c.py", "import os\n\n@decorator\ndef f():\n    return 1\n\n\nclass A:\n    pass\n"),
+            ("d.cs", "namespace N {\n  class A { int x; } class B { int y; }\n}\n"),
+            ("e.c", "#define MAX 3\nint a; int b;\nint f(void) { return a + b; }\n"),
+        ];
+        for (path, content) in cases {
+            let plugin = registry.get_plugin(path).unwrap();
+            let entities =
+                crate::merge::filter_nested_entities(plugin.extract_entities(content, path));
+            let rebuilt: String = extract_regions(content, &entities)
+                .iter()
+                .map(|r| r.content())
+                .collect();
+            assert_eq!(rebuilt, content, "{path} did not round-trip");
+        }
     }
 }

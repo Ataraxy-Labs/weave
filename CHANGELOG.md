@@ -9,6 +9,10 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+### Fixed
+
+- **Splitting a file into entity regions is now lossless.** Putting the regions back together gives the file byte for byte: CRLF line endings and a missing final newline survive, and entities that share lines (the same span, or one starting where the previous one ends) no longer repeat that text. Checked on 105,410 files in about 20 languages, which all round-trip exactly; before, C# was at 11%, C headers at 61% and Svelte at 61%.
+
 ### Performance
 
 - Clean edits skip parsing the original source in the parse-regression guard. Results containing syntax errors still compare both versions before deciding whether to reject the edit.
