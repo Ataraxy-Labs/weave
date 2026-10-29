@@ -8,7 +8,9 @@ pub enum FileRegion {
 }
 
 impl FileRegion {
-    pub(crate) fn content(&self) -> &str {
+    /// Test-only: the region's text, whichever arm it is.
+    #[cfg(test)]
+    fn content(&self) -> &str {
         match self {
             FileRegion::Entity(e) => &e.content,
             FileRegion::Interstitial(i) => &i.content,
