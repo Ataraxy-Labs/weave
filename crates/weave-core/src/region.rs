@@ -450,11 +450,23 @@ fn subtract(a: i32, b: i32) -> i32 {
     fn regions_reassemble_the_file_byte_for_byte() {
         let registry = create_default_registry();
         let cases = [
-            ("a.ts", "const first = 1;\r\nfunction f() {\r\n  return 1;\r\n}\r\n"),
+            (
+                "a.ts",
+                "const first = 1;\r\nfunction f() {\r\n  return 1;\r\n}\r\n",
+            ),
             ("b.ts", "const first = 1;\nfunction f() {\n  return 1;\n}"),
-            ("c.py", "import os\n\n@decorator\ndef f():\n    return 1\n\n\nclass A:\n    pass\n"),
-            ("d.cs", "namespace N {\n  class A { int x; } class B { int y; }\n}\n"),
-            ("e.c", "#define MAX 3\nint a; int b;\nint f(void) { return a + b; }\n"),
+            (
+                "c.py",
+                "import os\n\n@decorator\ndef f():\n    return 1\n\n\nclass A:\n    pass\n",
+            ),
+            (
+                "d.cs",
+                "namespace N {\n  class A { int x; } class B { int y; }\n}\n",
+            ),
+            (
+                "e.c",
+                "#define MAX 3\nint a; int b;\nint f(void) { return a + b; }\n",
+            ),
         ];
         for (path, content) in cases {
             let plugin = registry.get_plugin(path).unwrap();
