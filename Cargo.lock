@@ -964,8 +964,6 @@ dependencies = [
  "libc",
  "libgit2-sys",
  "log",
- "openssl-probe 0.1.6",
- "openssl-sys",
  "url",
 ]
 
@@ -1486,24 +1484,8 @@ checksum = "7f7c568b25d7489bc3fb2988ed69ab111d2944d2f5fec3d5c987fe545ea97b50"
 dependencies = [
  "cc",
  "libc",
- "libssh2-sys",
  "libz-sys",
- "openssl-sys",
  "pkg-config",
-]
-
-[[package]]
-name = "libssh2-sys"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c04141a07bb0c0bc461cb657808764de571702a59bc5c726c400ac9a7625e3ab"
-dependencies = [
- "cc",
- "libc",
- "libz-sys",
- "openssl-sys",
- "pkg-config",
- "vcpkg",
 ]
 
 [[package]]
@@ -1702,12 +1684,6 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
-
-[[package]]
-name = "openssl-probe"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
 
 [[package]]
 name = "openssl-probe"
@@ -2254,7 +2230,7 @@ version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
 dependencies = [
- "openssl-probe 0.2.1",
+ "openssl-probe",
  "rustls-pki-types",
  "schannel",
  "security-framework",
@@ -2408,9 +2384,9 @@ dependencies = [
 
 [[package]]
 name = "sem-core"
-version = "0.28.0"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8330fda0f75c1a41e4bcb86851b3ba0f9ef9444e4174fc0f5bf40ccfc6f88b30"
+checksum = "ffb3d52f7d2d38521f657b0d6ca6eff7cdd5671c17205de5762702fe1d2ae9d6"
 dependencies = [
  "ciborium",
  "git2",
@@ -3641,7 +3617,7 @@ dependencies = [
 
 [[package]]
 name = "weave-certify"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "sem-core",
  "serde_json",
@@ -3650,7 +3626,7 @@ dependencies = [
 
 [[package]]
 name = "weave-cli"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "clap",
  "colored",
@@ -3670,7 +3646,7 @@ dependencies = [
 
 [[package]]
 name = "weave-core"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "criterion",
  "diffy",
@@ -3688,7 +3664,7 @@ dependencies = [
 
 [[package]]
 name = "weave-crdt"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "automerge",
  "sem-core",
@@ -3702,7 +3678,7 @@ dependencies = [
 
 [[package]]
 name = "weave-driver"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "env_logger",
  "sem-core",
@@ -3715,7 +3691,7 @@ dependencies = [
 
 [[package]]
 name = "weave-github"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -3736,7 +3712,7 @@ dependencies = [
 
 [[package]]
 name = "weave-mcp"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "lru",
  "openssl",

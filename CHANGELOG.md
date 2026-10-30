@@ -9,6 +9,12 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+## [0.7.0] - 2026-10-29
+
+### Changed
+
+- **Built on sem-core 0.29**, which finds definitions sem used to miss in C, C++, C#, Rust, Java, Kotlin and Elixir (C++ headers in `.h` files, template class members, C# operators, Kotlin companion objects and more). Merges now see those definitions as entities instead of plain text between them. This is a minor bump because sem-core types appear in weave-core's public API.
+
 ### Fixed
 
 - **Splitting a file into entity regions is now lossless.** Putting the regions back together gives the file byte for byte: CRLF line endings and a missing final newline survive, and entities that share lines (the same span, or one starting where the previous one ends) no longer repeat that text. Checked on 105,410 files in about 20 languages, which all round-trip exactly; before, C# was at 11%, C headers at 61% and Svelte at 61%.
