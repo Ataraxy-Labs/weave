@@ -640,8 +640,20 @@ fn on_path(bin: &str) -> bool {
 /// [`THEN_OUTPUT_CAP`] bytes.
 /// Build manifests: a directory holding one is where its tests run from.
 const MANIFESTS: &[&str] = &[
-    "Cargo.toml", "package.json", "go.mod", "pyproject.toml", "setup.py", "pom.xml", "build.gradle",
-    "build.gradle.kts", "Makefile", "CMakeLists.txt", "Gemfile", "mix.exs", "composer.json", "Package.swift",
+    "Cargo.toml",
+    "package.json",
+    "go.mod",
+    "pyproject.toml",
+    "setup.py",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "Makefile",
+    "CMakeLists.txt",
+    "Gemfile",
+    "mix.exs",
+    "composer.json",
+    "Package.swift",
 ];
 
 /// Where a `then` command runs. The repository root, unless the root has no
@@ -1933,7 +1945,10 @@ mod tests {
         std::fs::write(root.join("crates/Cargo.toml"), "[workspace]\n").unwrap();
         std::fs::write(root.join("crates/core/Cargo.toml"), "[package]\n").unwrap();
         let file = Some("crates/core/src/lib.rs");
-        assert_eq!(then_dir(&root, file, "cargo test"), root.join("crates/core"));
+        assert_eq!(
+            then_dir(&root, file, "cargo test"),
+            root.join("crates/core")
+        );
         assert_eq!(then_dir(&root, file, "cd crates && cargo test"), root);
         assert_eq!(then_dir(&root, None, "cargo test"), root);
         std::fs::write(root.join("Makefile"), "test:\n").unwrap();
