@@ -638,7 +638,47 @@ fn on_path(bin: &str) -> bool {
 /// speculative run if there is one), else with `sh -c` in the repo root.
 /// Bounded by [`THEN_DEADLINE`]; output is kept to its last
 /// [`THEN_OUTPUT_CAP`] bytes.
-pub fn then(root: &Path, cmd: &str) -> Then {
+/// Build manifests: a directory holding one is where its tests run from.
+const MANIFESTS: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "go.mod",
+    "pyproject.toml",
+    "setup.py",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "Makefile",
+    "CMakeLists.txt",
+    "Gemfile",
+    "mix.exs",
+    "composer.json",
+    "Package.swift",
+];
+
+/// Where a `then` command runs. The repository root, unless the root has no
+/// build manifest (a Cargo workspace under `crates/`, packages in a
+/// monorepo) and the command does not `cd` on its own: then the nearest
+/// directory above the edited file that has one. Run from a manifest-less
+/// root, `cargo test` only fails with "could not find Cargo.toml".
+pub fn then_dir(root: &Path, file: Option<&str>, cmd: &str) -> PathBuf {
+    let has_manifest = |d: &Path| MANIFESTS.iter().any(|m| d.join(m).is_file());
+    if has_manifest(root) || cmd.trim_start().starts_with("cd ") {
+        return root.to_path_buf();
+    }
+    file.map(|f| root.join(f))
+        .and_then(|f| {
+            f.ancestors()
+                .skip(1)
+                .take_while(|d| d.starts_with(root))
+                .find(|d| has_manifest(d))
+                .map(Path::to_path_buf)
+        })
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+pub fn then(root: &Path, file: Option<&str>, cmd: &str) -> Then {
+    let dir = then_dir(root, file, cmd);
     let sem = sem_bin();
     let (mut command, what) = if on_path(&sem) {
         let mut c = std::process::Command::new(&sem);
@@ -649,7 +689,7 @@ pub fn then(root: &Path, cmd: &str) -> Then {
         c.args(["-c", cmd]);
         (c, "sh -c")
     };
-    command.current_dir(root);
+    command.current_dir(&dir);
     let (exit_code, text) = match crate::gitscan::run_bounded(command, what, None, THEN_DEADLINE) {
         Ok((status, stdout, stderr)) => (
             status.code(),
@@ -1897,6 +1937,23 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn then_runs_where_the_build_manifest_is() {
+        let root = scratch();
+        std::fs::create_dir_all(root.join("crates/core/src")).unwrap();
+        std::fs::write(root.join("crates/Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(root.join("crates/core/Cargo.toml"), "[package]\n").unwrap();
+        let file = Some("crates/core/src/lib.rs");
+        assert_eq!(
+            then_dir(&root, file, "cargo test"),
+            root.join("crates/core")
+        );
+        assert_eq!(then_dir(&root, file, "cd crates && cargo test"), root);
+        assert_eq!(then_dir(&root, None, "cargo test"), root);
+        std::fs::write(root.join("Makefile"), "test:\n").unwrap();
+        assert_eq!(then_dir(&root, file, "make test"), root);
+    }
 
     const PY: &str = "import os\n\n\ndef a():\n    return 1\n\n\nclass K:\n    def m(self):\n        return 2\n\n    def n(self):\n        return 3\n\n\ndef b():\n    return a()\n";
 

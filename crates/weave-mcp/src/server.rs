@@ -2074,8 +2074,9 @@ impl WeaveServer {
                         Some(cmd) => {
                             let root = ctx.repo_root.clone();
                             let cmd = cmd.to_string();
+                            let file = first.clone();
                             r.then = tokio::task::spawn_blocking(move || {
-                                weave_cli::edit::then(&root, &cmd)
+                                weave_cli::edit::then(&root, file.as_deref(), &cmd)
                             })
                             .await
                             .ok();
