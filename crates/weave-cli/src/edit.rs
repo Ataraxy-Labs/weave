@@ -11,8 +11,9 @@
 //! file is overwritten. A text edit's `old` must match exactly once (or set
 //! `all`), which is what keeps a stale edit from landing somewhere else.
 //!
-//! A batch is all or nothing: every edit is planned in memory, in order, and
-//! files are written only when all of them resolved.
+//! Every edit is planned in memory, in order, and files are written only
+//! when all edits resolve. Writes are sequential: an I/O failure may leave
+//! earlier files written, so this is not a crash-atomic transaction.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -298,7 +299,16 @@ pub fn run(root: &Path, edits: &[Edit], dry_run: bool) -> Result<Report, EditErr
     // Agents editing one checkout at once: each batch reads, plans and
     // writes under one lock per repository, so a batch always applies to
     // the files as the previous batch left them and no edit is lost.
-    let _lock = if dry_run { None } else { lock(root) };
+    let _lock = if dry_run {
+        None
+    } else {
+        Some(lock(root).map_err(|e| EditError {
+            index: 0,
+            file: String::new(),
+            message: format!("cannot acquire repository edit lock: {e}"),
+            candidates: vec![],
+        })?)
+    };
     let mut by_file: BTreeMap<String, Vec<(usize, Plain)>> = BTreeMap::new();
     let mut notes = Vec::new();
     let mut renamed: Vec<String> = Vec::new();
@@ -718,20 +728,23 @@ pub fn then(root: &Path, file: Option<&str>, cmd: &str) -> Then {
     }
 }
 
-fn lock(root: &Path) -> Option<std::fs::File> {
+fn lock_path(root: &Path) -> PathBuf {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut h: u64 = 0xcbf29ce484222325;
     for b in root.to_string_lossy().bytes() {
         h = (h ^ b as u64).wrapping_mul(0x100000001b3);
     }
+    std::env::temp_dir().join(format!("weave-edit-{h:016x}.lock"))
+}
+
+fn lock(root: &Path) -> std::io::Result<std::fs::File> {
     let f = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(std::env::temp_dir().join(format!("weave-edit-{h:016x}.lock")))
-        .ok()?;
-    f.lock().ok()?;
-    Some(f)
+        .open(lock_path(root))?;
+    f.lock()?;
+    Ok(f)
 }
 
 fn io_error(path: &str, e: std::io::Error) -> EditError {
@@ -1937,6 +1950,29 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn lock_failure_refuses_edits_without_changing_source() {
+        let root = scratch();
+        std::fs::write(root.join("x.py"), PY).unwrap();
+        let lock_file = lock_path(&root);
+        std::fs::create_dir(&lock_file).unwrap();
+        let result = run(
+            &root,
+            &[edit(|e| {
+                e.entity = Some("a".into());
+                e.content = Some("def a():\n    return 99\n".into());
+            })],
+            false,
+        );
+        std::fs::remove_dir(&lock_file).unwrap();
+        let error = result.unwrap_err();
+        assert!(error
+            .message
+            .contains("cannot acquire repository edit lock"));
+        assert_eq!(std::fs::read_to_string(root.join("x.py")).unwrap(), PY);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn then_runs_where_the_build_manifest_is() {
