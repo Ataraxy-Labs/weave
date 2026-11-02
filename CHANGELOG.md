@@ -9,7 +9,11 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+## [0.7.1] - 2026-11-02
+
 ### Fixed
+
+- Run edit validation from the nearest build-manifest directory when the repository root has no manifest (#214).
 
 - Refuse edits when the repository edit lock cannot be acquired, rather than proceeding without concurrency protection.
 - Clarify that batch validation precedes writes, but disk failures can leave partial writes.

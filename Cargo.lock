@@ -3616,7 +3616,7 @@ dependencies = [
 
 [[package]]
 name = "weave-certify"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "sem-core",
  "serde_json",
@@ -3625,7 +3625,7 @@ dependencies = [
 
 [[package]]
 name = "weave-cli"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "clap",
  "colored",
@@ -3645,7 +3645,7 @@ dependencies = [
 
 [[package]]
 name = "weave-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "criterion",
  "diffy",
@@ -3663,7 +3663,7 @@ dependencies = [
 
 [[package]]
 name = "weave-crdt"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "automerge",
  "sem-core",
@@ -3677,7 +3677,7 @@ dependencies = [
 
 [[package]]
 name = "weave-driver"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "env_logger",
  "sem-core",
@@ -3690,7 +3690,7 @@ dependencies = [
 
 [[package]]
 name = "weave-github"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -3711,7 +3711,7 @@ dependencies = [
 
 [[package]]
 name = "weave-mcp"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "lru",
  "openssl",
