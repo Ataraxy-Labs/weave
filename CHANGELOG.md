@@ -9,6 +9,10 @@ so `weave-core`, `weave-crdt`, `weave-driver`, `weave-cli`, `weave-mcp`,
 
 ## Unreleased
 
+### Added
+
+- Quarto documents (`.qmd`) are treated as prose like Markdown: merges keep their paragraph order, `rename` with `everywhere` updates them, and the docs list `.qmd`. Entity merging by heading follows once weave depends on the sem-core release that registers `.qmd` (Ataraxy-Labs/sem#542). Thanks @athyfr for the request (#216).
+
 ## [0.7.1] - 2026-11-02
 
 ### Fixed

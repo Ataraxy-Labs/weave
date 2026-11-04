@@ -1323,7 +1323,7 @@ fn is_text_doc(path: &str) -> bool {
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     matches!(
         ext.as_str(),
-        "md" | "mdx" | "markdown" | "rst" | "txt" | "adoc"
+        "md" | "mdx" | "qmd" | "markdown" | "rst" | "txt" | "adoc"
     )
 }
 

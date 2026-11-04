@@ -575,7 +575,7 @@ pub fn structured_data(
 fn is_prose(path: &str) -> bool {
     matches!(
         extension(&path.to_ascii_lowercase()),
-        "md" | "markdown" | "mdx" | "rst" | "txt" | "adoc" | "asciidoc" | "org" | "tex"
+        "md" | "markdown" | "mdx" | "qmd" | "rst" | "txt" | "adoc" | "asciidoc" | "org" | "tex"
     )
 }
 
