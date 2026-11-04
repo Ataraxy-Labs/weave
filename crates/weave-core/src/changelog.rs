@@ -50,7 +50,7 @@ pub(crate) fn is_changelog(path: &str) -> bool {
         Some((s, e)) => (s, e),
         None => (name, ""),
     };
-    let prose = matches!(ext, "" | "md" | "markdown" | "rst" | "txt");
+    let prose = matches!(ext, "" | "md" | "markdown" | "qmd" | "rst" | "txt");
     let named = ["changelog", "changes", "history", "news", "release"]
         .iter()
         .any(|p| stem.starts_with(p));
