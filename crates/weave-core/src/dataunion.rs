@@ -737,3 +737,6 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod yaml_suite;

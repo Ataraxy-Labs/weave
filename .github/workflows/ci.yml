@@ -15,6 +15,25 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+
+      - name: Check out YAML fixtures
+        if: runner.os == 'Linux'
+        uses: actions/checkout@v7
+        with:
+          repository: yaml/yaml-test-suite
+          ref: 6e6c296ae9c9d2d5c4134b4b64d01b29ac19ff6f # data-2022-01-17
+          path: .local/yaml-test-suite
+          persist-credentials: false
+      - name: Check YAML parsing and merge values
+        if: runner.os == 'Linux'
+        env:
+          YAML_TEST_SUITE: ${{ github.workspace }}/.local/yaml-test-suite
+        shell: bash
+        run: |
+          cargo test --quiet --locked -p weave-core --lib \
+            dataunion::yaml_suite::upstream_yaml_fixtures -- --ignored --exact | tee "$RUNNER_TEMP/yaml-fixtures.log"
+          grep -qx 'running 1 test' "$RUNNER_TEMP/yaml-fixtures.log"
+
       - name: Git identity for tests that commit
         run: |
           git config --global user.name ci
