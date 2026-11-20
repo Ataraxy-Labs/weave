@@ -486,6 +486,14 @@ fn verify_file(
         }
     }
 
+    for detail in weave_core::markdown_yaml::introduced_errors(file, work, ours, theirs) {
+        out.push(Finding {
+            class: "PARSE",
+            detail,
+            suggestion: Some("fix the YAML in this Markdown block".to_string()),
+        });
+    }
+
     // A data file must still load, and state no key at one table path more
     // often than either side does — the merge's own rule
     // ([`weave_core::verify::structured_data`]).
@@ -1566,6 +1574,24 @@ mod tests {
             let findings = verify_file("lock.yaml", None, Some("{}"), None, work);
             assert!(findings.iter().any(|f| f.class == "PARSE"), "{findings:?}");
         }
+    }
+
+    #[test]
+    fn check_reports_a_broken_yaml_fence_in_a_markdown_subject() {
+        let path = "guide.markdown";
+        let valid = tree(&[(path, "~~~yml\na: 1\n---\na: 2\n~~~\n")]);
+        let broken = tree(&[(path, "~~~yml\na: 1\n---\na: 2\na: 3\n~~~\n")]);
+        let result = check(&valid, &valid, &valid, &broken, &[path.to_owned()]);
+        assert!(is_supported(path));
+        assert!(
+            matches!(&result[0].findings[..], [f] if f.class == "PARSE" && f.detail.contains("duplicate key"))
+        );
+        let moved = tree(&[(
+            path,
+            "Example of invalid YAML:\n\n~~~yml\na: 1\n---\na: 2\na: 3\n~~~\n",
+        )]);
+        let result = check(&broken, &moved, &broken, &moved, &[path.to_owned()]);
+        assert!(result[0].findings.is_empty(), "{:?}", result[0].findings);
     }
 
     fn tree(pairs: &[(&str, &str)]) -> Tree {

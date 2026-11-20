@@ -556,6 +556,14 @@ fn verify_data(
     if ours == Some(merged) && ours == theirs {
         return None;
     }
+    if crate::markdown_yaml::supports(file_path) {
+        return crate::markdown_yaml::introduced_errors(file_path, merged, ours, theirs)
+            .next()
+            .map(|detail| Unverified {
+                check: "data",
+                detail,
+            });
+    }
     let merged_keys = crate::datafile::keys(file_path, merged)?;
     compare_data_keys(ours, theirs, &merged_keys, file_path, composition)
 }
