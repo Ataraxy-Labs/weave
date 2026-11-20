@@ -1667,6 +1667,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "oneyaml"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ff6e9f0429e7ba672c23393e9858db9eeaa09bd50e09627d26392260b79dc52"
+dependencies = [
+ "oneyaml-core",
+ "oneyaml-syntax",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "oneyaml-core"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32033f3f469a9ca234efff2014831be57cdbeec9c7a6eaaf4c4a99da6926048f"
+
+[[package]]
+name = "oneyaml-syntax"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77a98f84c10562ad8079585cb170bc9566860fe063baf0a3ce52f03346be8c9e"
+dependencies = [
+ "oneyaml-core",
+]
+
+[[package]]
 name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3651,6 +3678,7 @@ version = "0.7.1"
 dependencies = [
  "criterion",
  "diffy",
+ "oneyaml",
  "pretty_assertions",
  "proptest",
  "sem-core",
