@@ -1667,6 +1667,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "oneyaml"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ff6e9f0429e7ba672c23393e9858db9eeaa09bd50e09627d26392260b79dc52"
+dependencies = [
+ "oneyaml-core",
+ "oneyaml-syntax",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "oneyaml-core"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32033f3f469a9ca234efff2014831be57cdbeec9c7a6eaaf4c4a99da6926048f"
+
+[[package]]
+name = "oneyaml-syntax"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77a98f84c10562ad8079585cb170bc9566860fe063baf0a3ce52f03346be8c9e"
+dependencies = [
+ "oneyaml-core",
+]
+
+[[package]]
 name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1868,6 +1895,17 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags 2.13.1",
+ "memchr",
+ "unicase",
 ]
 
 [[package]]
@@ -3451,6 +3489,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3651,8 +3695,10 @@ version = "0.7.1"
 dependencies = [
  "criterion",
  "diffy",
+ "oneyaml",
  "pretty_assertions",
  "proptest",
+ "pulldown-cmark",
  "sem-core",
  "serde",
  "serde_json",

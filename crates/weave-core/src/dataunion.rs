@@ -254,15 +254,9 @@ fn load(text: &str, f: Format) -> Option<Vec<Value>> {
             let t: toml::Value = toml::from_str(text).ok()?;
             serde_json::to_value(t).ok().map(|v| vec![v])
         }
-        Format::Yaml => {
-            use serde::Deserialize;
-            let mut docs = Vec::new();
-            for d in serde_yaml::Deserializer::from_str(text) {
-                let v = serde_yaml::Value::deserialize(d).ok()?;
-                docs.push(serde_json::to_value(v).ok()?);
-            }
-            Some(docs)
-        }
+        Format::Yaml => crate::datafile::yaml_documents(text)
+            .map(|doc| Value::try_from(doc.ok()?).ok())
+            .collect(),
     }
 }
 
@@ -430,19 +424,26 @@ pub(crate) fn certify(
     let Some(f) = format(path) else {
         return false;
     };
-    let (Some(o), Some(a), Some(b), Some(m)) = (
-        load(base, f),
-        load(ours, f),
-        load(theirs, f),
-        load(merged, f),
-    ) else {
-        return false;
-    };
+    let inputs = [base, ours, theirs, merged];
+    let mut values = [const { None }; 4];
+    let mut source = [0; 4];
+    for (index, text) in inputs.into_iter().enumerate() {
+        if let Some(previous) = inputs[..index].iter().position(|&input| input == text) {
+            source[index] = previous;
+        } else {
+            let Some(parsed) = load(text, f) else {
+                return false;
+            };
+            values[index] = Some(parsed);
+            source[index] = index;
+        }
+    }
+    let [o, a, b, m] = source.map(|index| values[index].as_deref().unwrap());
     if o.len() != a.len() || o.len() != b.len() || o.len() != m.len() {
         return false;
     }
     let requirements = requirements_file(f, path);
-    o.iter().zip(&a).zip(&b).zip(&m).all(|(((o, a), b), m)| {
+    o.iter().zip(a).zip(b).zip(m).all(|(((o, a), b), m)| {
         match merge3(
             Some(o),
             Some(a),
@@ -636,6 +637,37 @@ mod tests {
     }
 
     #[test]
+    fn yaml_quotes_and_boolean_spellings_follow_each_documents_version() {
+        let values = "[true, FALSE, y, N, Yes, NO, ON, off, 'true', 'it''s', 'a\\nb']";
+        let stream = format!("%YAML 1.1\n--- {values}\n...\n--- {values}\n");
+        assert_eq!(
+            load(&stream, Format::Yaml).unwrap(),
+            [
+                serde_json::json!([
+                    true, false, true, false, true, false, true, false, "true", "it's", "a\\nb"
+                ]),
+                serde_json::json!([
+                    true, false, "y", "N", "Yes", "NO", "ON", "off", "true", "it's", "a\\nb"
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn yaml_merge_checks_preserve_key_types_and_scalar_values() {
+        for (original, changed) in [
+            ("{1: first, '1': second}", "{'1': second}"),
+            ("{value: .inf}", "{value: null}"),
+            ("{value: !Ref job}", "{value: {Ref: job}}"),
+        ] {
+            assert!(
+                !certify(original, original, original, changed, "a.yml", &undeclared),
+                "{original}"
+            );
+        }
+    }
+
+    #[test]
     fn the_certificate_refuses_one_key_with_two_values() {
         let base = "[t]\na = 1\n";
         assert!(certify(
@@ -705,3 +737,6 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod yaml_suite;

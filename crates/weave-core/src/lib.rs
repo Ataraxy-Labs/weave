@@ -17,6 +17,7 @@ pub mod git;
 pub mod host;
 pub(crate) mod insertion;
 pub mod layout;
+pub mod markdown_yaml;
 pub mod merge;
 pub(crate) mod parsed;
 pub mod region;

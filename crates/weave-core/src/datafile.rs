@@ -9,24 +9,28 @@
 //!
 //! [`keys`] answers, per file, either "this does not parse" or the most times
 //! any one table/object states each key. TOML and YAML parsers already reject
-//! a key stated twice, so for them a parse is the whole answer; JSON parsers
+//! a key stated twice in a mapping; JSON parsers
 //! accept one (the last wins), so JSON is walked here and its keys counted.
 
 use std::collections::HashMap;
 
 /// `"<table path>\u{1f}<key>"` -> the most times one table at that path
-/// states the key. Array elements share the path `[]`, so inserting an
-/// element does not move every key after it.
+/// states the key. JSON array elements share the path `[]`. YAML root
+/// sequence IDs have a bare name and a ranked entry for each document
+/// containing duplicates, ordered by decreasing multiplicity.
 pub type KeyTally = HashMap<String, usize>;
 
 /// The data format of `path`, if it is one weave reads keys out of.
 fn format(path: &str) -> Option<&'static str> {
-    let ext = path.rsplit('.').next()?.to_ascii_lowercase();
-    match ext.as_str() {
-        "json" | "jsonc" => Some("JSON"),
-        "toml" => Some("TOML"),
-        "yaml" | "yml" => Some("YAML"),
-        _ => None,
+    let ext = path.rsplit('.').next()?;
+    if ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("jsonc") {
+        Some("JSON")
+    } else if ext.eq_ignore_ascii_case("toml") {
+        Some("TOML")
+    } else if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") {
+        Some("YAML")
+    } else {
+        None
     }
 }
 
@@ -48,14 +52,109 @@ pub fn format_name(path: &str) -> Option<&'static str> {
     format(path)
 }
 
-/// Every document in the stream must load; a key stated twice in one mapping
-/// is a load error.
-fn yaml_keys(text: &str) -> Result<KeyTally, String> {
+pub(crate) fn yaml_documents(
+    text: &str,
+) -> impl Iterator<Item = Result<oneyaml::Value, oneyaml::Error>> + '_ {
     use serde::Deserialize;
-    for doc in serde_yaml::Deserializer::from_str(text) {
-        serde_yaml::Value::deserialize(doc).map_err(|e| e.to_string())?;
+    let settings = oneyaml::Settings::new().honor_version_directive(true);
+    oneyaml::Deserializer::from_str_with(text, &settings).map(oneyaml::Value::deserialize)
+}
+
+/// Mapping duplicates are load errors. Count sequence duplicates per document
+/// so an inherited duplicate cannot mask one added in another document.
+fn yaml_keys(text: &str) -> Result<KeyTally, String> {
+    use oneyaml::Value;
+
+    let mut keys = KeyTally::new();
+    let mut duplicates = HashMap::<String, Vec<usize>>::new();
+    let mut local = HashMap::new();
+    for doc in yaml_documents(text) {
+        let doc = doc.map_err(|e| e.to_string())?;
+        let root = doc.untag_ref();
+        let mut pending = vec![root];
+        while let Some(value) = pending.pop() {
+            match value.untag_ref() {
+                Value::Mapping(mapping) => {
+                    for (key, child) in mapping {
+                        if let Value::String(name) = key {
+                            keys.insert(format!("\u{1f}{name}"), 1);
+                        } else {
+                            let name = typed_yaml_key(key).map_err(|e| e.to_string())?;
+                            keys.insert(format!("typed\u{1f}{name}"), 1);
+                        }
+                        pending.push(child);
+                    }
+                }
+                Value::Sequence(items) => pending.extend(items),
+                _ => {}
+            }
+        }
+        let Some(items) = root.as_sequence() else {
+            continue;
+        };
+        for item in items {
+            // Other fields (e.g. Kubernetes `kind`) can be shared by distinct items.
+            let Some(id @ (Value::String(_) | Value::Number(_) | Value::Bool(_))) =
+                item.untag_ref().get("id")
+            else {
+                continue;
+            };
+            let label = oneyaml::to_string(id).map_err(|e| e.to_string())?;
+            *local.entry(label).or_insert(0) += 1;
+        }
+        for (id, count) in local.drain() {
+            if count > 1 {
+                duplicates.entry(id.clone()).or_default().push(count);
+            }
+            keys.insert(id, 1);
+        }
     }
-    Ok(KeyTally::new())
+    // Ranks survive reordering or adding documents that have no duplicates.
+    for (id, mut counts) in duplicates {
+        counts.sort_unstable_by(|a, b| b.cmp(a));
+        for (index, count) in counts.into_iter().enumerate() {
+            keys.insert(format!("{}\u{1f}{id}", index + 1), count);
+        }
+    }
+    Ok(keys)
+}
+
+fn typed_yaml_key(key: &oneyaml::Value) -> Result<String, oneyaml::Error> {
+    use oneyaml::{TaggedValue, Value};
+
+    fn ordered(value: &Value) -> Result<Value, oneyaml::Error> {
+        Ok(match value {
+            Value::Mapping(mapping) => {
+                let mut entries = Vec::with_capacity(mapping.len());
+                for (key, value) in mapping {
+                    let key = ordered(key)?;
+                    entries.push((oneyaml::to_string(&key)?, key, ordered(value)?));
+                }
+                entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                Value::Mapping(
+                    entries
+                        .into_iter()
+                        .map(|(_, key, value)| (key, value))
+                        .collect(),
+                )
+            }
+            Value::Sequence(items) => {
+                Value::Sequence(items.iter().map(ordered).collect::<Result<_, _>>()?)
+            }
+            Value::Tagged(tagged) => Value::Tagged(Box::new(TaggedValue {
+                tag: tagged.tag.clone(),
+                value: ordered(&tagged.value)?,
+            })),
+            _ => value.clone(),
+        })
+    }
+
+    // Map order is immaterial to key equality, including inside a sequence key.
+    if matches!(key.untag_ref(), Value::Mapping(_) | Value::Sequence(_)) {
+        oneyaml::to_string(&ordered(key)?)
+    } else {
+        oneyaml::to_string(key)
+    }
 }
 
 /// JSON as a person writes it for a tool: comments and trailing commas are
@@ -276,6 +375,12 @@ mod tests {
             ),
             ("c.yaml", "a: 1\na: 2\n"),
             ("c.yaml", "a: [1, 2\n"),
+            (
+                "c.yaml",
+                "---\nok: true\n---\nkey: \"value\"# missing space\n",
+            ),
+            ("c.yaml", "flow: [a,\nb,\nc]"),
+            ("c.yaml", "outer: {kind: Pod, \"\\u006bind\": Service}"),
         ] {
             assert!(
                 keys(path, text).expect("data").is_err(),
@@ -295,6 +400,7 @@ mod tests {
             ),
             ("c.yml", "---\na: 1\n---\na: 2\n"),
             ("c.yaml", "ref: !Ref Thing\n"),
+            ("c.yml", "---\n{\"multi\n  line\": a}\n---\n{multi line: b}"),
         ] {
             assert!(
                 keys(path, text).expect("data").is_ok(),

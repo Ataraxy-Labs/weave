@@ -486,20 +486,44 @@ fn verify_file(
         }
     }
 
+    for detail in weave_core::markdown_yaml::introduced_errors(file, work, ours, theirs) {
+        out.push(Finding {
+            class: "PARSE",
+            detail,
+            suggestion: Some("fix the YAML in this Markdown block".to_string()),
+        });
+    }
+
     // A data file must still load, and state no key at one table path more
     // often than either side does — the merge's own rule
     // ([`weave_core::verify::structured_data`]).
-    if let Some(u) = weave_core::verify::structured_data(ours, theirs, work, file) {
-        let loads = weave_core::datafile::keys(file, work).is_some_and(|r| r.is_ok());
-        out.push(Finding {
-            class: if loads { "DUP" } else { "PARSE" },
-            detail: u.detail,
-            suggestion: Some(if loads {
-                "keep one entry for the key, with the settings both sides need".to_string()
-            } else {
-                "make the file load again; a side's version of it does".to_string()
-            }),
-        });
+    if let Some(keys) = weave_core::datafile::keys(file, work) {
+        let format = weave_core::datafile::format_name(file);
+        if let Some(u) = weave_core::verify::compare_data_keys(ours, theirs, &keys, file, false) {
+            let loads = keys.is_ok();
+            out.push(Finding {
+                class: if loads { "DUP" } else { "PARSE" },
+                detail: u.detail,
+                suggestion: Some(if u.check == "bindings" {
+                    "review the entries with this ID in the same YAML sequence".to_string()
+                } else if loads {
+                    "keep one entry for the key, with the settings both sides need".to_string()
+                } else {
+                    "make the file load again; a side's version of it does".to_string()
+                }),
+            });
+        } else if let (Some("YAML"), Err(error)) = (format, keys) {
+            if error.starts_with("duplicate key `") {
+                out.push(Finding {
+                    class: "DUP",
+                    detail: error,
+                    suggestion: Some("keep one entry for this key in its mapping".to_string()),
+                });
+            }
+        }
+        if format == Some("YAML") {
+            return out;
+        }
     }
 
     // A key stated twice in one switch / match / literal where neither side
@@ -532,27 +556,12 @@ fn verify_file(
     // the authors' code (an overload the parser cannot tell apart, an
     // interface and its implementation), not something the merge made. Only
     // a copy the resolution ADDED over every side's count is a finding.
-    //
-    // A YAML stream is several documents, and each one is its own namespace
-    // (a pnpm lockfile states `importers` once per document, #224), so there
-    // a key is counted within its document.
-    let yaml = weave_core::datafile::format_name(file) == Some("YAML");
-    let defs = |text: Option<&str>| -> BTreeMap<(DefinitionKey, usize), usize> {
+    let defs = |text: Option<&str>| -> BTreeMap<DefinitionKey, usize> {
         let mut m = BTreeMap::new();
         let Some(text) = text else { return m };
-        let starts: Vec<usize> = if yaml {
-            text.lines()
-                .enumerate()
-                .filter(|(_, l)| l.starts_with("---"))
-                .map(|(i, _)| i + 1)
-                .collect()
-        } else {
-            Vec::new()
-        };
         for e in entities_of(file, text) {
             if let Some(key) = definition_key(file, &e) {
-                let doc = starts.iter().filter(|&&s| s <= e.start_line).count();
-                *m.entry((key, doc)).or_insert(0) += 1;
+                *m.entry(key).or_insert(0) += 1;
             }
         }
         m
@@ -560,9 +569,9 @@ fn verify_file(
     let (db, d_o, dt) = (defs(base), defs(ours), defs(theirs));
     let mut over: BTreeMap<String, usize> = BTreeMap::new();
     for (key, n) in defs(Some(work)) {
-        let get = |m: &BTreeMap<(DefinitionKey, usize), usize>| m.get(&key).copied().unwrap_or(0);
+        let get = |m: &BTreeMap<DefinitionKey, usize>| m.get(&key).copied().unwrap_or(0);
         if n > duplication_ceiling(get(&db), get(&d_o), get(&dt), true) {
-            let slot = over.entry(key.0 .1.clone()).or_insert(0);
+            let slot = over.entry(key.1).or_insert(0);
             *slot = (*slot).max(n);
         }
     }
@@ -1526,6 +1535,65 @@ impl Successors<'_> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn yaml_definitions_are_scoped_to_each_document() {
+        for (side, work) in [
+            (
+                "a: 1\n",
+                "\u{feff}%YAML 1.2\r\n---\r\na: 1\r\n...\r\n--- {a: 2}\r\n",
+            ),
+            ("key<T>: 1\n", "key<T>: 1\nkey<U>: 2\n"),
+        ] {
+            let findings = verify_file("lock.yaml", Some(side), Some(side), Some(side), work);
+            assert!(findings.is_empty(), "{work:?}: {findings:?}");
+        }
+        for work in [
+            "---\nlockfileVersion: '9.0'\nimporters: {}\n--- # next\nlockfileVersion: '9.0'\nimporters: {}\n",
+            "a: &v {id: 1}\nb: *v\n---\na: &v {id: 2}\nb: *v\n",
+            "a:\n  nested: {id: 1}\nb:\n  nested: {id: 2}\n",
+            "- id: same\n  value: a\n- id: same\n  value: b\n---\n- id: same\n",
+            "msg: |\n  ---\n  ...\n---suffix: true\n'---': data\n",
+            "'a:b': 1\n'a:c': 2\n",
+            "---\n...\n--- [true, null]\n--- scalar\n---\n",
+        ] {
+            for path in ["lock.yaml", "lock.yml"] {
+                let findings = verify_file(path, Some(work), Some(work), Some("{}"), work);
+                assert!(findings.is_empty(), "{work:?}: {findings:?}");
+            }
+        }
+        for work in [
+            "name: |\n  ---\n---suffix: value\nname: duplicate\n---\nname: separate\n",
+            "--- {id: 1}\n---\nnested: [{id: 2, 'id': 3}]\n",
+            r#"data: {"app": one, "\u0061pp": two}"#,
+        ] {
+            let findings = verify_file("lock.yaml", Some(work), Some(work), Some(work), work);
+            assert!(
+                matches!(&findings[..], [f] if f.class == "DUP"),
+                "{findings:?}"
+            );
+            let findings = verify_file("lock.yaml", None, Some("{}"), None, work);
+            assert!(findings.iter().any(|f| f.class == "PARSE"), "{findings:?}");
+        }
+    }
+
+    #[test]
+    fn check_reports_a_broken_yaml_fence_in_a_markdown_subject() {
+        let path = "guide.markdown";
+        let valid = tree(&[(path, "~~~yml\na: 1\n---\na: 2\n~~~\n")]);
+        let broken = tree(&[(path, "~~~yml\na: 1\n---\na: 2\na: 3\n~~~\n")]);
+        let result = check(&valid, &valid, &valid, &broken, &[path.to_owned()]);
+        assert!(is_supported(path));
+        assert!(
+            matches!(&result[0].findings[..], [f] if f.class == "PARSE" && f.detail.contains("duplicate key"))
+        );
+        let moved = tree(&[(
+            path,
+            "Example of invalid YAML:\n\n~~~yml\na: 1\n---\na: 2\na: 3\n~~~\n",
+        )]);
+        let result = check(&broken, &moved, &broken, &moved, &[path.to_owned()]);
+        assert!(result[0].findings.is_empty(), "{:?}", result[0].findings);
+    }
+
     fn tree(pairs: &[(&str, &str)]) -> Tree {
         pairs
             .iter()
@@ -1758,7 +1826,10 @@ mod tests {
         // an interface method with its implementation, untouched by either
         // side, are the authors' code and never a finding.
         let base = "interface Hud {\n    fun computeValue(): Int\n}\n\nclass Impl : Hud {\n    override fun computeValue(): Int = 1\n}\n\n@Composable\nfun IconButton(\n    icon: String,\n    size: Int,\n    enabled: Boolean,\n    onClick: () -> Unit,\n) {\n    println(icon)\n}\n\n@Composable\nfun IconButton(\n    icon: String,\n    onClick: () -> Unit,\n) {\n    println(icon)\n}\n";
-        let ours = base.replace("println(icon)\n}\n\n@Composable", "println(\"ours\")\n}\n\n@Composable");
+        let ours = base.replace(
+            "println(icon)\n}\n\n@Composable",
+            "println(\"ours\")\n}\n\n@Composable",
+        );
         let theirs = format!("{base}\nfun added() = 2\n");
         let work = format!("{ours}\nfun added() = 2\n");
         let v = check(
@@ -1768,7 +1839,11 @@ mod tests {
             &tree(&[("Hud.kt", &work)]),
             &["Hud.kt".to_string()],
         );
-        assert!(!v[0].findings.iter().any(|f| f.class == "DUP"), "{:#?}", v[0]);
+        assert!(
+            !v[0].findings.iter().any(|f| f.class == "DUP"),
+            "{:#?}",
+            v[0]
+        );
 
         // A definition the resolution itself doubled is still caught.
         let doubled = format!("{work}\nfun added() = 2\n");
@@ -1779,7 +1854,11 @@ mod tests {
             &tree(&[("Hud.kt", &doubled)]),
             &["Hud.kt".to_string()],
         );
-        assert!(v[0].findings.iter().any(|f| f.class == "DUP"), "{:#?}", v[0]);
+        assert!(
+            v[0].findings.iter().any(|f| f.class == "DUP"),
+            "{:#?}",
+            v[0]
+        );
     }
 
     #[test]
@@ -1795,7 +1874,11 @@ mod tests {
             &tree(&[("lock.yaml", &ours)]),
             &["lock.yaml".to_string()],
         );
-        assert!(!v[0].findings.iter().any(|f| f.class == "DUP"), "{:#?}", v[0]);
+        assert!(
+            !v[0].findings.iter().any(|f| f.class == "DUP"),
+            "{:#?}",
+            v[0]
+        );
     }
 
     #[test]

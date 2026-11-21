@@ -525,7 +525,7 @@ pub fn verify(
             let kept = crate::binding::imports_kept_for_new_uses(&b, &o, &t);
             lines(&b, &o, &t, merged, &kept)
         })
-        .or_else(|| structured_data(Some(ours), Some(theirs), merged, file_path))
+        .or_else(|| verify_data(Some(ours), Some(theirs), merged, file_path, true))
         .or_else(|| prose(base, ours, theirs, file_path))
         .or_else(|| declarations(base, ours, theirs, merged, file_path, registry))
 }
@@ -543,14 +543,54 @@ pub fn structured_data(
     merged: &str,
     file_path: &str,
 ) -> Option<Unverified> {
+    verify_data(ours, theirs, merged, file_path, false)
+}
+
+fn verify_data(
+    ours: Option<&str>,
+    theirs: Option<&str>,
+    merged: &str,
+    file_path: &str,
+    composition: bool,
+) -> Option<Unverified> {
+    if ours == Some(merged) && ours == theirs {
+        return None;
+    }
+    if crate::markdown_yaml::supports(file_path) {
+        return crate::markdown_yaml::introduced_errors(file_path, merged, ours, theirs)
+            .next()
+            .map(|detail| Unverified {
+                check: "data",
+                detail,
+            });
+    }
+    let merged_keys = crate::datafile::keys(file_path, merged)?;
+    compare_data_keys(ours, theirs, &merged_keys, file_path, composition)
+}
+
+/// Compare parsed keys with both sides. Automatic merges may only reuse names from a side.
+pub fn compare_data_keys(
+    ours: Option<&str>,
+    theirs: Option<&str>,
+    merged: &Result<crate::datafile::KeyTally, String>,
+    file_path: &str,
+    composition: bool,
+) -> Option<Unverified> {
     let format = crate::datafile::format_name(file_path)?;
+    let composition = composition && format == "YAML";
+    // Valid YAML and TOML mappings cannot contain duplicate keys.
+    if !composition
+        && merged
+            .as_ref()
+            .is_ok_and(|keys| keys.values().all(|&n| n <= 1))
+    {
+        return None;
+    }
     let side = |text: Option<&str>| text.and_then(|t| crate::datafile::keys(file_path, t));
-    let (o, t) = (side(ours), side(theirs));
-    let m = crate::datafile::keys(file_path, merged)?;
-    let parses = |r: &Option<Result<_, _>>| matches!(r, Some(Ok(_)));
-    let m = match m {
+    let parses = |text| matches!(side(text), Some(Ok(_)));
+    let m = match merged {
         Ok(m) => m,
-        Err(e) if parses(&o) || parses(&t) => {
+        Err(e) if parses(ours) || (ours != theirs && parses(theirs)) => {
             return Some(Unverified {
                 check: "data",
                 detail: format!("the merged {format} does not load ({e}), and a side's does"),
@@ -558,18 +598,54 @@ pub fn structured_data(
         }
         Err(_) => return None,
     };
+    let o = side(ours);
+    let theirs_keys;
+    let t = if ours == theirs {
+        &o
+    } else {
+        theirs_keys = side(theirs);
+        &theirs_keys
+    };
+    // A key can move between mappings or documents during a merge.
+    if let (true, Some(Ok(ours)), Some(Ok(theirs))) = (composition, &o, t) {
+        let unknown = m
+            .keys()
+            .filter(|key| !ours.contains_key(*key) && !theirs.contains_key(*key))
+            .filter_map(|entry| match entry.split_once('\u{1f}') {
+                Some(("", key)) => Some(("key", key)),
+                Some(("typed", key)) => Some(("typed key", key)),
+                Some(_) => None,
+                None => Some(("sequence item ID", entry.as_str())),
+            })
+            .min();
+        if let Some((kind, name)) = unknown {
+            return Some(Unverified {
+                check: "bindings",
+                detail: format!("{kind} `{}` occurs in neither merge side", name.trim_end()),
+            });
+        }
+    }
     let count = |r: &Option<Result<crate::datafile::KeyTally, String>>, k: &str| match r {
         Some(Ok(tally)) => tally.get(k).copied().unwrap_or(0),
         _ => 0,
     };
-    let mut over: Vec<(&String, usize, usize, usize)> = m
+    let (k, n, o, t) = m
         .iter()
         .filter(|(_, n)| **n > 1)
-        .map(|(k, n)| (k, *n, count(&o, k), count(&t, k)))
+        .map(|(k, n)| (k, *n, count(&o, k), count(t, k)))
         .filter(|(_, n, o, t)| *n > (*o).max(*t).max(1))
-        .collect();
-    over.sort();
-    over.first().map(|(k, n, o, t)| Unverified {
+        .min()?;
+    if format == "YAML" {
+        let (documents, id) = k.split_once('\u{1f}').unwrap_or(("1", k));
+        return Some(Unverified {
+            check: "bindings",
+            detail: format!(
+                "sequence item ID `{}` occurs at least {n}x in {documents} document(s), more than either side",
+                id.trim_end()
+            ),
+        });
+    }
+    Some(Unverified {
         check: "data",
         detail: format!(
             "key `{}` is stated {n}x in one table; ours states it {o}x, theirs {t}x",
@@ -984,6 +1060,10 @@ fn declarations(
     file_path: &str,
     registry: &ParserRegistry,
 ) -> Option<Unverified> {
+    // The data verifier has already checked keys in their native scopes.
+    if crate::datafile::format_name(file_path) == Some("YAML") {
+        return None;
+    }
     // One parse per version gives both the entities and whether the grammar
     // had to recover from an error. `None` = no tree (not a tree-sitter
     // language), which says nothing either way.
@@ -1491,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn a_yaml_sequence_item_is_named_by_its_first_line() {
+    fn yaml_sequence_items_with_the_same_id_conflict() {
         // Every item of a list of hooks has the key `id`: distinct items are
         // not one name bound three times…
         let base = "- id: alpha\n  entry: alpha\n";
@@ -1506,6 +1586,79 @@ mod tests {
             "- id: alpha\n  entry: alpha\n- id: beta\n  entry: beta\n- id: beta\n  entry: other\n";
         assert_eq!(
             check(base, ours, theirs, twice, "hooks.yaml"),
+            Some("bindings")
+        );
+    }
+
+    #[test]
+    fn inherited_sequence_duplicates_do_not_hide_new_duplicates() {
+        let doubled = "- {id: x, name: a}\n- {id: x, name: b}\n";
+        let single = "- {id: x, name: c}\n";
+        let side = format!("---\n{doubled}---\n{single}");
+        let new_duplicate = format!("{side}- {{id: x, name: d}}\n");
+        let reordered = format!("---\n{single}---\n{doubled}");
+        let verify = |merged: &str| structured_data(Some(&side), Some(&side), merged, "a.yaml");
+        assert!(verify(&new_duplicate).is_some());
+        assert!(verify(&reordered).is_none());
+    }
+
+    #[test]
+    fn a_composition_cannot_invent_a_data_key() {
+        for (path, side, merged) in [
+            ("p.yaml", "a: 1\n", "b: 2\n"),
+            ("p.yaml", "spec: [{old: 1}]\n", "spec: [{new: 1}]\n"),
+            ("p.yaml", "- id: old\n", "- id: new\n"),
+        ] {
+            assert!(structured_data(Some(side), Some(side), merged, path).is_none());
+            assert_eq!(
+                check("", side, side, merged, path),
+                Some("bindings"),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn yaml_key_verification_preserves_types_and_tags() {
+        for (side, merged, expected) in [
+            ("1: x", "2: x", Some("bindings")),
+            ("true: x", "false: x", Some("bindings")),
+            ("'1': x", "1: x", Some("bindings")),
+            ("!old name: x", "!new name: x", Some("bindings")),
+            ("? [a, b]\n: x", "? [a, c]\n: x", Some("bindings")),
+            ("? {a: 1, b: 2}\n: x", "? {b: 2, a: 1}\n: x", None),
+            ("0x1: x", "1: x", None),
+        ] {
+            assert_eq!(
+                check("", side, side, merged, "a.yaml"),
+                expected,
+                "{merged}"
+            );
+        }
+    }
+
+    #[test]
+    fn independent_documents_can_gain_the_same_key_or_sequence_item() {
+        for (first, second) in [("id: 1", "id: 2"), ("- id: shared", "- id: shared")] {
+            let base = "---\n---\n";
+            let ours = format!("---\n{first}\n---\n");
+            let theirs = format!("---\n---\n{second}\n");
+            let merged = format!("---\n{first}\n---\n{second}\n");
+            assert_eq!(check(base, &ours, &theirs, &merged, "a.yaml"), None);
+        }
+    }
+
+    #[test]
+    fn shared_sequence_fields_do_not_identify_yaml_items() {
+        let ours = "- {kind: job, id: a}\n";
+        let theirs = "- {kind: job, id: b}\n";
+        assert_eq!(
+            check("[]\n", ours, theirs, &format!("{ours}{theirs}"), "jobs.yml"),
+            None
+        );
+        let twice = "!jobs\n- {kind: job, id: a}\n- {kind: task, id: a}\n";
+        assert_eq!(
+            check("[]\n", ours, "- {kind: task, id: a}\n", twice, "jobs.yml"),
             Some("bindings")
         );
     }
