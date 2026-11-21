@@ -532,11 +532,27 @@ fn verify_file(
     // the authors' code (an overload the parser cannot tell apart, an
     // interface and its implementation), not something the merge made. Only
     // a copy the resolution ADDED over every side's count is a finding.
-    let defs = |text: Option<&str>| -> BTreeMap<DefinitionKey, usize> {
+    //
+    // A YAML stream is several documents, and each one is its own namespace
+    // (a pnpm lockfile states `importers` once per document, #224), so there
+    // a key is counted within its document.
+    let yaml = weave_core::datafile::format_name(file) == Some("YAML");
+    let defs = |text: Option<&str>| -> BTreeMap<(DefinitionKey, usize), usize> {
         let mut m = BTreeMap::new();
-        for e in text.map(|t| entities_of(file, t)).unwrap_or_default() {
+        let Some(text) = text else { return m };
+        let starts: Vec<usize> = if yaml {
+            text.lines()
+                .enumerate()
+                .filter(|(_, l)| l.starts_with("---"))
+                .map(|(i, _)| i + 1)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for e in entities_of(file, text) {
             if let Some(key) = definition_key(file, &e) {
-                *m.entry(key).or_insert(0) += 1;
+                let doc = starts.iter().filter(|&&s| s <= e.start_line).count();
+                *m.entry((key, doc)).or_insert(0) += 1;
             }
         }
         m
@@ -544,9 +560,9 @@ fn verify_file(
     let (db, d_o, dt) = (defs(base), defs(ours), defs(theirs));
     let mut over: BTreeMap<String, usize> = BTreeMap::new();
     for (key, n) in defs(Some(work)) {
-        let get = |m: &BTreeMap<DefinitionKey, usize>| m.get(&key).copied().unwrap_or(0);
+        let get = |m: &BTreeMap<(DefinitionKey, usize), usize>| m.get(&key).copied().unwrap_or(0);
         if n > duplication_ceiling(get(&db), get(&d_o), get(&dt), true) {
-            let slot = over.entry(key.1.clone()).or_insert(0);
+            let slot = over.entry(key.0 .1.clone()).or_insert(0);
             *slot = (*slot).max(n);
         }
     }
@@ -1764,6 +1780,22 @@ mod tests {
             &["Hud.kt".to_string()],
         );
         assert!(v[0].findings.iter().any(|f| f.class == "DUP"), "{:#?}", v[0]);
+    }
+
+    #[test]
+    fn yaml_keys_repeat_once_per_document() {
+        // #224: a pnpm lockfile states its keys once per document; a merge
+        // that adds a document is not a duplicate.
+        let base = "---\nlockfileVersion: '9.0'\nimporters:\n  .: {}\n";
+        let ours = format!("{base}---\nlockfileVersion: '9.0'\nimporters:\n  .:\n    a: 1\n");
+        let v = check(
+            &tree(&[("lock.yaml", base)]),
+            &tree(&[("lock.yaml", &ours)]),
+            &tree(&[("lock.yaml", base)]),
+            &tree(&[("lock.yaml", &ours)]),
+            &["lock.yaml".to_string()],
+        );
+        assert!(!v[0].findings.iter().any(|f| f.class == "DUP"), "{:#?}", v[0]);
     }
 
     #[test]
