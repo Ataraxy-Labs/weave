@@ -526,23 +526,37 @@ fn verify_file(
     // file is a language-level bug, not a stylistic repeat, and the second one
     // silently wins. Which is why the *identity* has to be the language's and
     // not the name string's — see [`definition_key`].
-    let mut seen: BTreeMap<DefinitionKey, (String, usize)> = BTreeMap::new();
-    for e in entities_of(file, work) {
-        let Some(key) = definition_key(file, &e) else {
-            continue;
-        };
-        let slot = seen.entry(key).or_insert_with(|| (e.name.clone(), 0));
-        slot.1 += 1;
+    //
+    // Like lines, a definition is judged against the three stages, never on
+    // its own: a key the merge states no more often than a side states it is
+    // the authors' code (an overload the parser cannot tell apart, an
+    // interface and its implementation), not something the merge made. Only
+    // a copy the resolution ADDED over every side's count is a finding.
+    let defs = |text: Option<&str>| -> BTreeMap<DefinitionKey, usize> {
+        let mut m = BTreeMap::new();
+        for e in text.map(|t| entities_of(file, t)).unwrap_or_default() {
+            if let Some(key) = definition_key(file, &e) {
+                *m.entry(key).or_insert(0) += 1;
+            }
+        }
+        m
+    };
+    let (db, d_o, dt) = (defs(base), defs(ours), defs(theirs));
+    let mut over: BTreeMap<String, usize> = BTreeMap::new();
+    for (key, n) in defs(Some(work)) {
+        let get = |m: &BTreeMap<DefinitionKey, usize>| m.get(&key).copied().unwrap_or(0);
+        if n > duplication_ceiling(get(&db), get(&d_o), get(&dt), true) {
+            let slot = over.entry(key.1.clone()).or_insert(0);
+            *slot = (*slot).max(n);
+        }
     }
-    let dup_defs: Vec<&(String, usize)> = seen.values().filter(|(_, n)| *n > 1).collect();
-    if !dup_defs.is_empty() {
+    if !over.is_empty() {
         out.push(Finding {
             class: "DUP",
             detail: format!(
-                "{} name(s) are defined more than once: {}",
-                dup_defs.len(),
-                dup_defs
-                    .iter()
+                "{} name(s) are defined more times than any side defines them: {}",
+                over.len(),
+                over.iter()
                     .take(4)
                     .map(|(n, c)| format!("`{n}` ({c}x)"))
                     .collect::<Vec<_>>()
@@ -1720,6 +1734,36 @@ mod tests {
             "{:#?}",
             v[0]
         );
+    }
+
+    #[test]
+    fn kotlin_overloads_both_sides_already_had_are_not_duplicates() {
+        // #228: overloads (one with a long, one-per-line parameter list) and
+        // an interface method with its implementation, untouched by either
+        // side, are the authors' code and never a finding.
+        let base = "interface Hud {\n    fun computeValue(): Int\n}\n\nclass Impl : Hud {\n    override fun computeValue(): Int = 1\n}\n\n@Composable\nfun IconButton(\n    icon: String,\n    size: Int,\n    enabled: Boolean,\n    onClick: () -> Unit,\n) {\n    println(icon)\n}\n\n@Composable\nfun IconButton(\n    icon: String,\n    onClick: () -> Unit,\n) {\n    println(icon)\n}\n";
+        let ours = base.replace("println(icon)\n}\n\n@Composable", "println(\"ours\")\n}\n\n@Composable");
+        let theirs = format!("{base}\nfun added() = 2\n");
+        let work = format!("{ours}\nfun added() = 2\n");
+        let v = check(
+            &tree(&[("Hud.kt", base)]),
+            &tree(&[("Hud.kt", &ours)]),
+            &tree(&[("Hud.kt", &theirs)]),
+            &tree(&[("Hud.kt", &work)]),
+            &["Hud.kt".to_string()],
+        );
+        assert!(!v[0].findings.iter().any(|f| f.class == "DUP"), "{:#?}", v[0]);
+
+        // A definition the resolution itself doubled is still caught.
+        let doubled = format!("{work}\nfun added() = 2\n");
+        let v = check(
+            &tree(&[("Hud.kt", base)]),
+            &tree(&[("Hud.kt", &ours)]),
+            &tree(&[("Hud.kt", &theirs)]),
+            &tree(&[("Hud.kt", &doubled)]),
+            &["Hud.kt".to_string()],
+        );
+        assert!(v[0].findings.iter().any(|f| f.class == "DUP"), "{:#?}", v[0]);
     }
 
     #[test]
