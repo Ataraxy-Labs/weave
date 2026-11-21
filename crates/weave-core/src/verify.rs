@@ -231,9 +231,17 @@ fn without_generics(name: &str) -> &str {
 
 /// The parameter list of an item's header, whitespace removed — `None` when the
 /// item has no parameter list to compare.
-fn parameter_list(content: &str) -> Option<String> {
-    let header: String = content.lines().take(3).collect::<Vec<_>>().join(" ");
-    let open = header.find('(')?;
+fn parameter_list(content: &str, name: &str) -> Option<String> {
+    // Long parameter lists span many lines (Kotlin and Compose code put one
+    // parameter per line), so read until the list closes, not a fixed three
+    // lines; and start at the name, so an annotation's arguments
+    // (`@Suppress("x")`) are not mistaken for the item's parameters.
+    let header: String = content.lines().take(60).collect::<Vec<_>>().join(" ");
+    let from = match header.find(name) {
+        Some(i) if !name.is_empty() => i + name.len(),
+        _ => 0,
+    };
+    let open = from + header[from..].find('(')?;
     let mut depth = 0usize;
     for (i, c) in header[open..].char_indices() {
         match c {
@@ -262,7 +270,7 @@ pub fn definition_key(path: &str, e: &SemanticEntity) -> Option<DefinitionKey> {
         return None;
     }
     let signature = overloads(path)
-        .then(|| parameter_list(&e.content))
+        .then(|| parameter_list(&e.content, without_generics(&e.name)))
         .flatten();
     // An item of a YAML sequence is named by its first key (`- id`), which
     // every item of a list of hooks shares: it binds nothing. Its identity is
